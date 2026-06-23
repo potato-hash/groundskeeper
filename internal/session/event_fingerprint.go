@@ -1,0 +1,49 @@
+package session
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"strconv"
+	"strings"
+)
+
+// EventFingerprint returns a stable identifier for a transition event,
+// keyed on its intrinsic identity rather than the moment of any particular
+// emit. Two attempts to persist the "same" logical transition (same child,
+// same status flip, same observed timestamp) collapse to the same
+// fingerprint and are deduplicated by the inbox writer and the
+// notifier-missed log.
+//
+// Keying on Timestamp.UnixNano() is load-bearing: the daemon stamps the event
+// once when it first observes the flip and that same TransitionNotificationEvent
+// is reused for the producer commit, so the timestamp is stable across
+// re-observations. time.Now() at write-emit time would NOT be stable and would
+// silently break dedup.
+//
+// The fingerprint is a hex SHA-256 so it can safely be embedded in a JSON
+// string field without escaping concerns and is cheap to grep for.
+func EventFingerprint(e TransitionNotificationEvent) string {
+	var b strings.Builder
+	b.Grow(len(e.ChildSessionID) + len(e.FromStatus) + len(e.ToStatus) + 32)
+	b.WriteString(strings.TrimSpace(e.ChildSessionID))
+	b.WriteByte('|')
+	b.WriteString(strings.ToLower(strings.TrimSpace(e.FromStatus)))
+	b.WriteByte('|')
+	b.WriteString(strings.ToLower(strings.TrimSpace(e.ToStatus)))
+	b.WriteByte('|')
+	b.WriteString(strconv.FormatInt(e.Timestamp.UnixNano(), 10))
+	// Issue #1186: finished events carry no from→to transition, so without
+	// the kind + outcome the fingerprint would collapse distinct completions
+	// (and could collide with a same-timestamp transition). Append them so
+	// each completion assertion is its own logical event.
+	if e.Kind != "" {
+		b.WriteByte('|')
+		b.WriteString(e.Kind)
+		b.WriteByte('|')
+		b.WriteString(strings.ToLower(strings.TrimSpace(e.DoneStatus)))
+		b.WriteByte('|')
+		b.WriteString(strings.TrimSpace(e.DoneSummary))
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])
+}

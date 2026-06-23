@@ -1,0 +1,8568 @@
+package session
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"maps"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"al.essio.dev/pkg/shellescape"
+
+	"github.com/potato-hash/groundskeeper/internal/docker"
+	"github.com/potato-hash/groundskeeper/internal/logging"
+	"github.com/potato-hash/groundskeeper/internal/send"
+	"github.com/potato-hash/groundskeeper/internal/statedb"
+	"github.com/potato-hash/groundskeeper/internal/tmux"
+)
+
+var (
+	sessionLog                  = logging.ForComponent(logging.CompSession)
+	mcpLog                      = logging.ForComponent(logging.CompMCP)
+	codexSessionIDPathPatternRE = regexp.MustCompile(`/sessions/\S*/rollout-\S*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl`)
+	uuidPatternRE               = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	geminiPromptRE              = regexp.MustCompile(`^(>|>>>|\$|❯|➜|gemini>|✦)\s*$`)
+	shellPromptRE               = regexp.MustCompile(`^[\s]*(>|>>>|\$|❯|➜|#|%)\s*$`)
+)
+
+// Status represents the current state of a session
+type Status string
+
+const (
+	StatusRunning  Status = "running"
+	StatusWaiting  Status = "waiting"
+	StatusIdle     Status = "idle"
+	StatusError    Status = "error"
+	StatusStarting Status = "starting" // Session is being created (tmux initializing)
+	StatusStopped  Status = "stopped"  // Session intentionally stopped by user (not crashed)
+	// StatusQueued: session is waiting for group capacity. v1.9.1 introduces
+	// group max_concurrent caps; a launch into a group at cap stores the
+	// instance with this status and starts it once a running session ends.
+	StatusQueued Status = "queued"
+)
+
+// Substate is the additive Honest-Status-v2 refinement of a session's coarse
+// status (see tmux.Substate). It explains WHY a session is in its status
+// (model-unavailable, auth-401, idle-at-empty-prompt, running) without altering
+// the byte-stable canonical status. Re-exported here so the CLI/TUI can consume
+// it without importing the tmux package directly.
+type Substate = tmux.Substate
+
+const (
+	SubstateNone              = tmux.SubstateNone
+	SubstateRunning           = tmux.SubstateRunning
+	SubstateIdleAtEmptyPrompt = tmux.SubstateIdleAtEmptyPrompt
+	SubstateModelUnavailable  = tmux.SubstateModelUnavailable
+	SubstateAuth401           = tmux.SubstateAuth401
+)
+
+const wrapperPlaceholder = "{command}"
+
+// PinMode anchors a session to a fixed slot within its group, exempt from the
+// status/recency actionable sort (pin-sessions feature). The empty value is the
+// default so existing rows migrate cleanly through the `pin` column default.
+type PinMode string
+
+const (
+	PinNone   PinMode = ""       // default; not pinned, participates in the normal sort
+	PinTop    PinMode = "top"    // fixed at the top of the group's session list
+	PinBottom PinMode = "bottom" // fixed at the bottom of the group's session list
+)
+
+const (
+	hookFastPathWindow             = 2 * time.Minute
+	codexHookRunningFastPathWindow = 20 * time.Second
+	codexHookWaitingFastPathWindow = 2 * time.Minute
+	codexBootstrapScanInterval     = 2 * time.Second
+	codexRotationScanInterval      = 30 * time.Second
+	opencodeRotationScanInterval   = 15 * time.Second
+	opencodeRotationActivityWindow = 30 * time.Second
+	opencodeStartupTimeSkew        = 5 * time.Second
+	// codexProbeScanInterval rate-limits process-file probing to avoid
+	// repeated /proc and lsof scans on every status tick.
+	codexProbeScanInterval    = 2 * time.Second
+	codexProbeMissingSentinel = "__AGENT_DECK_MISSING_TOOL__"
+)
+
+// Instance represents a single agent/shell session
+type Instance struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	ProjectPath string `json:"project_path"`
+	GroupPath   string `json:"group_path"` // e.g., "projects/devops"
+	Order       int    `json:"order"`      // Position within group (for reorder persistence)
+	// Pin anchors this session to the top or bottom of its group, exempt from
+	// the status/recency sort (pin-sessions feature). PinNone is the default.
+	Pin                PinMode `json:"pin,omitempty"`
+	ParentSessionID    string  `json:"parent_session_id,omitempty"`    // Links to parent session (makes this a sub-session)
+	ParentProjectPath  string  `json:"parent_project_path,omitempty"`  // Parent's project path (for --add-dir access)
+	IsConductor        bool    `json:"is_conductor,omitempty"`         // True if this session is a conductor orchestrator
+	NoTransitionNotify bool    `json:"no_transition_notify,omitempty"` // Suppress transition event dispatch for this session
+
+	// TitleLocked, when true, blocks Claude's session name from syncing into
+	// the agent-deck Title (issue #697). Conductors launch workers with a
+	// semantic title (e.g. "SCRUM-351") that Claude would otherwise overwrite
+	// with its auto-generated summary on the next hook event. Set via
+	// `--title-lock` on add/launch or `session set-title-lock`.
+	TitleLocked bool `json:"title_locked,omitempty"`
+
+	// AutoName, when true, marks Title as a machine-generated adjective-noun
+	// handle (from a --quick / TUI-Q create). The TUI then displays the
+	// session's live Claude task description (tmux pane title) in place of the
+	// handle. Any explicit rename clears this so the user-chosen name is shown
+	// verbatim. See docs/superpowers/specs/2026-06-01-quick-session-claude-name-design.md.
+	// Guarded by i.mu for runtime reads/writes; use GetAutoName/SetAutoName once
+	// an Instance is shared with background workers or the TUI render loop.
+	AutoName bool `json:"auto_name,omitempty"`
+
+	// autoNameDescription is the last non-empty Claude task description (the
+	// cleaned tmux pane title) captured for an AutoName session. It is persisted
+	// via the auto_name_description column so the meaningful name survives an
+	// app reopen even when the session is stopped/idle and no live pane title is
+	// available — render order is live pane title → this saved description →
+	// handle. Guarded by i.mu: written from the background status loop, read
+	// during render. Unexported because persistence flows through InstanceData,
+	// not Instance's own JSON tags.
+	autoNameDescription string
+
+	// Git worktree support
+	WorktreePath     string `json:"worktree_path,omitempty"`      // Path to worktree (if session is in worktree)
+	WorktreeRepoRoot string `json:"worktree_repo_root,omitempty"` // Original repo root
+	WorktreeBranch   string `json:"worktree_branch,omitempty"`    // Branch name in worktree
+	WorktreeType     string `json:"worktree_type,omitempty"`      // "git", "jujutsu", or "" (legacy = git)
+
+	// Account is the per-session named account slot (issue #924). Maps to
+	// `[profiles.<account>.claude].config_dir` in ~/.agent-deck/config.toml
+	// at spawn time and becomes the most-specific level in the
+	// CLAUDE_CONFIG_DIR resolution chain — beating conductor / group / env.
+	// Switching the value requires a session restart (the Option 1 MVP
+	// tradeoff): the in-flight Claude conversation is lost since the new
+	// account's settings.json and history live elsewhere. Empty means
+	// "fall through to conductor/group/env/profile/global/default" so
+	// pre-#924 sessions keep their existing behavior unchanged.
+	Account string `json:"account,omitempty"`
+
+	// Multi-repo support
+	MultiRepoEnabled   bool                `json:"multi_repo_enabled,omitempty"`
+	AdditionalPaths    []string            `json:"additional_paths,omitempty"`    // Paths beyond ProjectPath
+	MultiRepoTempDir   string              `json:"multi_repo_temp_dir,omitempty"` // Temp cwd for multi-repo sessions
+	MultiRepoWorktrees []MultiRepoWorktree `json:"multi_repo_worktrees,omitempty"`
+
+	Command        string    `json:"command"`
+	Wrapper        string    `json:"wrapper,omitempty"` // Optional wrapper command with {command} placeholder
+	Tool           string    `json:"tool"`
+	Status         Status    `json:"status"`
+	CreatedAt      time.Time `json:"created_at"`
+	LastAccessedAt time.Time `json:"last_accessed_at,omitempty"` // When user last attached
+	// ArchivedAt is set when the user archives the session (non-zero = archived).
+	ArchivedAt time.Time `json:"archived_at,omitempty"`
+
+	// LastStartedAt is the wall-clock time of the most recent successful
+	// Start() / StartWithMessage() / Restart() call. Persisted so short-lived
+	// CLI invocations can see it across processes (issue #30): a restart
+	// queued seconds after a start must detect the session is already fresh
+	// and skip the teardown. Zero value means "unknown" (old record or
+	// never started) and callers MUST NOT treat zero as "just now".
+	LastStartedAt time.Time `json:"last_started_at,omitempty"`
+
+	// Claude Code integration
+	ClaudeSessionID  string    `json:"claude_session_id,omitempty"`
+	ClaudeDetectedAt time.Time `json:"claude_detected_at,omitempty"`
+
+	// Gemini CLI integration
+	GeminiSessionID  string                  `json:"gemini_session_id,omitempty"`
+	GeminiDetectedAt time.Time               `json:"gemini_detected_at,omitempty"`
+	GeminiYoloMode   *bool                   `json:"gemini_yolo_mode,omitempty"` // Per-session override (nil = use global config)
+	GeminiModel      string                  `json:"gemini_model,omitempty"`     // Active model for this session
+	GeminiAnalytics  *GeminiSessionAnalytics `json:"gemini_analytics,omitempty"` // Per-session analytics
+
+	// OpenCode CLI integration
+	OpenCodeSessionID  string    `json:"opencode_session_id,omitempty"`
+	OpenCodeDetectedAt time.Time `json:"opencode_detected_at,omitempty"`
+	OpenCodeStartedAt  int64     `json:"-"` // Unix millis when we started OpenCode (for session matching, not persisted)
+	lastOpenCodeScanAt time.Time // Rate-limits expensive `opencode session list` scans
+
+	// Codex CLI integration
+	CodexSessionID   string    `json:"codex_session_id,omitempty"`
+	CodexDetectedAt  time.Time `json:"codex_detected_at,omitempty"`
+	CodexStartedAt   int64     `json:"-"` // Unix millis when we started Codex (for session matching, not persisted)
+	lastCodexScanAt  time.Time // Rate-limits expensive ~/.codex/sessions scans
+	lastCodexProbeAt time.Time // Rate-limits expensive Codex process-file probes
+	// pendingCodexRestartWarning is consumed by UI/CLI after Restart() succeeds.
+	// It is intentionally transient and never persisted.
+	pendingCodexRestartWarning string `json:"-"`
+
+	// GitHub Copilot CLI integration
+	CopilotSessionID  string    `json:"copilot_session_id,omitempty"`
+	CopilotDetectedAt time.Time `json:"copilot_detected_at,omitempty"`
+	CopilotStartedAt  int64     `json:"-"`                           // Unix millis when we started Copilot (for session matching, not persisted)
+	CopilotModel      string    `json:"copilot_model,omitempty"`     // Active model for this session
+	CopilotAllowAll   bool      `json:"copilot_allow_all,omitempty"` // Per-session --allow-all override
+
+	// Latest user input for context (extracted from session files)
+	LatestPrompt      string    `json:"latest_prompt,omitempty"`
+	Notes             string    `json:"notes,omitempty"`
+	lastPromptModTime time.Time // mtime cache for updateGeminiLatestPrompt (not serialized)
+
+	// Color is an optional user-chosen tint for this session's TUI row (issue #391).
+	// Accepts a lipgloss-compatible color spec:
+	//   - "#RRGGBB"      - truecolor hex
+	//   - "0".."255"     - ANSI 256-palette index as a decimal string
+	//   - ""             - default (no tint, current rendering unchanged)
+	// Validation happens at CLI/API boundary in cmd/agent-deck/session_cmd.go.
+	// Empty string is the default so the field is fully opt-in and never
+	// changes rendering for users who don't set it.
+	Color string `json:"color,omitempty"`
+
+	// JSONL tail-read cache: skip re-reading if file hasn't grown
+	lastJSONLSize int64
+	lastJSONLPath string
+	cachedPrompt  string
+
+	// Docker sandbox support.
+	Sandbox          *SandboxConfig `json:"sandbox,omitempty"`
+	SandboxContainer string         `json:"sandbox_container,omitempty"` // Container name when running in sandbox.
+
+	// SSH remote support
+	SSHHost       string `json:"ssh_host,omitempty"`
+	SSHRemotePath string `json:"ssh_remote_path,omitempty"`
+
+	// TmuxSocketName is the tmux `-L <name>` socket selector captured when
+	// this instance was created (v1.7.50+, issue #687). Empty string keeps
+	// the pre-v1.7.50 behavior of targeting the user's default tmux server
+	// — zero change for existing installations.
+	//
+	// Precedence at creation time: the `--tmux-socket` CLI flag on
+	// `agent-deck add` / `agent-deck launch` wins, else
+	// `[tmux].socket_name` from config.toml, else empty. Once persisted,
+	// this value is IMMUTABLE — lifecycle operations (start/stop/restart/
+	// revive) MUST target this same socket even if the installation-wide
+	// config is later edited. Mixing sockets would leave the session
+	// orphaned on an unreachable tmux server.
+	TmuxSocketName string `json:"tmux_socket_name,omitempty"`
+
+	// MCP tracking - which MCPs were loaded when session started/restarted
+	// Used to detect pending MCPs (added after session start) and stale MCPs (removed but still running)
+	LoadedMCPNames []string `json:"loaded_mcp_names,omitempty"`
+
+	// TrackedMCPPIDs holds the OS PIDs of stdio MCP children spawned for
+	// this session (issue #965). Session stop must SIGTERM (then SIGKILL
+	// after a grace period) each PID so children aren't reparented to
+	// PID 1 and leaked. Mutated only via RegisterMCPChild /
+	// UnregisterMCPChild to keep concurrent access safe.
+	TrackedMCPPIDs []int `json:"tracked_mcp_pids,omitempty"`
+	mcpPIDsMu      sync.Mutex
+
+	// Channels are Claude Code plugin-channel ids (e.g. "plugin:telegram@user/repo").
+	// When non-empty on a claude session, buildClaudeExtraFlags emits
+	// `--channels <csv>` so the session subscribes to inbound plugin messages.
+	// Without this flag the channel plugin runs as a plain MCP (tools only,
+	// no inbound delivery) which silently drops Telegram/Discord/Slack
+	// messages on conductor restart.
+	Channels []string `json:"channels,omitempty"`
+
+	// Plugins is the catalog-key list of Claude Code plugins enabled for
+	// this session via `agent-deck add --plugin <name>` /
+	// `session set <id> plugins <csv>`. Names are short catalog keys (NOT
+	// fully-qualified `<name>@<source>` ids) and resolve through the
+	// [plugins.<name>] table in ~/.agent-deck/config.toml at spawn time.
+	// When non-empty on a claude session, EnsureWorkerScratchConfigDir
+	// writes enabledPlugins[<id>] = true into the scratch settings.json so
+	// the plugin loads only for this session, not globally.
+	// RFC: docs/rfc/PLUGIN_ATTACH.md.
+	Plugins []string `json:"plugins,omitempty"`
+
+	// InheritTelegramEnv is the explicit opt-in for #1133: when true, a
+	// non-channel-owning claude child KEEPS the conductor's TELEGRAM_*
+	// env vars (TELEGRAM_STATE_DIR, TELEGRAM_BOT_TOKEN, etc.). Default
+	// false strips them so a child can't spawn a duplicate `bun telegram`
+	// poller that races the conductor for getUpdates (Telegram 409
+	// Conflict + dropped inbound messages). CLI flag:
+	// `--inherit-telegram-env` on `agent-deck launch`. Rare use case;
+	// existing behavior is preserved when the flag is absent.
+	InheritTelegramEnv bool `json:"inherit_telegram_env,omitempty"`
+
+	// PluginChannelLinkDisabled opts the session out of the catalog-driven
+	// auto-link between Plugins and Channels (RFC §4.7). When true, an
+	// `--plugin foo` whose catalog entry has EmitsChannel=true does NOT
+	// auto-add `plugin:foo@source` to Channels. Useful for tools-only
+	// usage of channel-emitting plugins. CLI flag: `--no-channel-link`.
+	PluginChannelLinkDisabled bool `json:"plugin_channel_link_disabled,omitempty"`
+
+	// AutoLinkedChannels is the persisted set of channel ids that
+	// syncPluginChannels last added via the auto-link mechanism. Lets
+	// reconciliation distinguish "channel I owned" from "channel the
+	// user added manually" — without it, a plugin removed from the
+	// catalog or an opt-out toggle would leave stale autolinks behind
+	// (G4 / C2). Updated on every Plugins mutation; never written
+	// directly by users.
+	AutoLinkedChannels []string `json:"auto_linked_channels,omitempty"`
+
+	// WorkerScratchConfigDir is the ephemeral CLAUDE_CONFIG_DIR prepared
+	// for a non-conductor claude worker (issue #59, v1.7.68). The
+	// scratch dir copies the ambient profile's settings.json with the
+	// telegram plugin explicitly disabled, symlinks the rest of the
+	// profile, and is cleaned up on session stop/remove. Empty for
+	// conductor sessions, explicit telegram channel owners, and
+	// non-claude tools — they use the ambient profile as-is.
+	WorkerScratchConfigDir string `json:"worker_scratch_config_dir,omitempty"`
+
+	// IdleTimeoutSecs is the auto-stop threshold (#1143). When > 0, a central
+	// watcher poll triggers Kill() if the tmux pane content stays unchanged
+	// for this many seconds. 0 = disabled (current behavior). Default is 0
+	// so existing sessions are unaffected on upgrade.
+	IdleTimeoutSecs int64 `json:"idle_timeout_secs,omitempty"`
+
+	// IsForkAwaitingStart signals that this instance was produced by a
+	// fork builder and must run a pre-built fork command verbatim on the
+	// first Start() (#745). Claude fork targets usually store that command
+	// in Command. Pi fork targets keep Command as the normal restart
+	// command (so later restarts use --continue) and store the first-start
+	// command in ForkStartCommand instead.
+	//
+	// Transient (json:"-"): persisting this would cause a restart of the
+	// forked session to re-emit the tool-specific fork command and
+	// double-count the parent transcript.
+	IsForkAwaitingStart bool `json:"-"`
+
+	// ForkStartCommand optionally carries the pre-built command to run while
+	// IsForkAwaitingStart is true. When empty, Start() falls back to Command
+	// for backwards compatibility with Claude fork targets.
+	ForkStartCommand string `json:"-"`
+
+	// ExtraArgs are user-supplied claude CLI tokens appended verbatim to every
+	// start/resume/fork command (e.g. ["--agent","reviewer","--model","opus"]).
+	// Each token is shellescape-quoted on emission so values with spaces
+	// survive the bash -c wrapper.
+	ExtraArgs []string `json:"extra_args,omitempty"`
+
+	// ExitToShell is the per-session override for the [shell] exit_to_shell
+	// toggle (issue #1161). nil → inherit the global config default (off);
+	// non-nil → force on/off for this session regardless of config. When on
+	// and the tool is a built-in agent, the spawn command is wrapped so that
+	// exiting the agent drops the pane to an interactive shell at the same cwd.
+	ExitToShell *bool `json:"exit_to_shell,omitempty"`
+
+	// LaunchShell is the per-session override for the [shell] launch_shell
+	// toggle (issue #1218). nil → inherit the global config default (off);
+	// non-nil → force on/off for this session regardless of config. When on,
+	// the spawn command is wrapped with "$SHELL -l -c '<cmd>'" so that
+	// environment variables from ~/.zshrc, ~/.bashrc etc. are available to
+	// the agent process. This solves MCP config {env:VAR} failures when
+	// launching from the TUI without going through the user's shell.
+	LaunchShell *bool `json:"launch_shell,omitempty"`
+
+	// StartupQuery is the claude-code positional "startup query" (#725,
+	// v1.7.67). Set from the new-session dialog's "Start query" field and
+	// emitted as a single shell-quoted positional arg on the claude
+	// new-session command line only.
+	//
+	// Per-session, NEVER persisted — the `json:"-"` tag is load-bearing.
+	// On Restart/Resume the field is empty, so the query does NOT replay.
+	// This is the whole point of having a dedicated field instead of
+	// overloading ExtraArgs (which persists and space-splits).
+	StartupQuery string `json:"-"`
+
+	// ToolOptions stores tool-specific launch options (Claude, Codex, Gemini, etc.)
+	// JSON structure: {"tool": "claude", "options": {...}}
+	ToolOptionsJSON json.RawMessage `json:"tool_options,omitempty"`
+
+	tmuxSession *tmux.Session // Internal tmux session
+
+	// Hook-based status detection (set by StatusFileWatcher from Claude Code hooks)
+	hookStatus     string    // running, idle, waiting, dead (empty = no hook data)
+	hookEvent      string    // Hook event name that caused the last status (e.g. "PermissionRequest")
+	hookSessionID  string    // Session ID from hook payload
+	hookLastUpdate time.Time // When hook status was last received
+
+	// mu protects fields written by backgroundStatusUpdate and read by the TUI goroutine.
+	// Use GetStatus()/SetStatus() and GetTool()/SetTool() for thread-safe access.
+	// UpdateStatus() acquires the write lock internally.
+	mu sync.RWMutex
+
+	// lastErrorCheck tracks when we last confirmed the session doesn't exist
+	// Used to skip expensive Exists() checks for ghost sessions (sessions in JSON but not in tmux)
+	// Not serialized - resets on load, but that's fine since we'll recheck on first poll
+	lastErrorCheck time.Time
+
+	// Tiered polling: skip expensive checks for idle sessions with no activity
+	lastIdleCheck     time.Time // When we last did a full check for an idle session
+	lastKnownActivity int64     // Last window_activity timestamp seen
+
+	// lastStartTime tracks when Start() was called
+	// Used to provide grace period for tmux session creation (prevents error flash)
+	// Not serialized - only relevant for current TUI session
+	lastStartTime time.Time
+
+	// tmuxFlipFromRunningPending debounces a purely tmux-inferred flip AWAY from
+	// running (→ waiting/error). A long single tool-call (past the hook freshness
+	// window) or transient subprocess churn can momentarily present the pane as a
+	// shell prompt or a capture error, then recover; without a confirming second
+	// sample that single transient read fires a false completion/error to the
+	// conductor. Set when we hold the first such sample at running; cleared on any
+	// settled (running/idle) outcome or once the flip is confirmed. Not serialized.
+	tmuxFlipFromRunningPending bool
+
+	// addedThisProcess is true only for instances built by a NewInstance*
+	// constructor in the current process (i.e. just `add`ed), and false for
+	// instances reloaded from storage (built as struct literals). Combined with
+	// a zero lastStartTime it identifies a session that was added but never
+	// started, whose absent tmux is expected (idle), not a fault (error).
+	// Not serialized — a reloaded "never started" row that genuinely ran would
+	// surface a stored non-idle status; a brand-new row reloads as idle and
+	// re-derives correctly once the user starts it.
+	addedThisProcess bool
+
+	// Rate-limits expensive session metadata sync work (Claude/Gemini/Codex)
+	// that runs from UpdateStatus while this instance lock is held.
+	lastSessionMetaSync time.Time
+
+	// SkipMCPRegenerate skips .mcp.json regeneration on next Restart()
+	// Set by MCP dialog Apply() to avoid race condition where Apply writes
+	// config then Restart immediately overwrites it with different pool state
+	SkipMCPRegenerate bool `json:"-"` // Don't persist, transient flag
+
+	// Gateway health cache for Hermes sessions (volatile, not persisted).
+	hermesGatewayCheckedAt time.Time
+	hermesGatewayOK        bool
+}
+
+// SandboxConfig holds per-session Docker sandbox settings.
+type SandboxConfig struct {
+	// Enabled indicates the session runs inside a container.
+	Enabled bool `json:"enabled"`
+
+	// Image is the Docker image name (e.g. "ghcr.io/asheshgoplani/agent-deck-sandbox:latest").
+	Image string `json:"image"`
+
+	// CPULimit is the optional CPU quota for the container (e.g. "2.0").
+	CPULimit *string `json:"cpu_limit,omitempty"`
+
+	// MemoryLimit is the optional memory cap for the container (e.g. "4g").
+	MemoryLimit *string `json:"memory_limit,omitempty"`
+
+	// ExtraVolumes maps host paths to container paths for additional bind mounts.
+	ExtraVolumes map[string]string `json:"extra_volumes,omitempty"`
+}
+
+// resolveRealPath resolves symlinks to get the canonical path for comparison.
+// Falls back to the original path on error (e.g., path doesn't exist yet).
+func resolveRealPath(p string) string {
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		return real
+	}
+	return p
+}
+
+// DeduplicateDirnames returns unique directory names for the given paths.
+// When multiple paths share the same basename, a numeric suffix is appended (e.g., "src-1").
+func DeduplicateDirnames(paths []string) []string {
+	seen := make(map[string]int)
+	result := make([]string, len(paths))
+	for i, p := range paths {
+		dirname := filepath.Base(p)
+		if n := seen[dirname]; n > 0 {
+			result[i] = fmt.Sprintf("%s-%d", dirname, n)
+		} else {
+			result[i] = dirname
+		}
+		seen[dirname]++
+	}
+	return result
+}
+
+// MultiRepoWorktree tracks a worktree created for one repo in a multi-repo session.
+type MultiRepoWorktree struct {
+	OriginalPath string `json:"original_path"`
+	WorktreePath string `json:"worktree_path"`
+	RepoRoot     string `json:"repo_root"`
+	Branch       string `json:"branch"`
+}
+
+// IsMultiRepo returns true if this session has multi-repo mode enabled.
+func (inst *Instance) IsMultiRepo() bool {
+	return inst.MultiRepoEnabled
+}
+
+// AllProjectPaths returns all project paths: [ProjectPath] + AdditionalPaths.
+func (inst *Instance) AllProjectPaths() []string {
+	paths := []string{inst.ProjectPath}
+	paths = append(paths, inst.AdditionalPaths...)
+	return paths
+}
+
+// EffectiveWorkingDir returns the working directory for this session.
+// For multi-repo sessions, this is the temp dir; otherwise the ProjectPath.
+func (inst *Instance) EffectiveWorkingDir() string {
+	if inst.MultiRepoEnabled && inst.MultiRepoTempDir != "" {
+		return inst.MultiRepoTempDir
+	}
+	return inst.ProjectPath
+}
+
+// CleanupMultiRepoTempDir removes the multi-repo temporary directory.
+func (inst *Instance) CleanupMultiRepoTempDir() error {
+	if inst.MultiRepoTempDir == "" {
+		return nil
+	}
+	return os.RemoveAll(inst.MultiRepoTempDir)
+}
+
+// IsSandboxed returns true if this instance is configured to run in a Docker sandbox.
+func (inst *Instance) IsSandboxed() bool {
+	return inst.Sandbox != nil && inst.Sandbox.Enabled
+}
+
+// IsSSH returns true if this instance runs on a remote host via SSH.
+func (inst *Instance) IsSSH() bool {
+	return inst.SSHHost != ""
+}
+
+// NewSandboxConfig builds a SandboxConfig from CLI flags and user settings.
+// imageOverride takes precedence; when empty the global default image is used.
+// CPU and memory limits are applied from DockerSettings when configured.
+func NewSandboxConfig(imageOverride string) *SandboxConfig {
+	dockerSettings := GetDockerSettings()
+	image := dockerSettings.DefaultImage
+	if imageOverride != "" {
+		image = imageOverride
+	}
+	if image == "" {
+		image = docker.DefaultImage()
+	}
+	cfg := &SandboxConfig{
+		Enabled: true,
+		Image:   image,
+	}
+	if dockerSettings.CPULimit != "" {
+		cfg.CPULimit = &dockerSettings.CPULimit
+	}
+	if dockerSettings.MemoryLimit != "" {
+		cfg.MemoryLimit = &dockerSettings.MemoryLimit
+	}
+	return cfg
+}
+
+// GetStatusThreadSafe returns the session status with read-lock protection.
+// Use this when reading Status from a goroutine concurrent with backgroundStatusUpdate.
+func (inst *Instance) GetStatusThreadSafe() Status {
+	inst.mu.RLock()
+	s := inst.Status
+	inst.mu.RUnlock()
+	return s
+}
+
+// SetStatusThreadSafe sets the session status with write-lock protection.
+func (inst *Instance) SetStatusThreadSafe(s Status) {
+	inst.mu.Lock()
+	inst.Status = s
+	inst.mu.Unlock()
+}
+
+// GetToolThreadSafe returns the tool name with read-lock protection.
+func (inst *Instance) GetToolThreadSafe() string {
+	inst.mu.RLock()
+	t := inst.Tool
+	inst.mu.RUnlock()
+	return t
+}
+
+// SetToolThreadSafe sets the tool name with write-lock protection.
+func (inst *Instance) SetToolThreadSafe(t string) {
+	inst.mu.Lock()
+	inst.Tool = t
+	inst.mu.Unlock()
+}
+
+// MarkAccessed updates the LastAccessedAt timestamp to now
+func (inst *Instance) MarkAccessed() {
+	inst.LastAccessedAt = time.Now()
+}
+
+// GetLastActivityTime returns when the session was last active (content changed)
+// Returns CreatedAt if no activity has been tracked yet
+func (inst *Instance) GetLastActivityTime() time.Time {
+	if inst.tmuxSession != nil {
+		activityTime := inst.tmuxSession.GetLastActivityTime()
+		if !activityTime.IsZero() {
+			return activityTime
+		}
+	}
+	// Fallback to CreatedAt
+	return inst.CreatedAt
+}
+
+// LastObservedActivity returns the last time the tmux tracker confirmed a
+// real busy spike for this session, and a bool that is false when no
+// confirmation has happened (the instance has no tmux session, or the
+// tracker has never observed activity). When the bool is false the time
+// value is zero.
+func (inst *Instance) LastObservedActivity() (time.Time, bool) {
+	if inst.tmuxSession == nil {
+		return time.Time{}, false
+	}
+	return inst.tmuxSession.LastObservedActivity()
+}
+
+// GetWaitingSince returns when the session transitioned to waiting status
+// Used for sorting notification bar (newest waiting sessions first)
+func (inst *Instance) GetWaitingSince() time.Time {
+	if inst.tmuxSession != nil {
+		waitingSince := inst.tmuxSession.GetWaitingSince()
+		if !waitingSince.IsZero() {
+			return waitingSince
+		}
+	}
+	// Fallback to CreatedAt if no waiting time tracked
+	return inst.CreatedAt
+}
+
+// IsSubSession returns true if this session has a parent
+func (inst *Instance) IsSubSession() bool {
+	return inst.ParentSessionID != ""
+}
+
+// IsWorktree returns true if this session is running in a git worktree
+func (inst *Instance) IsWorktree() bool {
+	return inst.WorktreePath != ""
+}
+
+// SetParent sets the parent session ID
+func (inst *Instance) SetParent(parentID string) {
+	inst.ParentSessionID = parentID
+}
+
+// SetParentWithPath sets both parent session ID and parent's project path
+// The project path is used to grant subagent access via --add-dir
+func (inst *Instance) SetParentWithPath(parentID, parentProjectPath string) {
+	inst.ParentSessionID = parentID
+	inst.ParentProjectPath = parentProjectPath
+}
+
+// ClearParent removes the parent session link
+func (inst *Instance) ClearParent() {
+	inst.ParentSessionID = ""
+	inst.ParentProjectPath = ""
+}
+
+// NewInstance creates a new session instance
+func NewInstance(title, projectPath string) *Instance {
+	id := GenerateID()
+	// Seed the tmux socket from the installation-wide config. Callers that
+	// want to override (the `--tmux-socket` CLI flag) set
+	// inst.TmuxSocketName + inst.tmuxSession.SocketName before Start().
+	socket := GetTmuxSettings().GetSocketName()
+	tmuxSess := tmux.NewSession(title, projectPath)
+	tmuxSess.SocketName = socket
+	tmuxSess.InstanceID = id // Pass instance ID for activity hooks
+	tmuxSess.SetInjectStatusLine(GetTmuxSettings().GetInjectStatusLine())
+	tmuxSess.SetMouse(GetTmuxSettings().GetMouse())
+	tmuxSess.SetClearOnRestart(GetTmuxSettings().ClearOnRestart)
+	tmuxSess.SetTerminalChromeEnabled(GetTerminalSettings().GetITermBadge())
+
+	inst := &Instance{
+		ID:               id,
+		Title:            title,
+		ProjectPath:      projectPath,
+		GroupPath:        extractGroupPath(projectPath), // Auto-assign group from path
+		Tool:             "shell",
+		Status:           StatusIdle,
+		CreatedAt:        time.Now(),
+		TmuxSocketName:   socket,
+		tmuxSession:      tmuxSess,
+		addedThisProcess: true,
+	}
+	logSessionCreated(inst)
+	return inst
+}
+
+// logSessionCreated emits one INFO record per new session. Single source of
+// truth so each NewInstance* constructor logs identically. See
+// logging-review G1 (2026-05-07).
+func logSessionCreated(inst *Instance) {
+	sessionLog.Info("session_created",
+		slog.String("instance_id", inst.ID),
+		slog.String("title", inst.Title),
+		slog.String("project_path", inst.ProjectPath),
+		slog.String("tool", inst.Tool),
+		slog.String("group_path", inst.GroupPath),
+	)
+}
+
+// applyLaunchSettingsFromConfig copies LaunchInUserScope and LaunchAs from
+// the live TmuxSettings onto the tmux session, just before each Start().
+//
+// Regression pin for #958 (SSH-logout session loss): three Start() call
+// sites in this file each need this wire-up. Consolidating into one helper
+// means dropping a single Start() path can no longer silently regress the
+// fix — the field would just stay at its zero value (false / "") and the
+// hermetic tests in issue958_launch_settings_wiring_test.go would fail.
+func (i *Instance) applyLaunchSettingsFromConfig() {
+	settings := GetTmuxSettings()
+	i.tmuxSession.LaunchInUserScope = settings.GetLaunchInUserScope()
+	i.tmuxSession.LaunchAs = settings.GetLaunchAs()
+	i.applyVimModeFromConfig()
+}
+
+// applyVimModeFromConfig copies [claude].vim_mode onto the tmux session so the
+// keysender prepends an Escape + `i` insert-mode guarantee before each send.
+// Only meaningful for Claude-compatible tools; other tools never sit in a vim
+// composer, so we leave the flag at its zero value (false) for them to keep
+// their send path byte-identical (issue #1264).
+func (i *Instance) applyVimModeFromConfig() {
+	if i.tmuxSession == nil || !IsClaudeCompatible(i.Tool) {
+		return
+	}
+	cfg, _ := LoadUserConfig()
+	if cfg == nil {
+		return
+	}
+	i.tmuxSession.VimMode = cfg.Claude.GetVimMode()
+}
+
+// NewInstanceWithGroup creates a new session instance with explicit group
+func NewInstanceWithGroup(title, projectPath, groupPath string) *Instance {
+	inst := NewInstance(title, projectPath)
+	inst.GroupPath = groupPath
+	return inst
+}
+
+// NewInstanceWithTool creates a new session with tool-specific initialization
+func NewInstanceWithTool(title, projectPath, tool string) *Instance {
+	id := GenerateID()
+	socket := GetTmuxSettings().GetSocketName()
+	tmuxSess := tmux.NewSession(title, projectPath)
+	tmuxSess.SocketName = socket
+	tmuxSess.InstanceID = id // Pass instance ID for activity hooks
+	tmuxSess.SetInjectStatusLine(GetTmuxSettings().GetInjectStatusLine())
+	tmuxSess.SetMouse(GetTmuxSettings().GetMouse())
+	tmuxSess.SetClearOnRestart(GetTmuxSettings().ClearOnRestart)
+	tmuxSess.SetTerminalChromeEnabled(GetTerminalSettings().GetITermBadge())
+
+	inst := &Instance{
+		ID:               id,
+		Title:            title,
+		ProjectPath:      projectPath,
+		GroupPath:        extractGroupPath(projectPath),
+		Tool:             tool,
+		Status:           StatusIdle,
+		CreatedAt:        time.Now(),
+		TmuxSocketName:   socket,
+		tmuxSession:      tmuxSess,
+		addedThisProcess: true,
+	}
+
+	// Claude session ID will be detected from files Claude creates
+	// No pre-assignment needed
+
+	logSessionCreated(inst)
+	return inst
+}
+
+// NewInstanceWithGroupAndTool creates a new session with explicit group and tool
+func NewInstanceWithGroupAndTool(title, projectPath, groupPath, tool string) *Instance {
+	inst := NewInstanceWithTool(title, projectPath, tool)
+	inst.GroupPath = groupPath
+	return inst
+}
+
+// GroupPathForProject is the exported wrapper around extractGroupPath. It
+// gives CLI callers (issue #972) a single source of truth for "what group
+// does this project path imply" — matching what NewInstance assigns by
+// default — so launch/add can prefer cwd-derived groups over inherited
+// parent groups without duplicating the heuristic.
+func GroupPathForProject(projectPath string) string {
+	return extractGroupPath(projectPath)
+}
+
+// extractGroupPath extracts a group path from project path
+// e.g., "/home/user/projects/devops" -> "projects"
+func extractGroupPath(projectPath string) string {
+	parts := strings.Split(projectPath, "/")
+	// Find meaningful directory (skip Users, home, etc.)
+	for i := len(parts) - 1; i >= 0; i-- {
+		part := parts[i]
+		if part != "" && part != "Users" && part != "home" && !strings.HasPrefix(part, ".") {
+			// Return parent directory as group if we're at project level
+			if i > 0 && i == len(parts)-1 {
+				parent := parts[i-1]
+				if parent != "" && parent != "Users" && parent != "home" && !strings.HasPrefix(parent, ".") {
+					return parent
+				}
+			}
+			return part
+		}
+	}
+	return DefaultGroupName
+}
+
+// buildClaudeCommand builds the claude command with session capture
+// For new sessions: captures session ID via print mode, stores in tmux env, then resumes
+// This ensures we always know the session ID for fork/restart features
+// Respects: CLAUDE_CONFIG_DIR, dangerous_mode from user config, and [shell].env_files
+func (i *Instance) buildClaudeCommand(baseCommand string) string {
+	envPrefix := i.buildEnvSourceCommand()
+	cmd := i.buildClaudeCommandWithMessage(baseCommand, "")
+	return envPrefix + cmd
+}
+
+// buildClaudeCommandWithMessage builds the command with optional initial message
+// Respects ClaudeOptions from instance if set, otherwise falls back to config defaults
+func (i *Instance) buildClaudeCommandWithMessage(baseCommand, message string) string {
+	if !IsClaudeCompatible(i.Tool) {
+		return baseCommand
+	}
+
+	// Default empty baseCommand to "claude" so the Claude-build branch below
+	// runs. An Instance row with tool=claude and an empty Command field
+	// (e.g. a session whose tool_data lost its ClaudeSessionID and was
+	// never assigned an explicit Command) otherwise falls all the way
+	// through to the custom-command branch and returns just the env
+	// prefix — pane runs `export ...;` and exits, status loops to error.
+	// See feature/sessions-dispear-on-restart, Smithy repro 2026-04-27.
+	if baseCommand == "" {
+		baseCommand = "claude"
+	}
+
+	// Get the configured Claude command (e.g., "claude", "cdw", "cdp")
+	// If a custom command is set, we skip CLAUDE_CONFIG_DIR prefix since the alias handles it
+	claudeCmd := GetClaudeCommand()
+	hasCustomCommand := claudeCmd != "claude"
+
+	// Resolve CLAUDE_CONFIG_DIR for this spawn. We inject the prefix only
+	// when the user has an explicit config_dir resolved for this instance
+	// (env var, profile, group, conductor, or `[claude].config_dir`). When
+	// the gate is open, a prepared WorkerScratchConfigDir overrides the
+	// resolved value — scratch carries the mutated enabledPlugins overlay
+	// (per-session plugin attach state, issue #59 / RFC PLUGIN_ATTACH.md).
+	//
+	// Issue #949: injecting scratch unconditionally breaks macOS Claude
+	// Code's keychain-keyed-by-CLAUDE_CONFIG_DIR-path OAuth on hosts where
+	// scratch is created for telegram-poller defense (#759) but the user
+	// has no explicit config_dir — the worker is routed to an opaque
+	// scratch path the keychain never saw, triggering login + onboarding
+	// every spawn. Gating restores the v1.9.1 behaviour: dormant scratch
+	// in that case, ambient ~/.claude wins.
+	// Issue #922 (reporter @bautrey): route the worker-scratch swap through
+	// applyWorkerScratchOverride so it emits an INFO log instead of being silent.
+	configDirPrefix := ""
+	if !hasCustomCommand && IsClaudeConfigDirExplicitForInstance(i) {
+		configDir := i.applyWorkerScratchOverride(GetClaudeConfigDirForInstance(i))
+		configDirPrefix = fmt.Sprintf("CLAUDE_CONFIG_DIR=%s ", configDir)
+	}
+
+	// AGENTDECK_INSTANCE_ID is set as an inline env var so Claude's hook subprocesses
+	// can identify which agent-deck session they belong to. AGENTDECK_PROFILE is
+	// injected alongside it so an in-session `agent-deck` command resolves this
+	// session's own profile instead of falling back to "default".
+	instanceIDPrefix := fmt.Sprintf("AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s ", i.ID, shellescape.Quote(sessionProfileEnvValue()))
+	configDirPrefix = instanceIDPrefix + configDirPrefix
+
+	// Get options - either from instance or create defaults from config
+	opts := i.GetClaudeOptions()
+	if opts == nil {
+		// Fall back to config defaults
+		userConfig, _ := LoadUserConfig()
+		opts = NewClaudeOptions(userConfig)
+	}
+
+	// S8 (v1.7.40) defense-in-depth: non-channel-owning claude spawns
+	// wrap the final exec in `env -u TELEGRAM_*` so the child process
+	// is guaranteed to start without telegram env even if the shell
+	// unset in buildEnvSourceCommand is somehow bypassed. #1133
+	// broadens the flag list from TELEGRAM_STATE_DIR alone to every
+	// var in telegramEnvVarsToStrip. Empty string for conductors,
+	// explicit telegram channel owners, --inherit-telegram-env opt-in,
+	// and non-claude tools (see telegramStateDirStripExpr predicate).
+	execEnvPrefix := ""
+	if flags := telegramExecEnvStripFlags(i); flags != "" {
+		execEnvPrefix = "env " + flags + " "
+	}
+
+	// If baseCommand is just "claude", build the appropriate command
+	if baseCommand == "claude" {
+		// Build extra flags string from options (includes --add-dir if ParentProjectPath set)
+		extraFlags := i.buildClaudeExtraFlags(opts)
+
+		// Handle different session modes
+		switch opts.SessionMode {
+		case "continue":
+			// Simple -c mode: continue last session
+			return fmt.Sprintf(`%s%s%s -c%s`, configDirPrefix, execEnvPrefix, claudeCmd, extraFlags)
+
+		case "resume":
+			// Resume specific session by ID
+			if opts.ResumeSessionID != "" {
+				// Check if session has actual conversation data
+				if sessionHasConversationData(i, opts.ResumeSessionID) {
+					// Session has conversation history - use normal --resume
+					return fmt.Sprintf(`%s%s%s --resume %s%s`,
+						configDirPrefix, execEnvPrefix, claudeCmd, opts.ResumeSessionID, extraFlags)
+				}
+				// Session was never interacted with - use --session-id with same UUID.
+				// CLAUDE_SESSION_ID is propagated via host-side SyncSessionIDsToTmux after start.
+				bashExportPrefix := i.buildBashExportPrefix()
+				return fmt.Sprintf(
+					`%s%s%s --session-id "%s"%s`,
+					bashExportPrefix, execEnvPrefix, claudeCmd, opts.ResumeSessionID, extraFlags)
+			}
+			// No session ID provided - use -r flag for interactive picker
+			return fmt.Sprintf(`%s%s%s -r%s`, configDirPrefix, execEnvPrefix, claudeCmd, extraFlags)
+		}
+
+		// Default: new session with capture-resume pattern
+		// 1. Starts Claude in print mode to get session ID
+		// 2. Stores session ID in tmux environment (if capture succeeded)
+		// 3. Resumes that session interactively
+		// Fallback ensures Claude starts (without fork/restart support) rather than failing completely
+		//
+		// NOTE: These commands get wrapped in `bash -c` for fish compatibility (#47),
+		// so shell aliases won't work — but real binaries/scripts are fine.
+		//
+		bashExportPrefix := i.buildBashExportPrefix()
+
+		// Pre-generate UUID in Go to avoid shell uuidgen (may be absent in Docker sandbox).
+		// CLAUDE_SESSION_ID is also propagated via host-side SetEnvironment after tmux start.
+		// Use `exec` before the final claude invocation so that when this compound
+		// command is wrapped in `bash -c` (for fish compatibility), exec replaces
+		// the bash process with claude, enabling proper job control (Ctrl+Z suspend / fg resume).
+		sessionUUID := generateUUID()
+		i.ClaudeSessionID = sessionUUID
+
+		// Startup query (#725, v1.7.67): appended as one shell-quoted
+		// positional arg so multi-word queries survive bash -c. Empty
+		// string means no suffix — do NOT emit empty quotes (claude would
+		// treat them as an empty prompt and block).
+		startupQuerySuffix := ""
+		if i.StartupQuery != "" {
+			startupQuerySuffix = " " + shellescape.Quote(i.StartupQuery)
+		}
+
+		var baseCmd string
+		// Use pre-generated literal UUID with --session-id flag.
+		// CLAUDE_SESSION_ID is propagated via host-side SetEnvironment after tmux start.
+		baseCmd = fmt.Sprintf(
+			`%sexec %s%s --session-id "%s"%s%s`,
+			bashExportPrefix, execEnvPrefix, claudeCmd, sessionUUID, extraFlags, startupQuerySuffix)
+
+		// If message provided, append wait-and-send logic in background.
+		if message != "" {
+			// Escape single quotes in message for bash
+			escapedMsg := strings.ReplaceAll(message, "'", "'\"'\"'")
+
+			// The background subshell runs independently; exec replaces
+			// the current shell with claude for proper job control.
+			baseCmd = fmt.Sprintf(
+				`(sleep 2; SESSION_NAME=$(tmux display-message -p '#S'); `+
+					`while ! tmux capture-pane -p -t "$SESSION_NAME" | tail -5 | grep -qE "^>"; do sleep 0.2; done; `+
+					`tmux send-keys -l -t "$SESSION_NAME" -- '%s' \; send-keys -t "$SESSION_NAME" Enter) & `+
+					`%sexec %s%s --session-id "%s"%s`,
+				escapedMsg,
+				bashExportPrefix, execEnvPrefix, claudeCmd, sessionUUID, extraFlags)
+		}
+
+		return baseCmd
+	}
+
+	// For custom commands (e.g., fork commands or conductor wrappers), prepend
+	// the env-source prefix (CFG-03) and the bash export prefix (CFG-02) so
+	// group env_file exports AND CLAUDE_CONFIG_DIR both land in the spawn env
+	// before exec'ing the wrapper.
+	return i.buildEnvSourceCommand() + i.buildBashExportPrefix() + baseCommand
+}
+
+// buildBashExportPrefix builds the export prefix used in bash -c commands.
+// Always exports AGENTDECK_INSTANCE_ID. CLAUDE_CONFIG_DIR is exported only
+// when the user has an explicit config_dir resolved for this instance;
+// when that gate is open, a prepared WorkerScratchConfigDir overrides
+// the resolved value — same priority as buildClaudeCommandWithMessage
+// and buildClaudeResumeCommand. See the comment there (issue #949) for
+// why the gate is required.
+func (i *Instance) buildBashExportPrefix() string {
+	prefix := fmt.Sprintf("export AGENTDECK_INSTANCE_ID=%s; export AGENTDECK_PROFILE=%s; ", i.ID, shellescape.Quote(sessionProfileEnvValue()))
+	if IsClaudeConfigDirExplicitForInstance(i) {
+		// Issue #922 (reporter @bautrey): see applyWorkerScratchOverride.
+		configDir := i.applyWorkerScratchOverride(GetClaudeConfigDirForInstance(i))
+		// shellescape: the resolved config_dir lands in the same `bash -c`
+		// payload as the quoted AGENTDECK_RESOLVED_* exports below; a config_dir
+		// containing ;/$() would otherwise inject. Audit F2.
+		prefix += fmt.Sprintf("export CLAUDE_CONFIG_DIR=%s; ", shellescape.Quote(configDir))
+	}
+	prefix += i.buildResolvedAccountHintExports()
+	return prefix
+}
+
+// buildResolvedAccountHintExports emits the three "intended account"
+// hint env vars introduced by issue #925 (reporter @bautrey): the
+// resolved config dir, group path, and source label from the priority
+// chain. These mirror the user's *intent* and intentionally bypass
+// the worker-scratch override applied to CLAUDE_CONFIG_DIR — consumer
+// scripts (statusline, custom prompts, telemetry, hooks) need a stable
+// label of which account this session belongs to, not agent-deck's
+// per-session scratch path. Always emitted for claude-compatible
+// instances (including when source resolves to "default") so consumers
+// can rely on the vars being present.
+func (i *Instance) buildResolvedAccountHintExports() string {
+	resolved, source := GetClaudeConfigDirSourceForInstance(i)
+	return fmt.Sprintf(
+		"export AGENTDECK_RESOLVED_CONFIG_DIR=%s; export AGENTDECK_RESOLVED_GROUP=%s; export AGENTDECK_RESOLVED_SOURCE=%s; ",
+		shellescape.Quote(resolved),
+		shellescape.Quote(i.GroupPath),
+		shellescape.Quote(source),
+	)
+}
+
+// sessionProfileEnvValue returns the effective profile name to inject as
+// AGENTDECK_PROFILE into a spawned session's environment, alongside
+// AGENTDECK_INSTANCE_ID. Without it, a bare `agent-deck` command run *inside* a
+// non-default-profile session has no AGENTDECK_PROFILE in its shell, so
+// GetEffectiveProfile falls through to "default" — resolving the wrong profile
+// and silently orphaning auto-parent routing (resolveAutoParentInstance looks
+// up the caller's instance against the wrong profile's session list). The deck
+// process is single-profile (one Storage, one state.db), so GetEffectiveProfile("")
+// is authoritative here and matches storage.Profile() for every session it
+// manages. We inject it explicitly at each spawn site (rather than relying on
+// shell inheritance) so a child spawned from a child carries its own profile and
+// not a stale inherited one.
+func sessionProfileEnvValue() string {
+	return GetEffectiveProfile("")
+}
+
+// ensureProfileEnv sets AGENTDECK_PROFILE host-side on the instance's tmux
+// session so a bare `agent-deck` command run inside the session resolves the
+// session's own profile rather than falling back to "default". It is the
+// tool-agnostic safety net complementing the inline command-prefix injection in
+// the spawn-command builders (which only some tools carry — e.g. gemini/opencode/
+// generic respawn rebuild a bare resume command with no AGENTDECK_PROFILE prefix).
+// Must run on every spawn/respawn success path, including the Restart()
+// respawn-pane branches that return early before reaching the fallback recreate
+// path. Best-effort: a failure is logged, not fatal.
+func (i *Instance) ensureProfileEnv() {
+	if i.tmuxSession == nil {
+		return
+	}
+	if err := i.tmuxSession.SetEnvironment("AGENTDECK_PROFILE", sessionProfileEnvValue()); err != nil {
+		sessionLog.Warn("set_profile_failed", slog.String("error", err.Error()))
+	}
+}
+
+// logClaudeConfigResolution emits the CFG-07 observability line documenting
+// which priority level resolved CLAUDE_CONFIG_DIR for this session.
+// Owns the single CFG-07 slog message literal for this package.
+//
+// Callers MUST gate on IsClaudeCompatible(i.Tool). The helper does not
+// re-gate — keeping the guard at each call site makes the three emission
+// sites grep-auditable.
+//
+// Called from: Start, StartWithMessage, Restart.
+// NOT called from: Fork (Fork may trigger a subsequent Start() on the
+// forked instance which will log), or from any builder function.
+func (i *Instance) logClaudeConfigResolution() {
+	resolvedPath, source := GetClaudeConfigDirSourceForInstance(i)
+	sessionLog.Info("claude config resolution",
+		slog.String("session", i.ID),
+		slog.String("group", i.GroupPath),
+		slog.String("resolved", resolvedPath),
+		slog.String("source", source),
+	)
+}
+
+// ValidateClaudeExtraArgToken rejects a single --extra-arg token that looks
+// like a flag mashed together with its value (issue #1431b). Each --extra-arg
+// is shell-quoted as ONE argument, so `--extra-arg "--model opus"` reaches
+// claude as the literal single arg '--model opus' (embedded space) — an
+// unknown flag that makes claude exit on startup and leaves a dead pane the
+// registry still reports as running. A token that starts with '-' AND contains
+// whitespace is almost always two tokens the user meant to pass separately;
+// surfacing it as an error at spawn time beats the silent tmux death. Clean
+// flags ("--model") and clean values ("opus", "be concise") pass.
+func ValidateClaudeExtraArgToken(token string) error {
+	if strings.HasPrefix(token, "-") && strings.ContainsAny(token, " \t\n\r") {
+		return fmt.Errorf(
+			"--extra-arg %q looks like a flag and its value combined; pass them as separate --extra-arg tokens (e.g. --extra-arg \"--model\" --extra-arg \"opus\"), or use the first-class --model flag",
+			token,
+		)
+	}
+	return nil
+}
+
+// extraArgsSupplyModel reports whether the persisted --extra-arg tokens already
+// carry a `--model` override. ValidateClaudeExtraArgToken forces flag and value
+// into separate tokens, so a user-supplied model appears as a bare "--model"
+// (or "--model=..." form) token. When present we must NOT also inject
+// [claude].default_model, or the launch command would carry two --model flags.
+func extraArgsSupplyModel(extraArgs []string) bool {
+	for _, tok := range extraArgs {
+		if tok == "--model" || strings.HasPrefix(tok, "--model=") {
+			return true
+		}
+	}
+	return false
+}
+
+// buildClaudeExtraFlags builds extra command-line flags string from ClaudeOptions
+// Also handles instance-level flags like --add-dir for subagent access
+func (i *Instance) buildClaudeExtraFlags(opts *ClaudeOptions) string {
+	var flags []string
+
+	// Instance-level flags (not from ClaudeOptions)
+	// --add-dir: Grant subagent access to parent's project directory (for worktrees, etc.)
+	if i.ParentProjectPath != "" {
+		// shellescape: directory names may legally contain $()/`/;/space; the
+		// path is re-parsed by the inner `bash -c` (see bashCWrap), so quote it
+		// like --model below. Audit F1.
+		flags = append(flags, "--add-dir "+shellescape.Quote(i.ParentProjectPath))
+	}
+
+	// Multi-repo: pass all project paths via --add-dir (deduplicated, excluding cwd)
+	if i.MultiRepoEnabled {
+		seen := make(map[string]bool)
+		if i.ParentProjectPath != "" {
+			seen[resolveRealPath(i.ParentProjectPath)] = true // already added above
+		}
+		seen[resolveRealPath(i.EffectiveWorkingDir())] = true // exclude cwd
+		for _, p := range i.AllProjectPaths() {
+			real := resolveRealPath(p)
+			if seen[real] {
+				continue
+			}
+			seen[real] = true
+			flags = append(flags, "--add-dir "+shellescape.Quote(p)) // audit F1
+		}
+	}
+
+	// Launch model resolution (#1431). An explicit per-session opts.Model
+	// wins; otherwise fall back to [claude].default_model. The fallback is the
+	// load-bearing fix: a session that persisted ANY other Claude option
+	// (skip-permissions / chrome / teammate-mode) has a non-nil ClaudeOptions
+	// with an empty Model, which bypasses the NewClaudeOptions default_model
+	// fallback in the callers. Without resolving the default here, both spawn
+	// and restart dropped --model entirely and the child silently booted on
+	// Claude's built-in default (Fable, unavailable account-wide) while the
+	// registry still showed it running. Because every start/restart/resume
+	// command delegates flag assembly here, this single point keeps them all
+	// in lockstep.
+	// A user-supplied --model via --extra-arg (the form the
+	// ValidateClaudeExtraArgToken error message recommends) is an explicit
+	// override that must stand alone: the extra-arg tokens are appended verbatim
+	// below, so emitting any resolved --model here too would produce a duplicate
+	// --model on the command line. claude is last-wins so it would be harmless,
+	// but it is confusing and the operator's intent is unambiguous. Suppress the
+	// resolved model entirely (whether it came from opts.Model, the
+	// NewClaudeOptions default, or [claude].default_model) when extra-args carry
+	// their own.
+	if !extraArgsSupplyModel(i.ExtraArgs) {
+		launchModel := ""
+		if opts != nil {
+			launchModel = opts.Model
+		}
+		if launchModel == "" {
+			if cfg, _ := LoadUserConfig(); cfg != nil {
+				launchModel = cfg.Claude.DefaultModel
+			}
+		}
+		if launchModel != "" {
+			flags = append(flags, "--model "+shellescape.Quote(launchModel))
+		}
+	}
+
+	// Options-level flags
+	if opts != nil {
+		if opts.SkipPermissions {
+			flags = append(flags, "--dangerously-skip-permissions")
+		} else if opts.AutoMode {
+			flags = append(flags, "--permission-mode auto")
+		} else if opts.AllowSkipPermissions {
+			flags = append(flags, "--allow-dangerously-skip-permissions")
+		}
+		if opts.UseChrome {
+			flags = append(flags, "--chrome")
+		}
+		if opts.UseTeammateMode {
+			flags = append(flags, "--teammate-mode tmux")
+		}
+	}
+
+	// Plugin channels: subscribe the claude session to inbound messages from
+	// each listed plugin channel. Persisted on Instance.Channels and refreshed
+	// on every Start/Restart/resume because every command-build flows here.
+	// Heal first: a conductor whose persisted Channels lost the telegram
+	// entry (index wipe, record rebuild) is restored from conductor config
+	// so the wiring can't silently disappear (telegram_reliability.go).
+	reconcileConductorTelegramChannel(i)
+	if len(i.Channels) > 0 {
+		flags = append(flags, "--channels "+shellescape.Quote(strings.Join(i.Channels, ","))) // audit F1
+	}
+
+	// User-supplied extra args: each token is shellescape-quoted before
+	// re-emission so values with spaces survive the `bash -c` wrapper
+	// without being re-tokenized. Appended last so user flags can override
+	// defaults claude accepts in last-wins ordering.
+	for _, tok := range i.ExtraArgs {
+		flags = append(flags, shellescape.Quote(tok))
+	}
+
+	if len(flags) == 0 {
+		return ""
+	}
+	return " " + strings.Join(flags, " ")
+}
+
+// buildGeminiCommand builds the gemini command with session capture
+// For new sessions: captures session ID via stream-json, stores in tmux env, then resumes
+// For sessions with known ID: uses simple resume
+// This ensures we always know the session ID for restart features
+// VERIFIED: gemini --output-format stream-json provides immediate session ID in first message
+// Also sources .env files from [shell].env_files and [gemini].env_file
+func (i *Instance) buildGeminiCommand(baseCommand string) string {
+	if i.Tool != "gemini" {
+		return baseCommand
+	}
+
+	envPrefix := i.buildEnvSourceCommand()
+
+	// Determine if YOLO mode is enabled (per-session overrides global config)
+	yoloMode := false
+	if i.GeminiYoloMode != nil {
+		yoloMode = *i.GeminiYoloMode
+	} else {
+		// Check global config
+		userConfig, _ := LoadUserConfig()
+		if userConfig != nil {
+			yoloMode = userConfig.Gemini.YoloMode
+		}
+	}
+
+	yoloFlag := ""
+	if yoloMode {
+		yoloFlag = " --yolo"
+	}
+
+	// Determine model flag
+	modelFlag := ""
+	if i.GeminiModel != "" {
+		modelFlag = " --model " + i.GeminiModel
+	} else if i.GeminiSessionID == "" {
+		// Only apply default model for NEW sessions (not resumes)
+		userConfig, _ := LoadUserConfig()
+		if userConfig != nil && userConfig.Gemini.DefaultModel != "" {
+			modelFlag = " --model " + userConfig.Gemini.DefaultModel
+		}
+	}
+
+	// If baseCommand is just "gemini", handle specially
+	if baseCommand == "gemini" {
+		cmd := GetToolCommand("gemini")
+		// If we already have a session ID, use simple resume
+		if i.GeminiSessionID != "" {
+			// GEMINI_YOLO_MODE and GEMINI_SESSION_ID are propagated via host-side
+			// SetEnvironment after tmux start. No inline tmux set-environment.
+			return envPrefix + fmt.Sprintf(
+				"%s --resume %s%s%s",
+				cmd,
+				i.GeminiSessionID,
+				yoloFlag,
+				modelFlag,
+			)
+		}
+
+		// Start Gemini fresh - session ID will be captured when user interacts
+		// The previous capture-resume approach (gemini --output-format json ".") would hang
+		// because Gemini processes the "." prompt which takes too long
+		// GEMINI_YOLO_MODE is propagated via host-side SetEnvironment after tmux start.
+		return envPrefix + fmt.Sprintf(
+			`%s%s%s`,
+			cmd,
+			yoloFlag,
+			modelFlag,
+		)
+	}
+
+	// For custom commands (e.g., resume commands), return as-is
+	return envPrefix + baseCommand
+}
+
+// buildOpenCodeCommand builds the command for OpenCode CLI
+// OpenCode stores sessions in ~/.local/share/opencode/storage/session/
+// Session IDs are in format: ses_XXXXX
+// Resume: opencode -s <session-id> or opencode --session <session-id>
+// Continue last: opencode -c or opencode --continue
+// Model: opencode -m provider/model
+// Agent: opencode --agent name
+// Also sources .env files from [shell].env_files
+func (i *Instance) buildOpenCodeCommand(baseCommand string) string {
+	if i.Tool != "opencode" {
+		return baseCommand
+	}
+
+	envPrefix := i.buildEnvSourceCommand()
+
+	// If baseCommand is just "opencode", handle specially
+	if baseCommand == "opencode" {
+		cmd := GetToolCommand("opencode")
+		extraFlags := i.buildOpenCodeExtraFlags()
+
+		// If we already have a session ID, use resume with -s flag.
+		// OPENCODE_SESSION_ID is propagated via host-side SetEnvironment after tmux start.
+		if i.OpenCodeSessionID != "" {
+			return envPrefix + fmt.Sprintf("%s -s %s%s",
+				cmd, i.OpenCodeSessionID, extraFlags)
+		}
+
+		// Start OpenCode fresh - session ID will be captured async after startup
+		return envPrefix + cmd + extraFlags
+	}
+
+	// For custom commands (e.g., fork commands), return as-is
+	return envPrefix + baseCommand
+}
+
+// buildOpenCodeExtraFlags returns extra CLI flags from OpenCodeOptions (model, agent).
+// Returns a string with leading space, or empty string if no flags.
+func (i *Instance) buildOpenCodeExtraFlags() string {
+	opts := i.GetOpenCodeOptions()
+	if opts == nil {
+		// Fall back to global config defaults
+		if config, err := LoadUserConfig(); err == nil && config != nil {
+			opts = NewOpenCodeOptions(config)
+		}
+	}
+	if opts == nil {
+		return ""
+	}
+
+	var flags string
+	if opts.Model != "" {
+		flags += " -m " + opts.Model
+	}
+	if opts.Agent != "" {
+		flags += " --agent " + opts.Agent
+	}
+	return flags
+}
+
+// DetectOpenCodeSession is the public wrapper for async OpenCode session detection
+// Call this for restored sessions that don't have a session ID yet
+func (i *Instance) DetectOpenCodeSession() {
+	i.detectOpenCodeSessionAsync()
+}
+
+// buildCodexCommand builds the command for OpenAI Codex CLI
+// resolveCodexYoloFlag returns " --yolo" if yolo mode is enabled (per-session override > global config), or "".
+func (i *Instance) resolveCodexYoloFlag() string {
+	opts := i.GetCodexOptions()
+	if opts != nil && opts.YoloMode != nil {
+		if *opts.YoloMode {
+			return " --yolo"
+		}
+		return ""
+	}
+	// Fallback to global config
+	if config, err := LoadUserConfig(); err == nil && config != nil {
+		if config.Codex.YoloMode {
+			return " --yolo"
+		}
+	}
+	return ""
+}
+
+func (i *Instance) resolveCodexModelFlag() string {
+	opts := i.GetCodexOptions()
+	if opts != nil && strings.TrimSpace(opts.Model) != "" {
+		return " --model " + shellescape.Quote(strings.TrimSpace(opts.Model))
+	}
+	return ""
+}
+
+func (i *Instance) resolveCodexCommand(baseCommand string) string {
+	command := strings.TrimSpace(baseCommand)
+	if i.Tool == "codex" && (command == "" || command == "codex") {
+		return GetCodexCommand()
+	}
+	if command == "" {
+		return "codex"
+	}
+	return command
+}
+
+func codexHomeFromCommand(command string) string {
+	rest := strings.TrimSpace(command)
+	for rest != "" {
+		token, remainder, ok := nextShellWord(rest)
+		if !ok {
+			return ""
+		}
+		if !isShellEnvAssignment(token) {
+			return ""
+		}
+		key, value, ok := strings.Cut(token, "=")
+		if !ok {
+			return ""
+		}
+		if key == "CODEX_HOME" && strings.TrimSpace(value) != "" {
+			return ExpandPath(strings.TrimSpace(value))
+		}
+		rest = strings.TrimLeft(remainder, " \t\r\n")
+	}
+	return ""
+}
+
+func nextShellWord(s string) (word string, remainder string, ok bool) {
+	s = strings.TrimLeft(s, " \t\r\n")
+	if s == "" {
+		return "", "", false
+	}
+
+	var b strings.Builder
+	quote := byte(0)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote == 0 {
+			if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
+				return b.String(), s[i:], true
+			}
+			switch c {
+			case '\'', '"':
+				quote = c
+			case '\\':
+				if i+1 < len(s) {
+					i++
+					b.WriteByte(s[i])
+				} else {
+					b.WriteByte(c)
+				}
+			default:
+				b.WriteByte(c)
+			}
+			continue
+		}
+
+		if c == quote {
+			quote = 0
+			continue
+		}
+		if quote == '"' && c == '\\' && i+1 < len(s) {
+			i++
+			b.WriteByte(s[i])
+			continue
+		}
+		b.WriteByte(c)
+	}
+	if quote != 0 {
+		return "", "", false
+	}
+	return b.String(), "", true
+}
+
+func getCodexHomeDirForCommand(command string) string {
+	if codexHome := codexHomeFromCommand(command); codexHome != "" {
+		return codexHome
+	}
+	return getCodexHomeDir()
+}
+
+func (i *Instance) getCodexHomeDir() string {
+	if i == nil {
+		return getCodexHomeDir()
+	}
+	return getCodexHomeDirForCommand(i.resolveCodexCommand(i.Command))
+}
+
+// Codex stores sessions in ~/.codex/sessions/YYYY/MM/DD/*.jsonl
+// Resume: codex resume <session-id> or codex resume --last
+// Also sources .env files from [shell].env_files
+func (i *Instance) buildCodexCommand(baseCommand string) string {
+	if !IsCodexCompatible(i.Tool) {
+		return baseCommand
+	}
+
+	envPrefix := i.buildEnvSourceCommand()
+
+	// AGENTDECK_* env injection is required for the hook subprocesses spawned
+	// by tools in the codex family to find this session's state, so it is
+	// injected BEFORE the custom-command passthrough early-return below.
+	// Dropping it on custom-command sessions was the design regression flagged
+	// on #951 review — keep AGENTDECK_* on every codex-flavoured launch.
+	agentdeckEnvPrefix := fmt.Sprintf("AGENTDECK_INSTANCE_ID=%s AGENTDECK_TITLE=%q AGENTDECK_TOOL=%s AGENTDECK_PROFILE=%s ",
+		i.ID, i.Title, i.Tool, shellescape.Quote(sessionProfileEnvValue()))
+	envPrefix += agentdeckEnvPrefix
+
+	// Passthrough: if the tool is literally "codex" and user gave a custom command
+	// (not the bare "codex" name), return as-is without flag injection.
+	// Codex-compatible tools (e.g., "my-codex" with CompatibleWith="codex") always
+	// get the full treatment regardless of their command name.
+	trimmed := strings.TrimSpace(baseCommand)
+	if i.Tool == "codex" && trimmed != "codex" && trimmed != "" {
+		return envPrefix + trimmed
+	}
+	if isCodexHomeExplicit() {
+		codexHome := strings.TrimSpace(getCodexHomeDir())
+		if codexHome != "" {
+			if err := os.MkdirAll(codexHome, 0o755); err != nil {
+				sessionLog.Warn("codex_home_mkdir_failed",
+					slog.String("path", codexHome),
+					slog.String("error", err.Error()))
+			}
+		}
+		envPrefix += "CODEX_HOME=" + codexHome + " "
+	}
+
+	yoloFlag := i.resolveCodexYoloFlag()
+	modelFlag := i.resolveCodexModelFlag()
+	command := i.resolveCodexCommand(baseCommand)
+	codexHome := getCodexHomeDirForCommand(command)
+
+	// Issue #756: Gate `codex resume <sid>` on rollout-file existence.
+	// If Codex died before flushing its rollout JSONL (tmux crash, kill -9
+	// in the SessionStart→first-flush window), the captured session_id is
+	// permanently unresumable. Without this check the bridge appends
+	// `resume <stale-uuid>` on every restart and Codex exits immediately,
+	// flipping the session back to error in an infinite loop. Drop the
+	// stale ID, clear the .sid sidecar so the next hook tick rebinds
+	// cleanly, and spawn fresh.
+	if i.CodexSessionID != "" && !codexRolloutExistsInHome(i.CodexSessionID, codexHome) {
+		sessionLog.Warn("codex_resume_stale_sid_dropped",
+			slog.String("instance_id", i.ID),
+			slog.String("title", i.Title),
+			slog.String("sid", i.CodexSessionID),
+			slog.String("codex_home", codexHome))
+		i.CodexSessionID = ""
+		i.CodexDetectedAt = time.Time{}
+		ClearHookSessionAnchor(i.ID)
+	}
+
+	if i.CodexSessionID != "" {
+		return envPrefix + fmt.Sprintf("%s%s%s resume %s",
+			command, yoloFlag, modelFlag, i.CodexSessionID)
+	}
+
+	return envPrefix + command + yoloFlag + modelFlag
+}
+
+// piAgentDeckSessionDirExpr returns a target-shell expression for the Pi session
+// directory Agent Deck owns for an instance. It intentionally uses target-side
+// $HOME rather than resolving the Agent Deck process' home directory, keeping
+// local, SSH, and sandbox launch paths consistent.
+func piAgentDeckSessionDirExpr(instanceID string) string {
+	return "${HOME}/.pi/agent-deck/" + shellescape.Quote(instanceID)
+}
+
+// buildPiCommand builds the command for the Pi CLI.
+// Pi sessions are JSONL files, not externally named sessions like Claude/Codex.
+// Scope Pi's session directory to the Agent Deck instance and always launch
+// with --continue so restarts resume that instance without colliding with other
+// Agent Deck Pi sessions in the same project.
+func (i *Instance) buildPiCommand(baseCommand string) string {
+	if i.Tool != "pi" {
+		return baseCommand
+	}
+
+	envPrefix := i.buildEnvSourceCommand()
+	cmd := strings.TrimSpace(baseCommand)
+	if cmd == "" {
+		cmd = "pi"
+	}
+
+	sessionDir := piAgentDeckSessionDirExpr(i.ID)
+	quotedInstanceID := shellescape.Quote(i.ID)
+	quotedProfile := shellescape.Quote(sessionProfileEnvValue())
+
+	return envPrefix + fmt.Sprintf(
+		"session_dir=%s; mkdir -p \"$session_dir\" && AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s --continue --session-dir \"$session_dir\"",
+		sessionDir,
+		quotedInstanceID,
+		quotedProfile,
+		cmd,
+	)
+}
+
+func (i *Instance) buildPiForkCommandForTarget(target *Instance, baseCommand string) (string, error) {
+	if target == nil {
+		return "", fmt.Errorf("cannot build Pi fork command: target instance is nil")
+	}
+	if !i.CanForkPi() {
+		return "", fmt.Errorf("cannot fork: no Agent Deck Pi session directory")
+	}
+
+	envPrefix := target.buildEnvSourceCommand()
+	cmd := strings.TrimSpace(baseCommand)
+	if cmd == "" {
+		cmd = "pi"
+	}
+
+	parentSessionDir := piAgentDeckSessionDirExpr(i.ID)
+	sessionDir := piAgentDeckSessionDirExpr(target.ID)
+	quotedInstanceID := shellescape.Quote(target.ID)
+	quotedProfile := shellescape.Quote(sessionProfileEnvValue())
+
+	return envPrefix + fmt.Sprintf(
+		"parent_session_dir=%s; session_dir=%s; mkdir -p \"$session_dir\" && source_file=$(find \"$parent_session_dir\" -type f -name '*.jsonl' -exec ls -t {} + 2>/dev/null | head -n 1); if [ -z \"$source_file\" ]; then echo \"No Pi session file found in $parent_session_dir\" >&2; exit 1; fi; AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s --fork \"$source_file\" --session-dir \"$session_dir\"",
+		parentSessionDir,
+		sessionDir,
+		quotedInstanceID,
+		quotedProfile,
+		cmd,
+	), nil
+}
+
+func (i *Instance) consumeForkStartCommand() string {
+	command := i.Command
+	if i.ForkStartCommand != "" {
+		command = i.ForkStartCommand
+		i.ForkStartCommand = ""
+	}
+	i.IsForkAwaitingStart = false
+	return command
+}
+
+// buildCursorCommand builds the command for the Cursor CLI (`cursor agent`).
+// continuePrev adds --continue so Restart resumes the previous chat in the workspace.
+// Env files from [shell].env_files are applied via buildEnvSourceCommand.
+func (i *Instance) buildCursorCommand(baseCommand string, continuePrev bool) string {
+	if i.Tool != "cursor" {
+		return baseCommand
+	}
+
+	envPrefix := i.buildEnvSourceCommand()
+	cmd := strings.TrimSpace(baseCommand)
+	if cmd == "" || strings.EqualFold(cmd, "cursor") {
+		cmd = "cursor agent"
+	}
+
+	out := envPrefix + cmd
+	if continuePrev && !strings.Contains(strings.ToLower(cmd), "--continue") {
+		out += " --continue"
+	}
+	return out
+}
+
+// buildCopilotCommand builds the command for GitHub Copilot CLI.
+// If baseCommand is the bare "copilot" name, applies config command override + env prefix.
+// Otherwise returns the custom command as-is with env prefix (passthrough).
+func (i *Instance) buildCopilotCommand(baseCommand string) string {
+	if i.Tool != "copilot" {
+		return baseCommand
+	}
+
+	envPrefix := i.buildEnvSourceCommand()
+
+	if baseCommand != "copilot" {
+		return envPrefix + baseCommand
+	}
+
+	return envPrefix + GetToolCommand("copilot")
+}
+
+// codexRolloutExistsInHome reports whether Codex has flushed a rollout JSONL
+// for the given session ID under codexHome/sessions. Used by buildCodexCommand
+// to gate `codex resume <sid>` on a real on-disk rollout file (Issue #756).
+//
+// Codex layout: codexHome/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
+func codexRolloutExistsInHome(sessionID, codexHome string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	pattern := filepath.Join(codexHome, "sessions", "*", "*", "*",
+		"rollout-*-"+sessionID+".jsonl")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return false
+	}
+	return len(matches) > 0
+}
+
+// detectOpenCodeSessionAsync detects the OpenCode session ID after startup
+// OpenCode generates session IDs internally (format: ses_XXXXX)
+// We query "opencode session list --format json" and match by project directory,
+// picking the most recently updated session (since OpenCode auto-resumes the last session)
+func (i *Instance) detectOpenCodeSessionAsync() {
+	time.Sleep(1 * time.Second)
+
+	// Phase 1: Quick detection for existing sessions (5 attempts over ~15s)
+	quickDelays := []time.Duration{0, 2 * time.Second, 3 * time.Second, 4 * time.Second, 5 * time.Second}
+
+	for attempt, delay := range quickDelays {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+
+		if sessionID := i.queryOpenCodeSession(); sessionID != "" {
+			i.setOpenCodeSession(sessionID)
+			sessionLog.Debug(
+				"opencode_session_detected",
+				slog.String("session_id", sessionID),
+				slog.String("phase", "quick"),
+				slog.Int("attempt", attempt+1),
+			)
+			return
+		}
+
+		sessionLog.Debug(
+			"opencode_session_not_found",
+			slog.Int("attempt", attempt+1),
+			slog.Int("total", len(quickDelays)),
+		)
+	}
+
+	// Phase 2: Long-running background watcher for new sessions
+	// OpenCode only persists new sessions after significant user activity
+	go i.watchForOpenCodeSession()
+}
+
+// watchForOpenCodeSession polls for session creation over an extended period.
+// New sessions may take minutes to be persisted by OpenCode.
+func (i *Instance) watchForOpenCodeSession() {
+	const (
+		pollInterval = 10 * time.Second
+		maxDuration  = 5 * time.Minute
+	)
+
+	deadline := time.Now().Add(maxDuration)
+	attempt := 0
+
+	for time.Now().Before(deadline) {
+		time.Sleep(pollInterval)
+		attempt++
+
+		if i.OpenCodeSessionID != "" {
+			sessionLog.Debug("opencode_watcher_already_set")
+			return
+		}
+
+		if sessionID := i.queryOpenCodeSession(); sessionID != "" {
+			i.setOpenCodeSession(sessionID)
+			sessionLog.Debug(
+				"opencode_watcher_detected",
+				slog.String("session_id", sessionID),
+				slog.Int("attempt", attempt),
+			)
+			return
+		}
+
+		sessionLog.Debug("opencode_watcher_not_found", slog.Int("attempt", attempt))
+	}
+
+	sessionLog.Debug("opencode_watcher_timeout", slog.Duration("max_duration", maxDuration))
+}
+
+// setOpenCodeSession sets the session ID and stores it in tmux environment.
+func (i *Instance) setOpenCodeSession(sessionID string) {
+	i.OpenCodeSessionID = sessionID
+	i.OpenCodeDetectedAt = time.Now()
+	i.OpenCodeStartedAt = 0
+
+	if i.tmuxSession != nil {
+		if err := i.tmuxSession.SetEnvironment("OPENCODE_SESSION_ID", sessionID); err != nil {
+			sessionLog.Warn("opencode_set_env_failed", slog.String("error", err.Error()))
+		}
+	}
+}
+
+type openCodeSessionMetadata struct {
+	ID        string `json:"id"`
+	Directory string `json:"directory"`
+	Path      string `json:"path"`
+	Created   int64  `json:"created"`
+	Updated   int64  `json:"updated"`
+}
+
+// findBestOpenCodeSession keeps an existing binding if that session still exists
+// for the project. Fresh launches stay unbound until OpenCode persists a session
+// created during the current startup, which prevents adopting older same-project
+// sessions before the new conversation has an ID. Already-bound sessions only
+// rotate to a newer sibling when there was very recent local pane activity,
+// which approximates an intentional in-pane `/new` without stealing sessions
+// from other tabs in the same project.
+func findBestOpenCodeSession(sessions []openCodeSessionMetadata, projectPath, currentID string, startedAt, activityAt int64) string {
+	normalizedProjectPath := normalizePath(projectPath)
+
+	var bestMatch string
+	var bestMatchTime int64
+	var currentMatchTime int64
+	var currentExists bool
+	var localRotationMatch string
+	var localRotationTime int64
+	startupThreshold := startedAt - opencodeStartupTimeSkew.Milliseconds()
+	activityThreshold := activityAt - opencodeStartupTimeSkew.Milliseconds()
+
+	for _, sess := range sessions {
+		sessDir := sess.Directory
+		if sessDir == "" {
+			sessDir = sess.Path
+		}
+
+		if sessDir == "" || normalizePath(sessDir) != normalizedProjectPath {
+			continue
+		}
+
+		// Multiple OpenCode tabs can share a project path. A newer sibling session
+		// is not enough evidence to steal this instance's existing binding.
+		updatedAt := sess.Updated
+		if updatedAt == 0 {
+			updatedAt = sess.Created
+		}
+
+		if currentID != "" && sess.ID == currentID {
+			currentExists = true
+			currentMatchTime = updatedAt
+			if bestMatch == "" || updatedAt > bestMatchTime {
+				bestMatch = sess.ID
+				bestMatchTime = updatedAt
+			}
+			continue
+		}
+
+		if currentID == "" && startedAt > 0 && updatedAt < startupThreshold && sess.Created < startupThreshold {
+			continue
+		}
+
+		if currentID != "" && activityAt > 0 && (updatedAt >= activityThreshold || sess.Created >= activityThreshold) {
+			if localRotationMatch == "" || updatedAt > localRotationTime {
+				localRotationMatch = sess.ID
+				localRotationTime = updatedAt
+			}
+		}
+
+		if bestMatch == "" || updatedAt > bestMatchTime {
+			bestMatch = sess.ID
+			bestMatchTime = updatedAt
+		}
+	}
+
+	if currentID != "" && currentExists {
+		if localRotationMatch != "" && localRotationTime > currentMatchTime {
+			return localRotationMatch
+		}
+		return currentID
+	}
+
+	return bestMatch
+}
+
+// queryOpenCodeSession queries OpenCode CLI for sessions matching our project
+// directory. Unbound instances adopt the most recently updated session, while
+// already-bound instances keep their current ID as long as it still exists.
+//
+// Bounded wall-clock cost:
+//   - 5s context deadline for the subprocess itself.
+//   - WaitDelay=500ms so cmd.Output() returns after the context fires even if
+//     an opencode grandchild keeps stdout pipes open (Go 1.20+).
+//
+// 5s is the ceiling for cold opencode CLI on large session stores; on slower
+// machines this still usually succeeds, and on genuine hangs we log a Warn
+// and lastOpenCodeScanAt schedules the next retry 15s later.
+func (i *Instance) queryOpenCodeSession() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Run: opencode session list --format json
+	cmd := exec.CommandContext(ctx, "opencode", "session", "list", "--format", "json")
+	cmd.Dir = i.ProjectPath
+	cmd.WaitDelay = 500 * time.Millisecond
+
+	sessionLog.Debug("opencode_query_sessions", slog.String("dir", i.ProjectPath))
+
+	output, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			sessionLog.Warn("opencode_query_timeout",
+				slog.String("dir", i.ProjectPath),
+				slog.String("instance_id", i.ID),
+			)
+		} else {
+			sessionLog.Debug("opencode_query_failed", slog.String("error", err.Error()))
+		}
+		return ""
+	}
+
+	sessionLog.Debug("opencode_session_data_size", slog.Int("bytes", len(output)))
+
+	// Parse JSON response
+	// Expected format: array of session objects with id, directory, created, updated fields
+	var sessions []openCodeSessionMetadata
+
+	if err := json.Unmarshal(output, &sessions); err != nil {
+		sessionLog.Debug("opencode_parse_failed", slog.String("error", err.Error()))
+		return ""
+	}
+
+	sessionLog.Debug("opencode_parsed_sessions", slog.Int("count", len(sessions)))
+
+	var activityAt int64
+	if currentID := i.OpenCodeSessionID; currentID != "" {
+		lastActivity := i.GetLastActivityTime()
+		if !lastActivity.IsZero() && time.Since(lastActivity) <= opencodeRotationActivityWindow {
+			activityAt = lastActivity.UnixMilli()
+		}
+	}
+
+	bestMatch := findBestOpenCodeSession(sessions, i.ProjectPath, i.OpenCodeSessionID, i.OpenCodeStartedAt, activityAt)
+	sessionLog.Debug(
+		"opencode_best_match",
+		slog.String("session_id", bestMatch),
+		slog.String("current_id", i.OpenCodeSessionID),
+	)
+	return bestMatch
+}
+
+// normalizePath normalizes a file path for comparison
+func normalizePath(p string) string {
+	// Expand home directory
+	if strings.HasPrefix(p, "~") {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = strings.Replace(p, "~", home, 1)
+		}
+	}
+
+	// Clean the path
+	p = filepath.Clean(p)
+
+	// Resolve symlinks if possible
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+
+	return p
+}
+
+// DetectCodexSession is the public wrapper for async Codex session detection
+// Call this for restored sessions that don't have a session ID yet
+func (i *Instance) DetectCodexSession() {
+	i.detectCodexSessionAsync()
+}
+
+// detectCodexSessionAsync detects the Codex session ID after startup
+// Codex stores sessions in ~/.codex/sessions/YYYY/MM/DD/*.jsonl
+// Session ID is a UUID that can be extracted from the filename
+// Since Codex has no "session list" command, we scan the filesystem
+func (i *Instance) detectCodexSessionAsync() {
+	// Brief wait for Codex to initialize
+	time.Sleep(1 * time.Second)
+
+	// Try up to 3 times with short delays
+	delays := []time.Duration{0, 1 * time.Second, 2 * time.Second}
+
+	for attempt, delay := range delays {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+
+		sessionID, _ := i.queryCodexSessionFromProcessFiles()
+		if sessionID == "" {
+			sessionID = i.queryCodexSession(i.collectOtherCodexSessionIDs(), true)
+		}
+		if sessionID != "" {
+			i.CodexSessionID = sessionID
+			i.CodexDetectedAt = time.Now()
+
+			// Store in tmux environment for restart
+			if i.tmuxSession != nil {
+				if err := i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", sessionID); err != nil {
+					sessionLog.Warn("codex_set_env_failed", slog.String("error", err.Error()))
+				}
+			}
+
+			sessionLog.Debug(
+				"codex_session_detected",
+				slog.String("session_id", sessionID),
+				slog.Int("attempt", attempt+1),
+			)
+			return
+		}
+
+		sessionLog.Debug("codex_session_not_found", slog.Int("attempt", attempt+1), slog.Int("total", len(delays)))
+	}
+
+	sessionLog.Warn("codex_detection_failed", slog.Int("attempts", len(delays)))
+}
+
+func getCodexHomeDir() string {
+	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
+		return ExpandPath(codexHome)
+	}
+
+	if cfg, err := LoadUserConfig(); err == nil && cfg != nil {
+		profile := GetEffectiveProfile("")
+		if profileDir := cfg.GetProfileCodexConfigDir(profile); profileDir != "" {
+			return profileDir
+		}
+		if cfg.Codex.ConfigDir != "" {
+			return ExpandPath(cfg.Codex.ConfigDir)
+		}
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), ".codex")
+	}
+	return filepath.Join(home, ".codex")
+}
+
+func isCodexHomeExplicit() bool {
+	if strings.TrimSpace(os.Getenv("CODEX_HOME")) != "" {
+		return true
+	}
+	cfg, err := LoadUserConfig()
+	if err != nil || cfg == nil {
+		return false
+	}
+	profile := GetEffectiveProfile("")
+	if cfg.GetProfileCodexConfigDir(profile) != "" {
+		return true
+	}
+	return strings.TrimSpace(cfg.Codex.ConfigDir) != ""
+}
+
+// runWithTimeout runs op in a goroutine and waits up to timeout for it to
+// complete. Returns true if op finished, false if it timed out. The
+// abandoned goroutine continues running until op returns naturally; its
+// effects on shared state after timeout are not consulted by callers, which
+// must check the return value before reading any variables op may have
+// written.
+//
+// Used to backstop FS operations under ~/.codex/sessions which can hang
+// indefinitely on a stuck FS layer (kernel D-state during readdir on the
+// WSL 9p path was observed on 2026-04-28; one thread held a dentry that
+// the FS layer never released, blocking every agent-deck CLI command that
+// transitively walked the codex sessions tree).
+func runWithTimeout(timeout time.Duration, op func()) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		op()
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+// codexWalkDirTimeout caps the recursive walk over $CODEX_HOME/sessions/ in
+// queryCodexSession. Healthy walks of a year's sessions complete in roughly
+// one second; the bound is generous so a slow disk does not false-negative
+// while still preventing indefinite hangs.
+const codexWalkDirTimeout = 5 * time.Second
+
+// queryCodexSession scans Codex sessions and returns the best candidate.
+// Selection strategy:
+//  1. Prefer sessions whose JSONL metadata matches this instance's project path.
+//  2. Optionally allow unscoped fallback (no cwd metadata) for initial bootstrap.
+func (i *Instance) queryCodexSession(excludeIDs map[string]bool, allowUnscoped bool) string {
+	sessionsDir := filepath.Join(i.getCodexHomeDir(), "sessions")
+	if _, err := os.Stat(sessionsDir); os.IsNotExist(err) {
+		return ""
+	}
+
+	uuidPattern := uuidPatternRE
+
+	var bestScopedID string
+	var bestScopedTime time.Time
+	var bestUnscopedID string
+	var bestUnscopedTime time.Time
+
+	normalizedProjectPath := normalizePath(i.ProjectPath)
+
+	var walkErr error
+	if !runWithTimeout(codexWalkDirTimeout, func() {
+		walkErr = filepath.WalkDir(sessionsDir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil // Skip errors
+			}
+
+			if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
+				return nil
+			}
+
+			sessionID := uuidPattern.FindString(d.Name())
+			if sessionID == "" {
+				return nil
+			}
+			if excludeIDs != nil && excludeIDs[sessionID] {
+				return nil
+			}
+
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+
+			// Only consider sessions created after we started this instance.
+			if i.CodexStartedAt > 0 {
+				startTime := time.UnixMilli(i.CodexStartedAt)
+				if info.ModTime().Before(startTime) {
+					return nil
+				}
+			}
+
+			matchesProject, hasProjectMetadata := codexSessionMatchesProject(path, normalizedProjectPath)
+			if matchesProject {
+				if bestScopedID == "" || info.ModTime().After(bestScopedTime) {
+					bestScopedID = sessionID
+					bestScopedTime = info.ModTime()
+				}
+				return nil
+			}
+
+			// Use unscoped records only when bootstrapping and metadata is unavailable.
+			if allowUnscoped && !hasProjectMetadata {
+				if bestUnscopedID == "" || info.ModTime().After(bestUnscopedTime) {
+					bestUnscopedID = sessionID
+					bestUnscopedTime = info.ModTime()
+				}
+			}
+
+			return nil
+		})
+	}) {
+		// Walk did not complete in time. The most likely cause is a stuck FS
+		// layer (e.g., WSL kernel D-state). Return without consulting the
+		// best* variables since they may be partially populated; the caller
+		// retries with backoff so a transient stall self-heals.
+		sessionLog.Warn("codex_walkdir_timeout",
+			slog.String("instance_id", i.ID),
+			slog.String("sessions_dir", sessionsDir),
+			slog.Duration("timeout", codexWalkDirTimeout))
+		return ""
+	}
+	if walkErr != nil {
+		sessionLog.Debug("codex_scan_error", slog.String("error", walkErr.Error()))
+	}
+
+	if bestScopedID != "" {
+		return bestScopedID
+	}
+	if allowUnscoped {
+		return bestUnscopedID
+	}
+	return ""
+}
+
+// codexSessionMatchesProject checks whether a Codex session file belongs to the
+// current project by inspecting JSONL metadata fields (cwd/workdir/path).
+// Returns:
+//   - match=true if project path matches
+//   - known=true if any project metadata field was found
+func codexSessionMatchesProject(sessionFilePath, normalizedProjectPath string) (match bool, known bool) {
+	if normalizedProjectPath == "" {
+		return false, false
+	}
+
+	file, err := os.Open(sessionFilePath)
+	if err != nil {
+		return false, false
+	}
+	defer file.Close()
+
+	const maxLines = 256
+
+	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	lineCount := 0
+	foundMetadata := false
+
+	for scanner.Scan() {
+		lineCount++
+		cwd := extractCodexCWDFromJSONLine(scanner.Bytes())
+		if cwd != "" {
+			foundMetadata = true
+			if normalizePath(cwd) == normalizedProjectPath {
+				return true, true
+			}
+		}
+		if lineCount >= maxLines {
+			break
+		}
+	}
+
+	return false, foundMetadata
+}
+
+// extractCodexCWDFromJSONLine extracts cwd-like project fields from one JSONL record.
+func extractCodexCWDFromJSONLine(line []byte) string {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return ""
+	}
+
+	keys := []string{"cwd", "workdir", "working_dir", "directory", "path"}
+	for _, key := range keys {
+		if val := decodeJSONStringField(raw, key); val != "" {
+			return val
+		}
+	}
+
+	if payloadRaw, ok := raw["payload"]; ok && len(payloadRaw) > 0 {
+		var payloadObj map[string]json.RawMessage
+		if err := json.Unmarshal(payloadRaw, &payloadObj); err == nil {
+			for _, key := range keys {
+				if val := decodeJSONStringField(payloadObj, key); val != "" {
+					return val
+				}
+			}
+		}
+	}
+	if contextRaw, ok := raw["context"]; ok && len(contextRaw) > 0 {
+		var contextObj map[string]json.RawMessage
+		if err := json.Unmarshal(contextRaw, &contextObj); err == nil {
+			for _, key := range keys {
+				if val := decodeJSONStringField(contextObj, key); val != "" {
+					return val
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+func decodeJSONStringField(raw map[string]json.RawMessage, key string) string {
+	value, ok := raw[key]
+	if !ok || len(value) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(value, &s); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(s)
+}
+
+// collectOtherCodexSessionIDs enumerates other managed tmux sessions and returns
+// the CODEX_SESSION_ID values they currently own.
+func (i *Instance) collectOtherCodexSessionIDs() map[string]bool {
+	exclude := make(map[string]bool)
+
+	tmuxSessions, err := tmux.ListAgentDeckSessions()
+	if err != nil {
+		return exclude
+	}
+
+	myTmuxName := ""
+	if i.tmuxSession != nil {
+		myTmuxName = i.tmuxSession.Name
+	}
+
+	for _, sessName := range tmuxSessions {
+		if sessName == myTmuxName {
+			continue
+		}
+		other := &tmux.Session{Name: sessName}
+		if id, err := other.GetEnvironment("CODEX_SESSION_ID"); err == nil && id != "" {
+			exclude[id] = true
+		}
+	}
+
+	return exclude
+}
+
+// shouldScanCodexSession returns whether we should run an expensive filesystem
+// scan for Codex session rotation right now.
+func (i *Instance) shouldScanCodexSession(allowUnscoped bool) bool {
+	interval := codexRotationScanInterval
+	if allowUnscoped {
+		interval = codexBootstrapScanInterval
+	}
+
+	if !i.lastCodexScanAt.IsZero() && time.Since(i.lastCodexScanAt) < interval {
+		return false
+	}
+
+	i.lastCodexScanAt = time.Now()
+	return true
+}
+
+// shouldRunCodexProcessProbe returns whether we should run Codex process/file
+// probing right now.
+func (i *Instance) shouldRunCodexProcessProbe(force bool) bool {
+	if force {
+		i.lastCodexProbeAt = time.Now()
+		return true
+	}
+
+	if !i.lastCodexProbeAt.IsZero() && time.Since(i.lastCodexProbeAt) < codexProbeScanInterval {
+		return false
+	}
+
+	i.lastCodexProbeAt = time.Now()
+	return true
+}
+
+// collectTmuxPaneProcessTreePIDs returns pane PID + descendant PIDs for this instance.
+func (i *Instance) collectTmuxPaneProcessTreePIDs() []int {
+	if i.tmuxSession == nil || !i.tmuxSession.Exists() {
+		return nil
+	}
+
+	target := i.tmuxSession.Name + ":"
+	// Target the same tmux server the session was created on (issue #687).
+	// A session on an isolated agent-deck socket would return no panes from
+	// the default server and we would mistakenly treat it as empty.
+	out, err := tmux.Exec(i.TmuxSocketName, "list-panes", "-t", target, "-F", "#{pane_pid}").Output()
+	if err != nil {
+		return nil
+	}
+
+	pidStr := strings.TrimSpace(string(out))
+	if idx := strings.IndexByte(pidStr, '\n'); idx >= 0 {
+		pidStr = pidStr[:idx]
+	}
+	panePID, err := strconv.Atoi(pidStr)
+	if err != nil || panePID <= 0 {
+		return nil
+	}
+
+	// Single snapshot of the process table is substantially cheaper than
+	// spawning pgrep once per node in deep process trees.
+	procTable, err := exec.Command("ps", "-eo", "pid=,ppid=").Output()
+	if err == nil {
+		if allPIDs := collectProcessTreePIDsFromTable(panePID, procTable); len(allPIDs) > 0 {
+			return allPIDs
+		}
+	}
+
+	// Fallback path for environments where ps output is unavailable/unexpected.
+	return collectProcessTreePIDsViaPgrep(panePID)
+}
+
+func collectProcessTreePIDsFromTable(rootPID int, procTable []byte) []int {
+	childrenByParent := parsePSParentChildMap(procTable)
+	if len(childrenByParent) == 0 {
+		return []int{rootPID}
+	}
+
+	var allPIDs []int
+	seen := map[int]bool{rootPID: true}
+	queue := []int{rootPID}
+	for len(queue) > 0 {
+		parent := queue[0]
+		queue = queue[1:]
+		allPIDs = append(allPIDs, parent)
+
+		for _, childPID := range childrenByParent[parent] {
+			if childPID <= 0 || seen[childPID] {
+				continue
+			}
+			seen[childPID] = true
+			queue = append(queue, childPID)
+		}
+	}
+	return allPIDs
+}
+
+func parsePSParentChildMap(procTable []byte) map[int][]int {
+	childrenByParent := make(map[int][]int)
+	scanner := bufio.NewScanner(bytes.NewReader(procTable))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) != 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || pid <= 0 {
+			continue
+		}
+		ppid, err := strconv.Atoi(fields[1])
+		if err != nil || ppid <= 0 {
+			continue
+		}
+		childrenByParent[ppid] = append(childrenByParent[ppid], pid)
+	}
+	return childrenByParent
+}
+
+func collectProcessTreePIDsViaPgrep(rootPID int) []int {
+	var allPIDs []int
+	seen := map[int]bool{rootPID: true}
+	queue := []int{rootPID}
+	for len(queue) > 0 {
+		parent := queue[0]
+		queue = queue[1:]
+		allPIDs = append(allPIDs, parent)
+
+		// #nosec G204 -- "pgrep" is a fixed binary name and the only argument is
+		// strconv.Itoa(int), never reachable from external input.
+		childrenRaw, err := exec.Command("pgrep", "-P", strconv.Itoa(parent)).Output()
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(childrenRaw)), "\n") {
+			childPID, convErr := strconv.Atoi(strings.TrimSpace(line))
+			if convErr != nil || childPID <= 0 || seen[childPID] {
+				continue
+			}
+			seen[childPID] = true
+			queue = append(queue, childPID)
+		}
+	}
+	return allPIDs
+}
+
+func isLikelyCodexProcessPID(pid int) bool {
+	// #nosec G204 -- "ps" is a fixed binary; only arg is strconv.Itoa(int).
+	argsOut, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "args=").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(string(argsOut))), "codex")
+}
+
+func extractCodexSessionIDFromPath(path string) string {
+	normalized := strings.TrimSpace(path)
+	normalized = strings.TrimSuffix(normalized, " (deleted)")
+	matches := codexSessionIDPathPatternRE.FindStringSubmatch(normalized)
+	if len(matches) < 2 {
+		return ""
+	}
+	return matches[1]
+}
+
+func extractCodexSessionIDFromLsofOutput(output []byte) string {
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	for scanner.Scan() {
+		if sessionID := extractCodexSessionIDFromPath(scanner.Text()); sessionID != "" {
+			return sessionID
+		}
+	}
+	return ""
+}
+
+func extractCodexSessionIDFromProcFD(pid int) string {
+	fdDir := filepath.Join("/proc", strconv.Itoa(pid), "fd")
+	entries, err := os.ReadDir(fdDir)
+	if err != nil {
+		return ""
+	}
+
+	for _, entry := range entries {
+		targetPath := filepath.Join(fdDir, entry.Name())
+		target, err := os.Readlink(targetPath)
+		if err != nil {
+			continue
+		}
+		if sessionID := extractCodexSessionIDFromPath(target); sessionID != "" {
+			return sessionID
+		}
+	}
+	return ""
+}
+
+func (i *Instance) queryCodexSessionFromHostProcFD() string {
+	for _, pid := range i.collectTmuxPaneProcessTreePIDs() {
+		if !isLikelyCodexProcessPID(pid) {
+			continue
+		}
+		if sessionID := extractCodexSessionIDFromProcFD(pid); sessionID != "" {
+			return sessionID
+		}
+	}
+	return ""
+}
+
+func (i *Instance) queryCodexSessionFromDockerProcFD() (string, string) {
+	if strings.TrimSpace(i.SandboxContainer) == "" {
+		return "", ""
+	}
+
+	script := fmt.Sprintf(
+		`command -v readlink >/dev/null 2>&1 || {
+	echo %q
+	exit 0
+}
+for f in /proc/[0-9]*/fd/*; do
+	t=$(readlink "$f" 2>/dev/null || true)
+	case "$t" in
+		*/sessions/*rollout-*.jsonl*)
+			printf '%%s\n' "$t"
+			;;
+	esac
+done`,
+		codexProbeMissingSentinel,
+	)
+	// #nosec G204 -- "docker exec" with internal SandboxContainer name and a
+	// hardcoded shell probe script (codexProbeMissingSentinel is a compile-time
+	// constant); no external input flows here.
+	out, err := exec.Command("docker", "exec", i.SandboxContainer, "sh", "-lc", script).Output()
+	if err != nil {
+		return "", ""
+	}
+	if bytes.Contains(out, []byte(codexProbeMissingSentinel)) {
+		return "", "readlink"
+	}
+	if sessionID := extractCodexSessionIDFromLsofOutput(out); sessionID != "" {
+		return sessionID, ""
+	}
+	return "", ""
+}
+
+func (i *Instance) queryCodexSessionFromHostLsof() (string, string) {
+	if _, err := exec.LookPath("lsof"); err != nil {
+		return "", "lsof"
+	}
+
+	for _, pid := range i.collectTmuxPaneProcessTreePIDs() {
+		if !isLikelyCodexProcessPID(pid) {
+			continue
+		}
+
+		// #nosec G204 -- "lsof" is a fixed binary; only arg is strconv.Itoa(int).
+		out, err := exec.Command("lsof", "-p", strconv.Itoa(pid)).Output()
+		if err != nil {
+			var execErr *exec.Error
+			if errors.As(err, &execErr) && execErr.Err == exec.ErrNotFound {
+				return "", "lsof"
+			}
+			sessionLog.Debug("codex_lsof_probe_failed", slog.Int("pid", pid), slog.Any("error", err))
+			continue
+		}
+
+		if sessionID := extractCodexSessionIDFromLsofOutput(out); sessionID != "" {
+			return sessionID, ""
+		}
+	}
+
+	return "", ""
+}
+
+// queryCodexSessionFromProcessFiles inspects live Codex processes and returns
+// the active session UUID inferred from open rollout JSONL files.
+// The second return value is the missing dependency name (if any).
+func (i *Instance) queryCodexSessionFromProcessFiles() (string, string) {
+	// Sandboxed sessions run Codex inside Docker; probe container /proc.
+	if i.IsSandboxed() {
+		return i.queryCodexSessionFromDockerProcFD()
+	}
+
+	// Linux/WSL: pure in-process /proc scanning (no lsof dependency).
+	if runtime.GOOS == "linux" {
+		if sessionID := i.queryCodexSessionFromHostProcFD(); sessionID != "" {
+			return sessionID, ""
+		}
+		return "", ""
+	}
+
+	// Non-Linux (e.g. macOS): fallback to lsof compatibility path.
+	return i.queryCodexSessionFromHostLsof()
+}
+
+// ConsumeCodexRestartWarning returns and clears any pending Codex restart warning.
+func (i *Instance) ConsumeCodexRestartWarning() string {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	warning := strings.TrimSpace(i.pendingCodexRestartWarning)
+	i.pendingCodexRestartWarning = ""
+	return warning
+}
+
+func codexProbeMissingWarning(missingDep string) string {
+	missingDep = strings.TrimSpace(missingDep)
+	if missingDep == "" {
+		return ""
+	}
+	return fmt.Sprintf("Codex session detection fallback: %s is not available", missingDep)
+}
+
+// UpdateCodexSession updates the Codex session ID.
+// Primary source: tmux environment.
+// Fallback: project-aware filesystem scan.
+func (i *Instance) UpdateCodexSession(excludeIDs map[string]bool) {
+	i.updateCodexSession(excludeIDs, false)
+}
+
+// updateCodexSession refreshes Codex session ID from env/process-files/disk.
+// Returns missing dependency name when probe prerequisites are unavailable.
+func (i *Instance) updateCodexSession(excludeIDs map[string]bool, forceProbe bool) string {
+	if !IsCodexCompatible(i.Tool) {
+		return ""
+	}
+
+	envSessionID := ""
+
+	// 1. Try to read from tmux environment first (authoritative if set)
+	if i.tmuxSession != nil {
+		if sessionID, err := i.tmuxSession.GetEnvironment("CODEX_SESSION_ID"); err == nil && sessionID != "" {
+			envSessionID = sessionID
+			if i.CodexSessionID != sessionID {
+				i.CodexSessionID = sessionID
+			}
+			i.CodexDetectedAt = time.Now()
+		}
+	}
+
+	// 2. Prefer live-process file detection (Linux /proc, macOS lsof fallback).
+	missingProbeDep := ""
+	if i.shouldRunCodexProcessProbe(forceProbe) {
+		if sessionID, missingDep := i.queryCodexSessionFromProcessFiles(); sessionID != "" {
+			changed := sessionID != i.CodexSessionID
+			if changed {
+				sessionLog.Debug(
+					"codex_session_update_from_probe",
+					slog.String("old_id", i.CodexSessionID),
+					slog.String("new_id", sessionID),
+				)
+			}
+			i.CodexSessionID = sessionID
+			i.CodexDetectedAt = time.Now()
+			if i.tmuxSession != nil && i.tmuxSession.Exists() && (changed || envSessionID == "") {
+				_ = i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", i.CodexSessionID)
+			}
+			return ""
+		} else if missingDep != "" {
+			missingProbeDep = missingDep
+		}
+	}
+
+	// 3. Use disk scan only as a bootstrap fallback. Once a session ID is
+	// known, rotation must come from authoritative live evidence above (tmux
+	// env, hook payload, or the Codex process' open rollout file). Polling the
+	// full historical $CODEX_HOME/sessions tree for every active Codex session
+	// burns CPU on large histories and has no stronger ownership signal than the
+	// current binding.
+	if i.CodexSessionID != "" {
+		return missingProbeDep
+	}
+
+	// Only allow unscoped fallback when we don't have a known session ID yet.
+	allowUnscoped := envSessionID == "" && i.CodexSessionID == "" && i.CodexStartedAt > 0
+	if !i.shouldScanCodexSession(allowUnscoped) {
+		return missingProbeDep
+	}
+
+	// When we already have a session ID and the process probe didn't find a
+	// running process, add our current ID to the exclude set so the disk scan
+	// won't reassign it to another instance that shares the same project path.
+	// The disk scan should only discover *new* sessions (e.g. after /new rotation),
+	// not re-discover the same ID we already own.
+	if i.CodexSessionID != "" && excludeIDs != nil {
+		excludeIDs[i.CodexSessionID] = true
+	}
+
+	if sessionID := i.queryCodexSession(excludeIDs, allowUnscoped); sessionID != "" {
+		changed := sessionID != i.CodexSessionID
+		if sessionID != i.CodexSessionID {
+			sessionLog.Debug(
+				"codex_session_update",
+				slog.String("old_id", i.CodexSessionID),
+				slog.String("new_id", sessionID),
+			)
+		}
+		i.CodexSessionID = sessionID
+		i.CodexDetectedAt = time.Now()
+
+		// Sync back to tmux environment for future restarts
+		// Skip redundant writes when env already matches: each write is a tmux subprocess.
+		if i.tmuxSession != nil && i.tmuxSession.Exists() && (changed || envSessionID == "") {
+			_ = i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", i.CodexSessionID)
+		}
+	}
+	return missingProbeDep
+}
+
+// buildGenericCommand builds commands for custom tools defined in [tools.*]
+// If the tool has session resume config, builds capture-resume command similar to Claude/Gemini
+// Otherwise returns the base command as-is
+// Also sources .env files from [shell].env_files and [tools.X].env_file
+//
+// Config fields used:
+//   - resume_flag: CLI flag to resume (e.g., "--resume")
+//   - session_id_env: tmux env var name (e.g., "VIBE_SESSION_ID")
+//   - session_id_json_path: jq path to extract ID (e.g., ".session_id")
+//   - output_format_flag: flag to get JSON output (e.g., "--output-format json")
+//   - dangerous_flag: flag to skip confirmations (e.g., "--auto-approve")
+//   - dangerous_mode: whether to enable dangerous flag by default
+//   - env_file: .env file to source for this tool
+func (i *Instance) buildGenericCommand(baseCommand string) string {
+	envPrefix := i.buildEnvSourceCommand()
+
+	toolDef := GetToolDef(i.Tool)
+	if toolDef == nil {
+		return envPrefix + baseCommand // No custom config, return with env prefix
+	}
+
+	// Check if tool supports session resume (needs both resume_flag and session_id_env)
+	if toolDef.ResumeFlag == "" || toolDef.SessionIDEnv == "" {
+		// No session resume support, just add dangerous flag if configured
+		if toolDef.DangerousMode && toolDef.DangerousFlag != "" {
+			return envPrefix + fmt.Sprintf("%s %s", baseCommand, toolDef.DangerousFlag)
+		}
+		return envPrefix + baseCommand
+	}
+
+	// Get existing session ID from tmux environment (for restart/resume)
+	existingSessionID := ""
+	if i.tmuxSession != nil {
+		if sid, err := i.tmuxSession.GetEnvironment(toolDef.SessionIDEnv); err == nil && sid != "" {
+			existingSessionID = sid
+		}
+	}
+
+	// Build dangerous flag if enabled
+	dangerousFlag := ""
+	if toolDef.DangerousMode && toolDef.DangerousFlag != "" {
+		dangerousFlag = " " + toolDef.DangerousFlag
+	}
+
+	// If we have an existing session ID, just resume.
+	// The session ID env var is propagated via host-side SetEnvironment after tmux start.
+	if existingSessionID != "" {
+		return envPrefix + fmt.Sprintf("%s %s %s%s",
+			baseCommand, toolDef.ResumeFlag, existingSessionID, dangerousFlag)
+	}
+
+	// No existing session ID - need to capture it on first run
+	// This requires output_format_flag and session_id_json_path
+	if toolDef.OutputFormatFlag == "" || toolDef.SessionIDJsonPath == "" {
+		// Can't capture session ID, just start normally
+		if dangerousFlag != "" {
+			return envPrefix + baseCommand + dangerousFlag
+		}
+		return envPrefix + baseCommand
+	}
+
+	// Build capture-resume command similar to Claude/Gemini
+	// Pattern:
+	// 1. Run tool with minimal prompt to get session ID
+	// 2. Extract ID using jq
+	// 3. Resume that session
+	// Note: session ID env var is set via host-side SyncSessionIDsToTmux() once detected.
+	// Fallback: If capture fails, start tool fresh
+	return envPrefix + fmt.Sprintf(
+		`session_id=$(%s %s "." 2>/dev/null | jq -r '%s' 2>/dev/null) || session_id=""; `+
+			`if [ -n "$session_id" ] && [ "$session_id" != "null" ]; then `+
+			`%s %s "$session_id"%s; `+
+			`else %s%s; fi`,
+		baseCommand, toolDef.OutputFormatFlag, toolDef.SessionIDJsonPath,
+		baseCommand, toolDef.ResumeFlag, dangerousFlag,
+		baseCommand, dangerousFlag)
+}
+
+// GetGenericSessionID gets session ID from tmux environment for a custom tool
+// Uses the session_id_env field from tool config
+func (i *Instance) GetGenericSessionID() string {
+	toolDef := GetToolDef(i.Tool)
+	if toolDef == nil || toolDef.SessionIDEnv == "" {
+		return ""
+	}
+	if i.tmuxSession == nil {
+		return ""
+	}
+	sessionID, err := i.tmuxSession.GetEnvironment(toolDef.SessionIDEnv)
+	if err != nil {
+		return ""
+	}
+	return sessionID
+}
+
+// DisplaySessionID returns the session ID the PREVIEW pane surfaces for this
+// instance's tool, mirroring the per-tool branching in the right-pane render
+// so a copy of the preview info carries the same ID the user sees. Returns ""
+// when no session ID is known for the tool.
+func (i *Instance) DisplaySessionID() string {
+	switch {
+	case IsClaudeCompatible(i.Tool):
+		return i.ClaudeSessionID
+	case i.Tool == "gemini":
+		return i.GeminiSessionID
+	case i.Tool == "opencode":
+		return i.OpenCodeSessionID
+	case i.Tool == "codex":
+		return i.CodexSessionID
+	default:
+		return i.GetGenericSessionID()
+	}
+}
+
+// CanRestartGeneric returns true if a custom tool can be restarted with session resume
+func (i *Instance) CanRestartGeneric() bool {
+	toolDef := GetToolDef(i.Tool)
+	if toolDef == nil {
+		return false
+	}
+	// Can restart if we have resume support AND an existing session ID
+	if toolDef.ResumeFlag == "" || toolDef.SessionIDEnv == "" {
+		return false
+	}
+	return i.GetGenericSessionID() != ""
+}
+
+func (i *Instance) applyWrapper(command string) (string, error) {
+	wrapper := i.Wrapper
+	if wrapper == "" {
+		if toolDef := GetToolDef(i.Tool); toolDef != nil {
+			wrapper = toolDef.Wrapper
+		}
+	}
+	if wrapper == "" {
+		return command, nil
+	}
+	if strings.Contains(wrapper, wrapperPlaceholder) {
+		return strings.ReplaceAll(wrapper, wrapperPlaceholder, command), nil
+	}
+	return wrapper, nil
+}
+
+// hasEffectiveWrapper returns true if the instance has a wrapper configured,
+// either directly on the instance or via the tool definition in config.toml.
+func (i *Instance) hasEffectiveWrapper() bool {
+	if i.Wrapper != "" {
+		return true
+	}
+	if toolDef := GetToolDef(i.Tool); toolDef != nil && toolDef.Wrapper != "" {
+		return true
+	}
+	return false
+}
+
+// loadCustomPatternsFromConfig loads detection patterns from built-in defaults + config.toml
+// overrides, and sets them on the tmux session for status detection and tool auto-detection.
+// Works for ALL tools: built-in (claude, gemini, opencode, codex) and custom.
+func (i *Instance) loadCustomPatternsFromConfig() {
+	if i.tmuxSession == nil {
+		return
+	}
+
+	// Merge built-in defaults with any user config overrides/extras
+	raw := MergeToolPatterns(i.Tool)
+	if raw != nil {
+		resolved, err := tmux.CompilePatterns(raw)
+		if err != nil {
+			sessionLog.Warn("pattern_compile_error", slog.String("tool", i.Tool), slog.String("error", err.Error()))
+		}
+		if resolved != nil {
+			i.tmuxSession.SetPatterns(resolved)
+		}
+	}
+
+	// Keep detect patterns for DetectTool() (separate from busy/prompt detection)
+	if toolDef := GetToolDef(i.Tool); toolDef != nil {
+		i.tmuxSession.SetDetectPatterns(i.Tool, toolDef.DetectPatterns)
+	}
+}
+
+// buildTmuxOptionOverrides returns tmux option overrides from user config,
+// adding remain-on-exit for sandbox sessions (needed for dead-pane detection).
+// Returns nil if no overrides apply.
+func (i *Instance) buildTmuxOptionOverrides() map[string]string {
+	var overrides map[string]string
+	tmuxCfg := GetTmuxSettings()
+	if len(tmuxCfg.Options) > 0 {
+		overrides = maps.Clone(tmuxCfg.Options)
+	}
+	if tmuxCfg.WindowStyleOverride != "" {
+		if overrides == nil {
+			overrides = make(map[string]string)
+		}
+		overrides["window-style"] = tmuxCfg.WindowStyleOverride
+		overrides["window-active-style"] = tmuxCfg.WindowStyleOverride
+	}
+	// Sandbox sessions need remain-on-exit so dead-pane detection works.
+	// Non-sandbox sessions use default tmux behaviour (pane closes on exit).
+	if i.IsSandboxed() {
+		if overrides == nil {
+			overrides = make(map[string]string)
+		}
+		overrides["remain-on-exit"] = "on"
+	}
+	return overrides
+}
+
+// adoptExplicitClaudeSessionID adopts an explicit `--session-id <uuid>` baked
+// into i.Command as the authoritative conversation id, correcting any stale or
+// disk-hijacked value, and returns true when an explicit id was present (the
+// caller must then skip mtime-based disk discovery). An explicit id is the
+// user's declaration of WHICH conversation this session owns; honoring it
+// before disk discovery is what stops sibling sessions in a shared cwd from
+// converging on the newest transcript. Shared by both session-id preludes —
+// ensureClaudeSessionIDFromDiskForRestart (#1147) and
+// ensureClaudeSessionIDFromDisk (#1465). The reason label distinguishes the
+// Start path from the Restart path in the resume log line.
+func (i *Instance) adoptExplicitClaudeSessionID(reason string) bool {
+	explicit, ok := extractExplicitClaudeSessionID(i.Command)
+	if !ok {
+		return false
+	}
+	if i.ClaudeSessionID != explicit {
+		i.ClaudeSessionID = explicit
+		sessionLog.Info("resume: id="+explicit+" reason="+reason,
+			slog.String("instance_id", i.ID),
+			slog.String("claude_session_id", explicit),
+			slog.String("reason", reason))
+	}
+	if i.ClaudeDetectedAt.IsZero() {
+		i.ClaudeDetectedAt = time.Now()
+	}
+	return true
+}
+
+// ensureClaudeSessionIDFromDisk is the Phase 5 / REQ-7 prelude invoked by
+// Start() and StartWithMessage() when an IsClaudeCompatible Instance has an
+// empty ClaudeSessionID. It attempts to discover the latest UUID-named
+// JSONL under Claude's projects dir for i.ProjectPath and, on success,
+// mutates i.ClaudeSessionID to that UUID IN PLACE so the very next check
+// (`if i.ClaudeSessionID != ""`) naturally routes through
+// buildClaudeResumeCommand, reusing the Phase 3 resume contract verbatim.
+//
+// PERSIST-11: runs uniformly on every empty-ID Claude-compatible start —
+// no branch on i.Command (custom wrapper vs default wrapper), matching
+// spec REQ-7 acceptance item 7 and CONTEXT D-04.
+//
+// PERSIST-12: the write-through onto i.ClaudeSessionID is in-memory; the
+// external storage layer (TUI main loop / CLI save cycle / storage
+// watcher at internal/session/storage.go) picks up the mutation on its
+// next save — identical to how Phase 3's buildClaudeCommand at
+// instance.go:567 mutates i.ClaudeSessionID without an inline save.
+//
+// PERSIST-13: returns quietly (no error, no log) when no JSONL is found.
+// Start() then falls through to its existing fresh-session branch.
+//
+// D-07: emits exactly ONE `resume: id=<uuid> reason=jsonl_discovery`
+// sessionLog.Info line on discovery success. buildClaudeResumeCommand
+// downstream will emit its OWN `resume: id=<uuid> reason=...` line with
+// reason=conversation_data_present or reason=session_id_flag_no_jsonl —
+// two grep-stable lines for a Phase 5 discovery start, distinguishable
+// by the `reason=` attr.
+func (i *Instance) ensureClaudeSessionIDFromDisk() {
+	// Issue #1465: an explicit `--session-id <uuid>` baked into i.Command is
+	// the authoritative conversation id. Adopt it before the #608 gate and
+	// disk discovery so a Start-path session sharing a cwd with newer sibling
+	// transcripts (e.g. a removed-then-recreated review session) cannot hijack
+	// a sibling's conversation. The Restart prelude already does this for
+	// #1147; this closes the same gap on the Start path.
+	if i.adoptExplicitClaudeSessionID("session_id_flag_explicit") {
+		return
+	}
+	if i.ClaudeSessionID != "" {
+		return
+	}
+	// Fix for https://github.com/potato-hash/groundskeeper/issues/608:
+	// Only attempt JSONL discovery for sessions that previously had a
+	// conversation (restart recovery). A zero ClaudeDetectedAt means this
+	// session has never been started before — it should get a fresh
+	// conversation, not resume another session's history from the same
+	// directory.
+	if i.ClaudeDetectedAt.IsZero() {
+		return
+	}
+	// Issue #663: multi-repo sessions write their JSONL under
+	// ~/.claude/projects/<encoded MultiRepoTempDir>/. ProjectPath is a
+	// symlink inside MultiRepoTempDir, so EvalSymlinks would resolve it
+	// to the original source repo and miss the JSONL. Use
+	// EffectiveWorkingDir() so the encoded-path key matches what Claude
+	// actually wrote on the first boot.
+	lookupPath := i.EffectiveWorkingDir()
+	uuid, found := discoverLatestClaudeJSONL(lookupPath)
+	if !found {
+		return
+	}
+	i.ClaudeSessionID = uuid
+	sessionLog.Info("resume: id="+uuid+" reason=jsonl_discovery",
+		slog.String("instance_id", i.ID),
+		slog.String("claude_session_id", uuid),
+		slog.String("path", lookupPath),
+		slog.String("reason", "jsonl_discovery"))
+}
+
+// ensureClaudeSessionIDFromDiskForRestart is the Restart()-path variant of
+// ensureClaudeSessionIDFromDisk. Issue #956: custom-command Claude sessions
+// (Tool=claude with a wrapper Command) bypass happy-path session-id capture,
+// and if no hook ever propagated CLAUDE_SESSION_ID back to the Instance the
+// ClaudeSessionID field stays empty even after a real conversation has
+// written a JSONL transcript to disk. On Restart() the fallback recreate
+// branch then re-spawns the wrapper without `--resume`, dropping history.
+//
+// Start()'s prelude (ensureClaudeSessionIDFromDisk) refuses to discover for
+// instances with ClaudeDetectedAt==zero (issue #608) so a brand-new spawn
+// does not adopt another session's history from the same project directory.
+// Restart() implies the instance previously ran — the tmux session existed
+// and (in the bug scenario) had a live Claude conversation — so the gate
+// is safe to bypass here. ClaudeDetectedAt is then stamped so subsequent
+// callers (status refresh, persistence) see a consistent capture time.
+func (i *Instance) ensureClaudeSessionIDFromDiskForRestart() {
+	// Issue #1147: an explicit `--session-id <uuid>` in i.Command is the
+	// user's authoritative declaration of WHICH conversation this session
+	// owns. In multi-session-per-cwd setups (5 tenant sessions sharing one
+	// project dir, each with its own --session-id), the pre-#1147
+	// disk-discovery walk picks the newest sibling JSONL by mtime and
+	// silently hijacks every sibling's id onto whichever transcript was
+	// written last. The dup-sweeper then kills 4 of 5 sessions for
+	// sharing a CLAUDE_SESSION_ID. Adopting the explicit id BEFORE the
+	// non-empty short-circuit ensures it also corrects a previously-
+	// hijacked id from an earlier buggy run.
+	if i.adoptExplicitClaudeSessionID("session_id_flag_explicit_restart") {
+		return
+	}
+	if i.ClaudeSessionID != "" {
+		return
+	}
+	lookupPath := i.EffectiveWorkingDir()
+	uuid, found := discoverLatestClaudeJSONL(lookupPath)
+	if !found {
+		return
+	}
+	i.ClaudeSessionID = uuid
+	if i.ClaudeDetectedAt.IsZero() {
+		i.ClaudeDetectedAt = time.Now()
+	}
+	sessionLog.Info("resume: id="+uuid+" reason=jsonl_discovery_restart",
+		slog.String("instance_id", i.ID),
+		slog.String("claude_session_id", uuid),
+		slog.String("path", lookupPath),
+		slog.String("reason", "jsonl_discovery_restart"))
+}
+
+// Start starts the session in tmux.
+//
+// Issue #1040: gated by acquireInstanceSpawnLock plus a "spawned-while-
+// we-waited" stamp so concurrent `agent-deck session start <id>`
+// invocations after a Claude exit don't each fall through the "tmux
+// session does not exist" gate and spawn parallel sessions. The lock
+// and gate are inlined here (rather than wrapping the whole body in a
+// SpawnAttempt helper) to preserve the structural-grep contract that
+// checks Start()'s body for the #745 IsForkAwaitingStart guard.
+func (i *Instance) Start() error {
+	beforeLock := nowFn()
+	release, lockErr := acquireInstanceSpawnLock(i.ID)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer release()
+	if spawnedSince(i.ID, beforeLock) {
+		return nil
+	}
+	defer recordInstanceSpawn(i.ID)
+
+	if i.tmuxSession == nil {
+		return fmt.Errorf("tmux session not initialized")
+	}
+
+	// Prepare scratch CLAUDE_CONFIG_DIR for non-conductor claude workers
+	// (issue #59, v1.7.68). Runs before command-building so the
+	// CLAUDE_CONFIG_DIR= prefix picks up the scratch path. No-op for
+	// conductors, explicit telegram channel owners, and non-claude tools.
+	i.prepareWorkerScratchConfigDirForSpawn() // also runs plugin auto-install per fix C1
+
+	// Build command based on tool type
+	// Priority: claude-compatible (built-in + custom wrapping claude) → built-in tools → custom tools → raw command
+	var command string
+	switch {
+	case IsClaudeCompatible(i.Tool):
+		// #745 fork guard: a fork target arrives here with a pre-built
+		// first-start command (`claude --session-id <new> --resume <parent>
+		// --fork-session`) and a pre-assigned ClaudeSessionID (the new fork
+		// UUID), which would otherwise send us into buildClaudeResumeCommand
+		// and silently drop --resume / --fork-session. Run the fork command
+		// verbatim and clear the sentinel so a subsequent Restart() takes the
+		// normal resume path.
+		if i.IsForkAwaitingStart {
+			command = i.consumeForkStartCommand()
+			sessionLog.Info("resume: none reason=fork_awaiting_start",
+				slog.String("instance_id", i.ID),
+				slog.String("path", i.ProjectPath),
+				slog.String("reason", "fork_awaiting_start"))
+			break
+		}
+		// REQ-2 dispatch: if a Claude session id is already bound to this
+		// instance, resume it rather than minting a fresh UUID via
+		// buildClaudeCommand (instance.go:566-567). Mirrors Restart()'s
+		// respawn-pane branch at instance.go:3788. See CONTEXT Decision 1.
+		//
+		// OBS-02 emission: buildClaudeResumeCommand emits its own "resume: "
+		// Info line (conversation_data_present / session_id_flag_no_jsonl).
+		// The fresh-session line is emitted here so every Claude start
+		// produces exactly one "resume: " record in the session log. See
+		// CONTEXT Decision 2.
+		//
+		// REQ-7 / PERSIST-11..13 prelude (Phase 5): if ClaudeSessionID is
+		// empty, attempt to discover the latest JSONL on disk and populate
+		// the field before the existing resume/fresh branch below decides.
+		// If discovery finds nothing, the field stays empty and the
+		// else-branch fires as today (fresh session).
+		i.ensureClaudeSessionIDFromDisk()
+		if i.ClaudeSessionID != "" {
+			command = i.buildClaudeResumeCommand()
+		} else {
+			sessionLog.Info("resume: none reason=fresh_session",
+				slog.String("instance_id", i.ID),
+				slog.String("path", i.ProjectPath),
+				slog.String("reason", "fresh_session"))
+			command = i.buildClaudeCommand(i.Command)
+		}
+	case i.Tool == "gemini":
+		command = i.buildGeminiCommand(i.Command)
+	case i.Tool == "copilot":
+		command = buildCopilotCommand(i)
+		// Record start time for session ID detection (Unix millis)
+		i.CopilotStartedAt = time.Now().UnixMilli()
+	case i.Tool == "opencode":
+		if i.IsForkAwaitingStart {
+			// Wrap the deferred fork script through buildOpenCodeCommand so the
+			// first-start command is byte-identical to the pre-deferred behavior
+			// (the script carries its own env prefix); restart falls through to the
+			// resume/fresh branch below via the stable "opencode" base Command.
+			command = i.buildOpenCodeCommand(i.consumeForkStartCommand())
+			i.OpenCodeStartedAt = time.Now().UnixMilli()
+			sessionLog.Info("resume: none reason=fork_awaiting_start",
+				slog.String("instance_id", i.ID),
+				slog.String("path", i.ProjectPath),
+				slog.String("reason", "fork_awaiting_start"))
+			break
+		}
+		command = i.buildOpenCodeCommand(i.Command)
+		// Record start time for session ID detection (Unix millis)
+		i.OpenCodeStartedAt = time.Now().UnixMilli()
+	case IsCodexCompatible(i.Tool):
+		if i.IsForkAwaitingStart {
+			command = i.consumeForkStartCommand()
+			// Stamp the start time so the session-id disk scan is lower-bounded and
+			// can't rebind this fork to an older same-project rollout (e.g. the
+			// parent it just forked from). The normal path stamps after
+			// buildCodexCommand, which this fork branch skips.
+			i.CodexStartedAt = time.Now().UnixMilli()
+			sessionLog.Info("resume: none reason=fork_awaiting_start",
+				slog.String("instance_id", i.ID),
+				slog.String("path", i.ProjectPath),
+				slog.String("reason", "fork_awaiting_start"))
+			break
+		}
+		command = i.buildCodexCommand(i.Command)
+		// Record start time for session ID detection (Unix millis)
+		i.CodexStartedAt = time.Now().UnixMilli()
+	case i.Tool == "pi":
+		if i.IsForkAwaitingStart {
+			command = i.consumeForkStartCommand()
+			sessionLog.Info("resume: none reason=fork_awaiting_start",
+				slog.String("instance_id", i.ID),
+				slog.String("path", i.ProjectPath),
+				slog.String("reason", "fork_awaiting_start"))
+			break
+		}
+		command = i.buildPiCommand(i.Command)
+	case i.Tool == "copilot":
+		command = i.buildCopilotCommand(i.Command)
+	case i.Tool == "cursor":
+		command = i.buildCursorCommand(i.Command, false)
+	case i.Tool == "hermes":
+		command = i.buildHermesCommand(i.Command)
+	default:
+		// Check if this is a custom tool with session resume config
+		if toolDef := GetToolDef(i.Tool); toolDef != nil {
+			command = i.buildGenericCommand(i.Command)
+		} else {
+			command = i.Command
+		}
+	}
+
+	var containerName string
+	var err error
+	command, containerName, err = i.prepareCommand(command)
+	if err != nil {
+		return err
+	}
+	if containerName != "" {
+		i.SandboxContainer = containerName
+	}
+
+	// Load custom patterns for status detection
+	i.loadCustomPatternsFromConfig()
+
+	// Build tmux option overrides from config (e.g. allow-passthrough = "all").
+	// Sandbox sessions also get remain-on-exit for dead-pane detection.
+	i.tmuxSession.OptionOverrides = i.buildTmuxOptionOverrides()
+	i.tmuxSession.RunCommandAsInitialProcess = i.IsSandboxed() || i.Tool != "shell"
+	i.applyLaunchSettingsFromConfig()
+
+	// Start the tmux session
+	if err := i.tmuxSession.Start(command); err != nil {
+		return fmt.Errorf("failed to start tmux session: %w", err)
+	}
+
+	// CFG-07: emit a single-shot log line documenting which priority level
+	// resolved CLAUDE_CONFIG_DIR for this session. Claude-compatible tools
+	// only; Fork inherits from its parent and does not log here.
+	if IsClaudeCompatible(i.Tool) {
+		i.logClaudeConfigResolution()
+	}
+
+	// Set AGENTDECK_INSTANCE_ID for Claude hooks to identify this session
+	// This enables real-time status updates via Stop/SessionStart hooks
+	if err := i.tmuxSession.SetEnvironment("AGENTDECK_INSTANCE_ID", i.ID); err != nil {
+		sessionLog.Warn("set_instance_id_failed", slog.String("error", err.Error()))
+	}
+
+	// Set AGENTDECK_PROFILE (host-side, tool-agnostic) so a bare `agent-deck`
+	// command run inside this session resolves the session's own profile rather
+	// than falling back to "default". Covers shells/OpenCode/etc. that have no
+	// inline env-prefix injection of their own.
+	i.ensureProfileEnv()
+
+	// Propagate tool session IDs into the tmux environment (host-side, works for both
+	// sandbox and non-sandbox sessions). This replaces the previous approach of embedding
+	// "tmux set-environment" calls in the shell command string, which silently failed
+	// inside Docker sandbox containers that have no access to the host tmux socket.
+	if i.ClaudeSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("CLAUDE_SESSION_ID", i.ClaudeSessionID)
+		// Kill any other agentdeck tmux session with the same Claude session ID
+		// to prevent duplicates running `claude --resume` with the same conversation (#596).
+		tmux.KillSessionsWithEnvValue("CLAUDE_SESSION_ID", i.ClaudeSessionID, i.tmuxSession.Name)
+	}
+	if i.GeminiSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("GEMINI_SESSION_ID", i.GeminiSessionID)
+	}
+	if i.Tool == "gemini" {
+		yoloVal := "false"
+		if i.GeminiYoloMode != nil && *i.GeminiYoloMode {
+			yoloVal = "true"
+		}
+		_ = i.tmuxSession.SetEnvironment("GEMINI_YOLO_MODE", yoloVal)
+	}
+	// OpenCode and Codex IDs are detected asynchronously; SyncSessionIDsToTmux() handles
+	// propagation once they are available.
+	// Copilot session ID propagation (if already known from prior session)
+	if i.CopilotSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("COPILOT_SESSION_ID", i.CopilotSessionID)
+	}
+
+	// Propagate COLORFGBG into the tmux session environment so that any new
+	// shell or process spawned inside the session inherits the correct
+	// light/dark hint. The command prefix already exports it for the initial
+	// process, but set-environment covers subsequent shells/windows.
+	if colorfgbg := ThemeColorFGBG(); colorfgbg != "" {
+		_ = i.tmuxSession.SetEnvironment("COLORFGBG", colorfgbg)
+	}
+
+	// Capture MCPs that are now loaded (for sync tracking)
+	i.CaptureLoadedMCPs()
+
+	// Record start time for grace period (prevents error flash during tmux startup)
+	i.lastStartTime = time.Now()
+	i.markStarted() // persisted stamp (issue #30 — cross-process freshness guard)
+
+	// New sessions start as STARTING - shows they're initializing
+	// After 5s grace period, status will be properly detected from tmux
+	if command != "" {
+		i.Status = StatusStarting
+	}
+
+	// Start async session ID detection for OpenCode
+	// This runs in background and captures the session ID once OpenCode creates it
+	if i.Tool == "opencode" {
+		go i.detectOpenCodeSessionAsync()
+	}
+
+	// Start async session ID detection for Codex
+	// This runs in background and captures the session ID once Codex creates it
+	if IsCodexCompatible(i.Tool) {
+		go i.detectCodexSessionAsync()
+	}
+
+	// Start async session ID detection for Copilot
+	// This runs in background and captures the session ID from events.jsonl
+	if i.Tool == "copilot" && i.CopilotSessionID == "" {
+		go i.detectCopilotSessionAsync()
+	}
+
+	return nil
+}
+
+// StartWithMessage starts the session and sends an initial message when ready
+// The message is sent synchronously after detecting the agent's prompt
+// This approach is more reliable than embedding send logic in the tmux command
+// Works for Claude, Gemini, OpenCode, and other agents
+//
+// Issue #1040: same per-instance spawn lock as Start() — a concurrent
+// `launch -m "..."` racing with a poller-triggered Start() must not
+// produce two parallel tmux sessions.
+func (i *Instance) StartWithMessage(message string) error {
+	beforeLock := nowFn()
+	release, lockErr := acquireInstanceSpawnLock(i.ID)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer release()
+	if spawnedSince(i.ID, beforeLock) {
+		return nil
+	}
+	defer recordInstanceSpawn(i.ID)
+
+	if i.tmuxSession == nil {
+		return fmt.Errorf("tmux session not initialized")
+	}
+
+	// Prepare scratch CLAUDE_CONFIG_DIR for non-conductor claude workers
+	// (issue #59, v1.7.68). Same call as in Start() — both spawn paths
+	// must pin the telegram plugin off for workers.
+	i.prepareWorkerScratchConfigDirForSpawn() // also runs plugin auto-install per fix C1
+
+	// Start session normally (no embedded message logic)
+	// Priority: built-in tools (claude, gemini, opencode, codex) → custom tools from config.toml → raw command
+	var command string
+	switch {
+	case IsClaudeCompatible(i.Tool):
+		// #745 fork guard: mirrors the Start() branch above. A fork target
+		// that arrives through StartWithMessage must also bypass the
+		// resume/fresh dispatch and run its first-start command verbatim, or
+		// the --resume <parent>/--fork-session flags are silently dropped.
+		if i.IsForkAwaitingStart {
+			command = i.consumeForkStartCommand()
+			sessionLog.Info("resume: none reason=fork_awaiting_start",
+				slog.String("instance_id", i.ID),
+				slog.String("path", i.ProjectPath),
+				slog.String("reason", "fork_awaiting_start"))
+			break
+		}
+		// REQ-2 dispatch: resume over mint when a session id is bound. The
+		// initial message passed into StartWithMessage is delivered via the
+		// existing post-start PTY send path later in this function (see
+		// sendMessageWhenReady below) — not embedded in the command string —
+		// so buildClaudeResumeCommand (which does not accept a message
+		// argument) is a drop-in replacement here, matching the Start()
+		// dispatch at instance.go:1881. See CONTEXT Decision 1 + Decision 11.
+		//
+		// OBS-02 emission: buildClaudeResumeCommand emits the resume line
+		// itself; the fresh-session line is emitted here so StartWithMessage
+		// produces exactly one "resume: " record per call (matching Start()).
+		// See CONTEXT Decision 2.
+		//
+		// REQ-7 / PERSIST-11..13 prelude (Phase 5): same disk-scan prelude
+		// as Start() above, so the `agent-deck session send --initial-message`
+		// path resumes custom-command sessions uniformly.
+		i.ensureClaudeSessionIDFromDisk()
+		if i.ClaudeSessionID != "" {
+			command = i.buildClaudeResumeCommand()
+		} else {
+			sessionLog.Info("resume: none reason=fresh_session",
+				slog.String("instance_id", i.ID),
+				slog.String("path", i.ProjectPath),
+				slog.String("reason", "fresh_session"))
+			command = i.buildClaudeCommand(i.Command)
+		}
+	case i.Tool == "gemini":
+		command = i.buildGeminiCommand(i.Command)
+	case i.Tool == "opencode":
+		if i.IsForkAwaitingStart {
+			command = i.buildOpenCodeCommand(i.consumeForkStartCommand())
+			i.OpenCodeStartedAt = time.Now().UnixMilli()
+			sessionLog.Info("resume: none reason=fork_awaiting_start",
+				slog.String("instance_id", i.ID),
+				slog.String("path", i.ProjectPath),
+				slog.String("reason", "fork_awaiting_start"))
+			break
+		}
+		command = i.buildOpenCodeCommand(i.Command)
+		i.OpenCodeStartedAt = time.Now().UnixMilli()
+	case IsCodexCompatible(i.Tool):
+		if i.IsForkAwaitingStart {
+			command = i.consumeForkStartCommand()
+			// Stamp the start time so the session-id disk scan is lower-bounded and
+			// can't rebind this fork to an older same-project rollout (e.g. the
+			// parent it just forked from). The normal path stamps after
+			// buildCodexCommand, which this fork branch skips.
+			i.CodexStartedAt = time.Now().UnixMilli()
+			sessionLog.Info("resume: none reason=fork_awaiting_start",
+				slog.String("instance_id", i.ID),
+				slog.String("path", i.ProjectPath),
+				slog.String("reason", "fork_awaiting_start"))
+			break
+		}
+		command = i.buildCodexCommand(i.Command)
+		i.CodexStartedAt = time.Now().UnixMilli()
+	case i.Tool == "pi":
+		if i.IsForkAwaitingStart {
+			command = i.consumeForkStartCommand()
+			sessionLog.Info("resume: none reason=fork_awaiting_start",
+				slog.String("instance_id", i.ID),
+				slog.String("path", i.ProjectPath),
+				slog.String("reason", "fork_awaiting_start"))
+			break
+		}
+		command = i.buildPiCommand(i.Command)
+	case i.Tool == "copilot":
+		command = i.buildCopilotCommand(i.Command)
+	case i.Tool == "crush":
+		command = i.buildCrushCommand(i.Command)
+	case i.Tool == "cursor":
+		command = i.buildCursorCommand(i.Command, false)
+	case i.Tool == "hermes":
+		command = i.buildHermesCommand(i.Command)
+	default:
+		// Check if this is a custom tool with session resume config
+		if toolDef := GetToolDef(i.Tool); toolDef != nil {
+			command = i.buildGenericCommand(i.Command)
+		} else {
+			command = i.Command
+		}
+	}
+
+	var containerName string
+	var err error
+	command, containerName, err = i.prepareCommand(command)
+	if err != nil {
+		return err
+	}
+	if containerName != "" {
+		i.SandboxContainer = containerName
+	}
+
+	// Load custom patterns for status detection.
+	i.loadCustomPatternsFromConfig()
+
+	// Build tmux option overrides from config (e.g. allow-passthrough = "all").
+	// Sandbox sessions also get remain-on-exit for dead-pane detection.
+	i.tmuxSession.OptionOverrides = i.buildTmuxOptionOverrides()
+	i.tmuxSession.RunCommandAsInitialProcess = i.IsSandboxed() || i.Tool != "shell"
+	i.applyLaunchSettingsFromConfig()
+
+	// Start the tmux session
+	if err := i.tmuxSession.Start(command); err != nil {
+		return fmt.Errorf("failed to start tmux session: %w", err)
+	}
+
+	// CFG-07: emit a single-shot log line documenting which priority level
+	// resolved CLAUDE_CONFIG_DIR for this session. Claude-compatible tools
+	// only; sister path to Start().
+	if IsClaudeCompatible(i.Tool) {
+		i.logClaudeConfigResolution()
+	}
+
+	// Set AGENTDECK_INSTANCE_ID for Claude hooks to identify this session
+	// This enables real-time status updates via Stop/SessionStart hooks
+	if err := i.tmuxSession.SetEnvironment("AGENTDECK_INSTANCE_ID", i.ID); err != nil {
+		sessionLog.Warn("set_instance_id_failed", slog.String("error", err.Error()))
+	}
+
+	// Set AGENTDECK_PROFILE (host-side, tool-agnostic) so a bare `agent-deck`
+	// command run inside this session resolves the session's own profile rather
+	// than falling back to "default". Covers shells/OpenCode/etc. that have no
+	// inline env-prefix injection of their own.
+	i.ensureProfileEnv()
+
+	// Propagate tool session IDs into the tmux environment (host-side, works for both
+	// sandbox and non-sandbox sessions).
+	if i.ClaudeSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("CLAUDE_SESSION_ID", i.ClaudeSessionID)
+	}
+	if i.GeminiSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("GEMINI_SESSION_ID", i.GeminiSessionID)
+	}
+	if i.Tool == "gemini" {
+		yoloVal := "false"
+		if i.GeminiYoloMode != nil && *i.GeminiYoloMode {
+			yoloVal = "true"
+		}
+		_ = i.tmuxSession.SetEnvironment("GEMINI_YOLO_MODE", yoloVal)
+	}
+
+	// Propagate COLORFGBG into the tmux session environment so that any new
+	// shell or process spawned inside the session inherits the correct
+	// light/dark hint.
+	if colorfgbg := ThemeColorFGBG(); colorfgbg != "" {
+		_ = i.tmuxSession.SetEnvironment("COLORFGBG", colorfgbg)
+	}
+
+	// Capture MCPs that are now loaded (for sync tracking)
+	i.CaptureLoadedMCPs()
+
+	// Record start time for grace period (prevents error flash during tmux startup)
+	i.lastStartTime = time.Now()
+	i.markStarted() // persisted stamp (issue #30 — cross-process freshness guard)
+
+	// New sessions start as STARTING
+	i.Status = StatusStarting
+
+	// Start async session ID detection for tools that persist IDs out-of-band.
+	if i.Tool == "opencode" {
+		go i.detectOpenCodeSessionAsync()
+	}
+	if IsCodexCompatible(i.Tool) {
+		go i.detectCodexSessionAsync()
+	}
+
+	// Send message synchronously (CLI will wait)
+	if message != "" {
+		return i.sendMessageWhenReady(message)
+	}
+
+	return nil
+}
+
+// sendMessageWhenReady waits for the agent to be ready and sends the message.
+// Uses the shared WaitForAgentReady helper (same semantics as `session send`).
+func (i *Instance) sendMessageWhenReady(message string) error {
+	if i.tmuxSession == nil {
+		return fmt.Errorf("tmux session not initialized")
+	}
+
+	if err := send.WaitForAgentReady(i.tmuxSession, i.Tool, send.DefaultAgentReadyTimeout, send.PromptGates{
+		ClaudeComposer: IsClaudeCompatible(i.Tool),
+		CodexPrompt:    IsCodexCompatible(i.Tool),
+	}); err != nil {
+		return fmt.Errorf("timeout waiting for agent to be ready")
+	}
+
+	if err := i.tmuxSession.SendKeysAndEnter(message); err != nil {
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	// The verify loop below keys off Claude-specific signals (an
+	// "active" transition, composer glyph, unsent-paste markers). Non-
+	// Claude tools never surface those, so the loop false-negatives a
+	// delivered message and Enter-spams the composer; skip it for every
+	// non-Claude tool (#1238 — generalizes #1228's codex-only skip).
+	if !UsesClaudeDeliveryVerify(i.Tool) {
+		return nil
+	}
+
+	// Verify the agent accepted Enter and began processing.
+	const verifyRetries = 50
+	const verifyDelay = 300 * time.Millisecond
+	const activeSuccessThreshold = 2
+	const waitingAfterActiveThreshold = 2
+	waitingNoMarkerChecks := 0
+	activeChecks := 0
+	sawActiveAfterSend := false
+
+	for retry := 0; retry < verifyRetries; retry++ {
+		time.Sleep(verifyDelay)
+
+		unsentPromptDetected := false
+		if rawContent, captureErr := i.tmuxSession.CapturePaneFresh(); captureErr == nil {
+			content := tmux.StripANSI(rawContent)
+			unsentPromptDetected = send.HasUnsentPastedPrompt(content) || send.HasUnsentComposerPrompt(content, message)
+		}
+		verifiedStatus, statusErr := i.tmuxSession.GetStatus()
+
+		if unsentPromptDetected {
+			waitingNoMarkerChecks = 0
+			activeChecks = 0
+			_ = i.tmuxSession.SendEnter()
+			continue
+		}
+
+		if statusErr == nil && verifiedStatus == "active" {
+			sawActiveAfterSend = true
+			waitingNoMarkerChecks = 0
+			activeChecks++
+			if activeChecks >= activeSuccessThreshold {
+				return nil
+			}
+			continue
+		}
+		activeChecks = 0
+
+		if statusErr == nil && (verifiedStatus == "waiting" || verifiedStatus == "idle") {
+			if sawActiveAfterSend {
+				waitingNoMarkerChecks++
+				if waitingNoMarkerChecks >= waitingAfterActiveThreshold {
+					return nil
+				}
+			} else {
+				waitingNoMarkerChecks = 0
+				if retry < 5 || retry%2 == 0 {
+					_ = i.tmuxSession.SendEnter()
+				}
+			}
+			continue
+		}
+
+		waitingNoMarkerChecks = 0
+		if retry < 4 {
+			_ = i.tmuxSession.SendEnter()
+		}
+	}
+
+	return nil
+}
+
+// errorRecheckInterval - how often to recheck sessions that don't exist
+// Ghost sessions (in JSON but not in tmux) are rechecked at this interval
+// instead of every 500ms tick, dramatically reducing subprocess spawns
+const errorRecheckInterval = 30 * time.Second
+
+// resumeCheckRetryDelay is the wait between the two sessionHasConversationData
+// checks in buildClaudeResumeCommand (Issue #662). SessionEnd writes are
+// observed to finish within ~100-150ms in practice; 200ms gives headroom
+// without noticeably slowing the restart path when there truly is no jsonl.
+var resumeCheckRetryDelay = 200 * time.Millisecond
+
+// clearRebindMtimeGrace is the mtime gap (candidate.mtime - current.mtime)
+// above which UpdateHookStatus treats a smaller candidate as a legitimate
+// user-initiated new session (e.g. /clear) instead of a stale flap (issue
+// #856). 5s is well above the ~2s hook poll cadence — a #661 flap touches
+// both files within that window — but well below the time it takes a user
+// to type /clear and a follow-up prompt.
+var clearRebindMtimeGrace = 5 * time.Second
+
+func hookFastPathFreshnessForTool(tool, hookStatus string) time.Duration {
+	if !IsCodexCompatible(tool) {
+		return hookFastPathWindow
+	}
+
+	// Codex hook events are turn-based and can be sparse depending on command mode.
+	// Keep running freshness short, but preserve completion/waiting signals longer so
+	// the user can reliably see attention-needed state.
+	switch hookStatus {
+	case "waiting":
+		return codexHookWaitingFastPathWindow
+	default:
+		return codexHookRunningFastPathWindow
+	}
+}
+
+// shellForegroundRunning reports whether a "shell" tool session currently has a
+// genuine non-interactive foreground process running (e.g. "node" from
+// `yarn dev`, "java" from `mvn spring-boot:run`). It returns false for the
+// interactive shell itself and for interactive foreground programs (editors,
+// pagers, system monitors, remote shells, multiplexers) that are really waiting
+// for the user rather than doing background work — otherwise opening vim or
+// sitting at an ssh prompt would show a perpetual running indicator.
+//
+// It relies on the pane-info cache warmed once per tick by RefreshPaneInfoCache
+// (TUI backgroundStatusUpdate / Web refreshStatuses / CLI status refresh). When
+// the cache is cold the lookup misses and this returns false, preserving the
+// historical "shell maps to idle" behavior. Caller must hold i.mu.
+//
+// The feature is opt-in via [status] shell_running_indicator (default false):
+// the interactive-program denylist cannot be complete, so without the flag a
+// shell sitting at a psql/REPL/fzf prompt would flip everyone's historical
+// "shell → idle" default to running.
+//
+// Staleness guards — only fresh pane info may promote idle→running:
+//   - GetCachedPaneInfoSnapshot enforces the cache-wide 4s TTL (2 ticks).
+//   - A dead pane (#{pane_dead}) means the command already exited.
+//   - A snapshot taken before this instance's last start describes a previous
+//     same-name session (kill+recreate within the TTL), not this one.
+func (i *Instance) shellForegroundRunning() bool {
+	if i.tmuxSession == nil {
+		return false
+	}
+	cfg, _ := LoadUserConfig()
+	if cfg == nil || !cfg.Status.ShellRunningIndicator {
+		return false
+	}
+	paneInfo, snapshotAt, ok := tmux.GetCachedPaneInfoSnapshot(i.tmuxSession.Name)
+	if !ok || paneInfo.Dead || paneInfo.CurrentCommand == "" {
+		return false
+	}
+	if !i.lastStartTime.IsZero() && snapshotAt.Before(i.lastStartTime) {
+		return false
+	}
+	cmd := paneInfo.CurrentCommand
+	if isShellBinary(cmd) || isInteractiveForegroundProgram(cmd) {
+		return false
+	}
+	return true
+}
+
+// neverStarted reports whether this session was added but never started, so an
+// absent tmux session is expected rather than a fault. Two conditions must both
+// hold (caller holds i.mu):
+//
+//  1. The instance was added in THIS process (addedThisProcess), not reloaded
+//     from storage. A reloaded session whose tmux later dies is a genuine error
+//     (instance_cli_parity_test.go TestUpdateStatus_CLIvsTUIParity_Error builds
+//     a reloaded struct literal, so addedThisProcess is false there).
+//  2. Start() was never called (lastStartTime is zero). A started-then-killed
+//     session has a non-zero lastStartTime and must surface as error
+//     (lifecycle_regression_test.go phase5).
+//  3. The status is still the pristine post-add state (idle or starting).
+func (i *Instance) neverStarted() bool {
+	return i.addedThisProcess && i.lastStartTime.IsZero() &&
+		(i.Status == StatusIdle || i.Status == StatusStarting)
+}
+
+// UpdateStatus updates the session status by checking tmux.
+// Thread-safe: acquires write lock to protect Status, Tool, and internal cache fields.
+// debounceFlipFromRunning decides whether a tmux-derived status that flips AWAY
+// from running should be held for one confirming sample. It returns the status
+// to apply, the next value for the pending marker, and whether the flip was
+// HELD (the caller applies `apply` and returns early when held is true).
+//
+// Held only on the FIRST tmux-inferred running→{waiting,error} sample (pending
+// was false): a long single tool-call past the hook freshness window, or a
+// transient CapturePane failure during subprocess churn, can present that flip
+// for one tick and then recover. A genuinely dead pane (tmux raw "inactive")
+// and a "dead" hook are real terminal signals and are never debounced. Pure for
+// testability.
+func debounceFlipFromRunning(prev, derived Status, tmuxRaw, hookStatus string, pending bool) (apply Status, nextPending bool, held bool) {
+	flipAwayFromRunning := (derived == StatusWaiting || derived == StatusError) &&
+		tmuxRaw != "inactive" && hookStatus != "dead"
+	if prev == StatusRunning && flipAwayFromRunning && !pending {
+		return StatusRunning, true, true
+	}
+	return derived, false, false
+}
+
+func (i *Instance) UpdateStatus() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	// Short grace period for tmux initialization (not Claude startup)
+	// Use lastStartTime for accuracy on restarts, fallback to CreatedAt
+	graceTime := i.lastStartTime
+	if graceTime.IsZero() {
+		graceTime = i.CreatedAt
+	}
+	// 1.5 seconds is enough for tmux to create the session (<100ms typically)
+	// Don't block status detection once tmux session exists
+	if time.Since(graceTime) < 1500*time.Millisecond {
+		// Only skip if tmux session doesn't exist yet
+		if i.tmuxSession == nil || !i.tmuxSession.Exists() {
+			if i.Status != StatusRunning && i.Status != StatusIdle {
+				i.Status = StatusStarting
+			}
+			return nil
+		}
+		// Session exists - allow normal status detection below
+	}
+
+	if i.tmuxSession == nil {
+		if i.neverStarted() {
+			// A session that was added but never started has no tmux yet; it is
+			// not an error, just not-yet-running. Keep it idle (✕ → ○).
+			i.Status = StatusIdle
+		} else if i.Status != StatusStopped {
+			i.Status = StatusError
+		}
+		return nil
+	}
+
+	// Optimization: Skip expensive Exists() check for sessions already in error/stopped status
+	// Ghost sessions (in JSON but not in tmux) only get rechecked every 30 seconds
+	// This reduces subprocess spawns from 74/sec to ~5/sec for 28 ghost sessions
+	if (i.Status == StatusError || i.Status == StatusStopped) && !i.lastErrorCheck.IsZero() &&
+		time.Since(i.lastErrorCheck) < errorRecheckInterval {
+		return nil // Skip - still in error/stopped, checked recently
+	}
+
+	// Check if tmux session exists
+	if !i.tmuxSession.Exists() {
+		if i.neverStarted() {
+			// Added but never started: no tmux session was ever created, so an
+			// absent tmux is expected — classify as idle, not error (✕ → ○).
+			i.Status = StatusIdle
+		} else if i.Status != StatusStopped {
+			i.Status = StatusError
+		}
+		i.lastErrorCheck = time.Now() // Record when we confirmed error/stopped
+		return nil
+	}
+
+	// Session exists again (user manually started it) - clear stopped status
+	if i.Status == StatusStopped {
+		i.Status = StatusRunning
+	}
+
+	// Session exists - clear error check timestamp
+	i.lastErrorCheck = time.Time{}
+
+	// Tiered polling: skip expensive checks for idle sessions with no new activity
+	if i.Status == StatusIdle {
+		currentTS := i.tmuxSession.GetCachedWindowActivity()
+		if currentTS == i.lastKnownActivity && !i.lastIdleCheck.IsZero() &&
+			time.Since(i.lastIdleCheck) < 10*time.Second {
+			return nil // No activity detected, skip full check
+		}
+		// Activity detected OR recheck interval passed: do full check
+		i.lastIdleCheck = time.Now()
+		i.lastKnownActivity = currentTS
+	}
+
+	// COLD LOAD: CLI doesn't run StatusFileWatcher, so hookStatus is always empty.
+	// Read the hook file from disk once to give CLI the same fast path as the TUI.
+	if i.hookStatus == "" && (IsClaudeCompatible(i.Tool) || i.Tool == "codex" || i.Tool == "gemini" || i.Tool == "hermes" || i.Tool == "cursor") {
+		if hs := readHookStatusFile(i.ID); hs != nil {
+			i.hookStatus = hs.Status
+			i.hookEvent = hs.Event
+			i.hookLastUpdate = hs.UpdatedAt
+			i.hookSessionID = hs.SessionID
+			// Reset stale acknowledged flag from ReconnectSessionLazy.
+			// Without this, sessions loaded from SQLite with previousStatus="idle"
+			// would report idle even when the hook file says waiting/running.
+			if i.tmuxSession != nil && (hs.Status == "running" || hs.Status == "waiting") {
+				i.tmuxSession.ResetAcknowledged()
+			}
+		}
+	}
+
+	// HOOK FAST PATH: hook-based status for tools that emit lifecycle events.
+	// Freshness is tool- and state-specific (e.g. Codex running vs waiting).
+	// When this path is stale/missing, control naturally falls through to tmux
+	// polling and tool-specific session sync (tmux env/process-files/disk).
+	if (IsClaudeCompatible(i.Tool) || IsCodexCompatible(i.Tool) || i.Tool == "gemini" || i.Tool == "hermes" || i.Tool == "cursor") &&
+		i.hookStatus != "" &&
+		time.Since(i.hookLastUpdate) < hookFastPathFreshnessForTool(i.Tool, i.hookStatus) {
+		switch i.hookStatus {
+		case "running":
+			i.Status = StatusRunning
+			// Reset acknowledged: new activity means output not yet seen.
+			// Without this, a previously-acknowledged session would go straight
+			// to idle (gray) after Stop, skipping the waiting (orange) state.
+			if i.tmuxSession != nil {
+				i.tmuxSession.ResetAcknowledged()
+			}
+		case "waiting":
+			if IsCodexCompatible(i.Tool) {
+				// Codex completion should surface as attention-needed.
+				// Keep this as waiting and let tmux settle to idle if the user
+				// has acknowledged and no new activity appears.
+				if i.tmuxSession != nil {
+					i.tmuxSession.ResetAcknowledged()
+				}
+				i.Status = StatusWaiting
+			} else {
+				// Check acknowledgment: orange (waiting) vs gray (idle)
+				// Acknowledge() is called when user attaches to a session.
+				// ResetAcknowledged() is called by UpdateHookStatus on any new
+				// waiting event, and by the u key / new activity.
+				if i.tmuxSession != nil && i.tmuxSession.IsAcknowledged() {
+					i.Status = StatusIdle
+				} else {
+					i.Status = StatusWaiting
+				}
+			}
+		case "dead":
+			i.Status = StatusError
+		}
+		if i.hookSessionID != "" {
+			switch {
+			case IsClaudeCompatible(i.Tool):
+				if i.hookSessionID != i.ClaudeSessionID {
+					i.ClaudeSessionID = i.hookSessionID
+					i.ClaudeDetectedAt = time.Now()
+				}
+			case IsCodexCompatible(i.Tool):
+				if i.hookSessionID != i.CodexSessionID {
+					i.CodexSessionID = i.hookSessionID
+					i.CodexDetectedAt = time.Now()
+				}
+			case i.Tool == "gemini":
+				if i.hookSessionID != i.GeminiSessionID {
+					i.GeminiSessionID = i.hookSessionID
+					i.GeminiDetectedAt = time.Now()
+				}
+			}
+		}
+		// A1: For Hermes, run the gateway reachability check even on the fast path.
+		// Without this, a dead gateway can still report running/waiting for the full
+		// hook freshness window because the check below is skipped.
+		// Use GetHermesGatewayURL() so the common auto-discovery setup (no explicit
+		// [hermes].gateway_url in config) still gets gateway-health degradation —
+		// reading config.Hermes.GatewayURL directly would skip the discovery path
+		// via ~/.hermes/gateway_state.json.
+		if i.Tool == "hermes" && (i.Status == StatusRunning || i.Status == StatusWaiting) {
+			if gatewayURL := GetHermesGatewayURL(); gatewayURL != "" {
+				if time.Since(i.hermesGatewayCheckedAt) > 30*time.Second {
+					i.mu.Unlock()
+					reachable := IsHermesGatewayReachable(gatewayURL)
+					i.mu.Lock()
+					// Mirror the stale-stop guard from the tmux path: a concurrent
+					// Kill() may have published StatusStopped while we were unlocked.
+					if i.Status == StatusStopped {
+						return nil
+					}
+					i.hermesGatewayCheckedAt = time.Now()
+					i.hermesGatewayOK = reachable
+				}
+				if !i.hermesGatewayOK {
+					i.Status = StatusError
+				}
+			}
+		}
+		return nil
+	}
+
+	// Release lock for potentially slow tmux calls (GetStatus calls CapturePane)
+	i.mu.Unlock()
+	status, err := i.tmuxSession.GetStatus()
+	i.mu.Lock()
+
+	// Issue #953: a concurrent Kill() may have published StatusStopped
+	// while we were unlocked for the GetStatus call above. Honoring a
+	// stale tmux-derived status now would clobber the user-initiated
+	// stop with idle/running/error and the next render would show the
+	// wrong icon (the original v1.9.20 user-visible symptom).
+	if i.Status == StatusStopped {
+		return nil
+	}
+
+	// Prior status, captured before this tmux-derived sample overwrites it, so the
+	// debounce below can tell a flip AWAY from running from a steady state.
+	prevStatus := i.Status
+
+	if err != nil {
+		// Debounce a transient capture failure: subprocess churn can make a single
+		// CapturePane fail, then recover. Hold at running for one sample rather than
+		// firing a false error. Modeled as a derived error with no tmux raw status.
+		if apply, nextPending, held := debounceFlipFromRunning(prevStatus, StatusError, "", i.hookStatus, i.tmuxFlipFromRunningPending); held {
+			i.tmuxFlipFromRunningPending = nextPending
+			i.Status = apply
+			return nil
+		}
+		i.tmuxFlipFromRunningPending = false
+		i.Status = StatusError
+		return err
+	}
+
+	// Map tmux status to instance status
+	switch status {
+	case "active":
+		i.Status = StatusRunning
+	case "waiting":
+		// tmux reports a shell prompt ("waiting"), but a non-interactive foreground
+		// process may still be running (e.g. "yarn dev", "mvn spring-boot:run").
+		// shellForegroundRunning() inspects the cached pane command to tell them apart.
+		if i.Tool == "shell" {
+			if i.shellForegroundRunning() {
+				i.Status = StatusRunning
+			} else {
+				i.Status = StatusIdle
+			}
+		} else {
+			i.Status = StatusWaiting
+		}
+	case "idle":
+		// Acknowledged shell sessions can still have a foreground process running
+		// even after the user has attached; keep surfacing that as running.
+		if i.Tool == "shell" && i.shellForegroundRunning() {
+			i.Status = StatusRunning
+		} else {
+			i.Status = StatusIdle
+		}
+	case "starting":
+		i.Status = StatusStarting
+	case "error":
+		// Pane shows a tool-rendered error banner (#1400): auth failure
+		// ("API Error: 401" / "Please run /login") or a dead connection
+		// ("socket connection closed"). The process is alive but cannot make
+		// progress without user action — report error, not waiting.
+		i.Status = StatusError
+	case "inactive":
+		i.Status = StatusError
+	default:
+		i.Status = StatusError
+	}
+
+	// Debounce a purely tmux-inferred flip away from running (see
+	// tmuxFlipFromRunningPending). A long single tool-call past the hook freshness
+	// window can momentarily present the pane as a shell prompt ("waiting") or a
+	// transient error, then recover; one confirming sample prevents a false
+	// completion/error to the conductor. A genuinely dead pane (tmux "inactive")
+	// and a "dead" hook are NOT debounced — those are real terminal signals.
+	if apply, nextPending, held := debounceFlipFromRunning(prevStatus, i.Status, status, i.hookStatus, i.tmuxFlipFromRunningPending); held {
+		i.tmuxFlipFromRunningPending = nextPending
+		i.Status = apply
+		return nil
+	}
+	// Confirmed flip (second consecutive sample) or a non-debounceable outcome:
+	// clear the marker so a later genuine flip starts a fresh debounce.
+	i.tmuxFlipFromRunningPending = false
+
+	// Hermes: augment status with gateway health when a gateway URL is resolvable.
+	// Check is throttled to 30s to avoid 1.5s HTTP delays on every status tick.
+	// Use GetHermesGatewayURL() so the auto-discovery path (gateway_state.json +
+	// loopback probe) gets the same degradation behavior as an explicit config
+	// override — without this, users on the documented-easy setup never see a
+	// dead gateway flip them to StatusError.
+	if i.Tool == "hermes" && i.Status != StatusStopped && i.Status != StatusError {
+		if gatewayURL := GetHermesGatewayURL(); gatewayURL != "" {
+			if time.Since(i.hermesGatewayCheckedAt) > 30*time.Second {
+				// A2: A concurrent Kill() may publish StatusStopped while we are
+				// unlocked for the HTTP probe; re-check after reacquiring the lock
+				// and skip the write to avoid clobbering the stop.
+				i.mu.Unlock()
+				reachable := IsHermesGatewayReachable(gatewayURL)
+				i.mu.Lock()
+				if i.Status == StatusStopped {
+					return nil
+				}
+				i.hermesGatewayCheckedAt = time.Now()
+				i.hermesGatewayOK = reachable
+			}
+			if !i.hermesGatewayOK {
+				i.Status = StatusError
+			}
+		}
+	}
+
+	// Update tool detection dynamically (enables fork when wrapped tools start).
+	// Only built-in tool identities are rewritten here. Custom tools like
+	// "my-codex" should keep their configured identity even when tmux correctly
+	// detects the wrapped CLI as Codex.
+	if detectedTool := i.tmuxSession.DetectTool(); detectedTool != "" {
+		if !isBuiltinToolName(i.Tool) && GetToolDef(i.Tool) != nil {
+			// Preserve configured custom tool names.
+		} else {
+			switch detectedTool {
+			case "claude", "gemini", "opencode", "codex":
+				i.Tool = detectedTool
+			case "shell":
+				switch i.Tool {
+				case "", "shell", "claude", "gemini", "opencode", "codex":
+					i.Tool = detectedTool
+				}
+			}
+		}
+	}
+
+	// Update session metadata tracking only for active/waiting sessions.
+	// This path can perform filesystem and tmux env reads while i.mu is held, so
+	// rate-limit it to reduce intermittent render/key handling stalls under load.
+	if i.Status == StatusRunning || i.Status == StatusWaiting {
+		interval := 2 * time.Second
+		// Bootstrap unknown IDs faster for newly-started sessions.
+		switch {
+		case IsClaudeCompatible(i.Tool):
+			if i.ClaudeSessionID == "" {
+				interval = 500 * time.Millisecond
+			}
+		case i.Tool == "gemini":
+			if i.GeminiSessionID == "" {
+				interval = 500 * time.Millisecond
+			}
+		case IsCodexCompatible(i.Tool):
+			if i.CodexSessionID == "" {
+				interval = 500 * time.Millisecond
+			}
+		}
+		if i.lastSessionMetaSync.IsZero() || time.Since(i.lastSessionMetaSync) >= interval {
+			i.lastSessionMetaSync = time.Now()
+
+			// Update Claude session tracking (non-blocking, best-effort)
+			i.UpdateClaudeSession(nil)
+
+			// Update Gemini session tracking (non-blocking, best-effort)
+			if i.Tool == "gemini" {
+				i.UpdateGeminiSession(nil)
+			}
+
+			// Update Codex session tracking (non-blocking, best-effort)
+			if IsCodexCompatible(i.Tool) {
+				// Always collect other instances' session IDs to prevent the
+				// disk scan from assigning a session that belongs to another
+				// instance. Without this, instances that share the same
+				// project_path can all claim the same Codex session file.
+				exclude := i.collectOtherCodexSessionIDs()
+				i.UpdateCodexSession(exclude)
+			}
+
+			// Update OpenCode session tracking (non-blocking, best-effort).
+			// The opencode CLI subprocess can take seconds and must not run
+			// under i.mu or it starves render-path RLocks and freezes the TUI.
+			// updateOpenCodeSession manages its own locking internally — we
+			// drop i.mu here and reacquire after it returns.
+			if i.Tool == "opencode" {
+				i.mu.Unlock()
+				i.UpdateOpenCodeSession()
+				i.mu.Lock()
+			}
+		}
+	}
+
+	return nil
+}
+
+// UpdateClaudeSession updates the Claude session ID from tmux environment.
+// The capture-resume pattern (used in Start/Fork/Restart) sets CLAUDE_SESSION_ID
+// in the tmux environment, making this the single authoritative source.
+//
+// No file scanning fallback - we rely on the consistent capture-resume pattern.
+func (i *Instance) UpdateClaudeSession(excludeIDs map[string]bool) {
+	if !IsClaudeCompatible(i.Tool) {
+		return
+	}
+
+	// Read from tmux environment (set by capture-resume pattern)
+	if sessionID := i.GetSessionIDFromTmux(); sessionID != "" {
+		if i.ClaudeSessionID != sessionID {
+			rejected := false
+			// Quality gate: don't adopt a zombie ID from tmux env when current has real data
+			if i.ClaudeSessionID != "" {
+				currentHasData := sessionHasConversationData(i, i.ClaudeSessionID)
+				candidateHasData := sessionHasConversationData(i, sessionID)
+				if currentHasData && !candidateHasData {
+					sessionLog.Debug("claude_session_tmux_rejected_zombie",
+						slog.String("current_id", i.ClaudeSessionID),
+						slog.String("zombie_id", sessionID),
+						slog.String("reason", "tmux_env_has_zombie_id"),
+					)
+					_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
+						InstanceID: i.ID, Tool: i.Tool, Action: "reject",
+						Source: "tmux_env", OldID: i.ClaudeSessionID, Candidate: sessionID,
+						Reason: "zombie_id_no_conversation_data",
+					})
+					// Don't adopt the zombie; skip the update but still refresh prompt below
+					rejected = true
+					sessionID = i.ClaudeSessionID
+				}
+			}
+			if !rejected {
+				action := "bind"
+				if i.ClaudeSessionID != "" {
+					action = "rebind"
+				}
+				_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
+					InstanceID: i.ID, Tool: i.Tool, Action: action,
+					Source: "tmux_env", OldID: i.ClaudeSessionID, NewID: sessionID,
+				})
+				i.ClaudeSessionID = sessionID
+			}
+		}
+		i.ClaudeDetectedAt = time.Now()
+	}
+
+	// Update latest prompt from JSONL file (tail-read with size caching)
+	if i.ClaudeSessionID != "" {
+		jsonlPath := i.GetJSONLPath()
+		if jsonlPath != "" {
+			if prompt := i.readJSONLTail(jsonlPath); prompt != "" {
+				i.LatestPrompt = prompt
+			}
+		}
+	}
+}
+
+// syncClaudeSessionFromDisk is a legacy shim kept for compatibility.
+// Disk scan is intentionally NOT authoritative for session identity.
+// Session ID binding must come from tmux env and/or hook session anchor.
+func (i *Instance) syncClaudeSessionFromDisk() {
+	if !IsClaudeCompatible(i.Tool) {
+		return
+	}
+	sessionLog.Debug("claude_session_disk_scan_disabled",
+		slog.String("instance", i.ID),
+		slog.String("reason", "disk_scan_not_authoritative"),
+	)
+	_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
+		InstanceID: i.ID, Tool: i.Tool, Action: "scan_disabled",
+		Source: "disk_scan", Reason: "disk_scan_not_authoritative",
+	})
+}
+
+// UpdateHookStatus updates the instance's hook-based status fields.
+// Called by StatusFileWatcher when a hook status file changes.
+func (i *Instance) UpdateHookStatus(status *HookStatus) {
+	if status == nil {
+		return
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	// Snapshot the prior hook-status fields so a candidate that fails the
+	// ownership check below can RESTORE them rather than leaving its status
+	// applied. This closes the `claude -p` env-pollution flip: a foreign
+	// ephemeral session (a `claude -p` child that inherited our
+	// AGENTDECK_INSTANCE_ID and fired hooks under our id) has no conversation
+	// data, so the bind is rejected — but previously the running/waiting status
+	// it carried had already been written here and stuck, flipping this
+	// instance's status. See the candidate_has_no_conversation_data branch.
+	prevHookStatus, prevHookEvent, prevHookLastUpdate := i.hookStatus, i.hookEvent, i.hookLastUpdate
+
+	// Detect whether this is genuinely new data (newer timestamp than last seen).
+	// Only reset acknowledgment on new events — not on re-application of the same
+	// stale hook file, which would undo the user's intentional acknowledge.
+	isNewEvent := status.UpdatedAt.After(i.hookLastUpdate)
+
+	i.hookStatus = status.Status
+	i.hookEvent = status.Event
+	i.hookLastUpdate = status.UpdatedAt
+
+	// Permission-type events are always attention-needed, even if the user
+	// previously acknowledged this session. A mid-task permission block is new
+	// activity that the user must respond to — unlike Stop (task complete) which
+	// can stay grey if already seen.
+	// Handles both PermissionRequest events and Notification/permission_prompt.
+	if isNewEvent && status.Status == "waiting" && i.tmuxSession != nil {
+		if status.Event == "PermissionRequest" || status.Event == "Notification" {
+			i.tmuxSession.ResetAcknowledged()
+		}
+	}
+
+	// Issue #1349 defense-in-depth #1: never bind a session id from a terminal
+	// hook event (e.g. SessionEnd). The status/event/ack bookkeeping above still
+	// applies, but a terminal payload's session_id is stale by definition and
+	// must not become a bind source — that is exactly what re-binds a
+	// stopped/removed session every poll cycle and collides session ids.
+	//
+	// Accepted tradeoff: if the daemon's first-ever observation of a session is
+	// a SessionEnd (e.g. it was down during the SessionStart/UserPromptSubmit
+	// edges and only the latest event survives in the hook file), the bind is
+	// skipped and the prior ClaudeSessionID stays. That is the correct call —
+	// the session is already gone, so binding its (possibly reused) id onto a
+	// now-dead instance is the corruption we are preventing, not a feature.
+	if isTerminalHookEvent(status.Event) {
+		return
+	}
+
+	// Resolve session ID from hook payload first, then sidecar anchor.
+	sessionID := strings.TrimSpace(status.SessionID)
+	hookSource := "hook_payload"
+	if sessionID == "" {
+		sessionID = ReadHookSessionAnchor(i.ID)
+		hookSource = "hook_anchor"
+	}
+	if sessionID == "" {
+		return
+	}
+
+	switch {
+	case IsClaudeCompatible(i.Tool):
+		if sessionID == i.ClaudeSessionID {
+			return
+		}
+		// Cold start — no session bound yet. Accept the first candidate
+		// unconditionally; there is nothing to protect.
+		if i.ClaudeSessionID == "" {
+			i.bindClaudeSessionFromHook(sessionID, hookSource, status.Event, "bind")
+			return
+		}
+		// v1.7.7 guard: candidate must have any conversation data at all.
+		if !sessionHasConversationData(i, sessionID) {
+			// A different session id with NO conversation data on an established
+			// instance is a foreign ephemeral (a `claude -p` child that inherited
+			// our AGENTDECK_INSTANCE_ID) — it doesn't own this instance, so its
+			// status must not stick either. Restore the pre-event status so the
+			// foreign hook is a no-op, not a flip. (A real /clear or fork carries
+			// conversation data and never reaches this branch.)
+			i.hookStatus, i.hookEvent, i.hookLastUpdate = prevHookStatus, prevHookEvent, prevHookLastUpdate
+			_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
+				InstanceID: i.ID, Tool: i.Tool, Action: "reject",
+				Source: hookSource, OldID: i.ClaudeSessionID, Candidate: sessionID,
+				HookEvent: status.Event, Reason: "candidate_has_no_conversation_data",
+			})
+			return
+		}
+		// v1.7.23 guard (issue #661): when BOTH current and candidate have
+		// data, the candidate must have strictly MORE content to win. This
+		// stops the UserPromptSubmit flap where a fresh 1-record jsonl
+		// overwrites a rich hundreds-of-KB historic jsonl on every restart.
+		// Byte size is a robust proxy for "how much history this session
+		// holds" — immune to record-count ties and faster than re-scanning
+		// the file.
+		//
+		// Issue #856: but a strict size-only rule rejects user-initiated
+		// new sessions (e.g. /clear) indefinitely, since they're smaller by
+		// definition. Mtime gap is the discriminator: in a flap the user
+		// keeps typing into the rich session so its mtime stays fresh; in
+		// /clear the user abandons the old session, so its mtime stales
+		// while the new jsonl's mtime advances. If the candidate's jsonl
+		// is significantly newer than the current's (clearRebindMtimeGrace),
+		// treat it as a user-initiated new session and rebind regardless
+		// of size.
+		if sessionHasConversationData(i, i.ClaudeSessionID) {
+			currentSize := sessionConversationByteSize(i, i.ClaudeSessionID)
+			candidateSize := sessionConversationByteSize(i, sessionID)
+			if candidateSize <= currentSize {
+				currentMtime := sessionConversationMtime(i, i.ClaudeSessionID)
+				candidateMtime := sessionConversationMtime(i, sessionID)
+				clearRebind := !currentMtime.IsZero() && !candidateMtime.IsZero() &&
+					candidateMtime.Sub(currentMtime) >= clearRebindMtimeGrace
+				if !clearRebind {
+					_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
+						InstanceID: i.ID, Tool: i.Tool, Action: "reject",
+						Source: hookSource, OldID: i.ClaudeSessionID, Candidate: sessionID,
+						HookEvent: status.Event, Reason: "candidate_has_less_conversation_data",
+					})
+					return
+				}
+			}
+		}
+		i.bindClaudeSessionFromHook(sessionID, hookSource, status.Event, "rebind")
+	case IsCodexCompatible(i.Tool):
+		if sessionID == i.CodexSessionID {
+			return
+		}
+		i.bindCodexSessionFromHook(sessionID, status.Event)
+	case i.Tool == "gemini":
+		if sessionID == i.GeminiSessionID {
+			return
+		}
+		// Quality gate: only accept when candidate session appears valid on disk,
+		// OR when current session is empty (first detection/bootstrap).
+		if i.GeminiSessionID == "" || geminiSessionHasConversationData(sessionID, i.ProjectPath) {
+			i.bindGeminiSessionFromHook(sessionID, status.Event)
+		}
+	}
+}
+
+// bindCodexSessionFromHook is the Codex counterpart of
+// bindClaudeSessionFromHook (see that function's doc comment for the
+// PERSIST-12 rationale). It performs the same bookkeeping that the
+// inlined pre-#1139 code did — debug log, in-memory mutation, tmux env
+// propagation — and then persists the new binding to SQLite so
+// DB-direct consumers and peer agent-deck processes observe the new
+// codex_session_id immediately, instead of reloading the stale row and
+// clobbering the in-memory mutation on the next save cycle.
+func (i *Instance) bindCodexSessionFromHook(sessionID, hookEvent string) {
+	sessionLog.Debug("codex_session_update_from_hook",
+		slog.String("old_id", i.CodexSessionID),
+		slog.String("new_id", sessionID),
+		slog.String("event", hookEvent),
+	)
+	i.CodexSessionID = sessionID
+	i.CodexDetectedAt = time.Now()
+	i.hookSessionID = sessionID
+
+	if i.tmuxSession != nil && i.tmuxSession.Exists() {
+		_ = i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", sessionID)
+	}
+
+	// Persist the rebind to SQLite. See bindClaudeSessionFromHook for the
+	// full rationale: none of the three UpdateHookStatus callers (TUI
+	// tick, web refresh, CLI status refresh) save after a hook-triggered
+	// rebind, so tool_data.codex_session_id stays pinned at the stale
+	// UUID indefinitely for DB-direct consumers, and peer processes
+	// holding stale snapshots keep clobbering the in-memory mutation —
+	// producing a runaway loop of fresh "rebind" decisions on every
+	// poll. WriteCodexSessionBinding rewrites only the typed schema
+	// fields via json_set, leaving every other tool_data key untouched.
+	if db := statedb.GetGlobal(); db != nil {
+		if err := db.WriteCodexSessionBinding(i.ID, sessionID, i.CodexDetectedAt); err != nil {
+			sessionLog.Warn("codex_session_rebind_persist_failed",
+				slog.String("instance_id", i.ID),
+				slog.String("new_id", sessionID),
+				slog.String("error", err.Error()))
+		}
+	}
+}
+
+// bindGeminiSessionFromHook is the Gemini counterpart of
+// bindClaudeSessionFromHook. See that function's doc comment for the
+// PERSIST-12 rationale. The quality gate (GeminiSessionID == "" ||
+// geminiSessionHasConversationData(...)) is enforced by the caller in
+// UpdateHookStatus before this function is invoked, mirroring the
+// invariant the inlined pre-#1139 code preserved.
+func (i *Instance) bindGeminiSessionFromHook(sessionID, hookEvent string) {
+	sessionLog.Debug("gemini_session_update_from_hook",
+		slog.String("old_id", i.GeminiSessionID),
+		slog.String("new_id", sessionID),
+		slog.String("event", hookEvent),
+	)
+	i.GeminiSessionID = sessionID
+	i.GeminiDetectedAt = time.Now()
+	i.hookSessionID = sessionID
+
+	if i.tmuxSession != nil && i.tmuxSession.Exists() {
+		_ = i.tmuxSession.SetEnvironment("GEMINI_SESSION_ID", sessionID)
+	}
+
+	// Persist the rebind to SQLite. See bindClaudeSessionFromHook for
+	// the full rationale on why the in-memory mutation alone is not
+	// enough: the bug pattern (#1138 for Claude, #1139 for
+	// Codex/Gemini) is that UpdateHookStatus callers don't call Save
+	// afterwards, so peer agent-deck processes keep reloading the stale
+	// row and clobbering this instance's in-memory state. The targeted
+	// json_set UPDATE atomically rewrites only $.gemini_session_id and
+	// $.gemini_detected_at, preserving the rest of tool_data.
+	if db := statedb.GetGlobal(); db != nil {
+		if err := db.WriteGeminiSessionBinding(i.ID, sessionID, i.GeminiDetectedAt); err != nil {
+			sessionLog.Warn("gemini_session_rebind_persist_failed",
+				slog.String("instance_id", i.ID),
+				slog.String("new_id", sessionID),
+				slog.String("error", err.Error()))
+		}
+	}
+}
+
+// GetHookStatus returns the current hook-based status and its freshness.
+// Freshness window is tool-specific.
+func (i *Instance) GetHookStatus() (string, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if i.hookStatus == "" {
+		return "", false
+	}
+	fresh := time.Since(i.hookLastUpdate) < hookFastPathFreshnessForTool(i.Tool, i.hookStatus)
+	return i.hookStatus, fresh
+}
+
+// GetAutoNameDescription returns the last captured Claude task description for
+// an AutoName session (empty if none captured yet). Thread-safe.
+func (i *Instance) GetAutoNameDescription() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.autoNameDescription
+}
+
+// GetAutoName reports whether this session should display a captured/live task
+// description instead of its machine-generated handle. Thread-safe.
+func (i *Instance) GetAutoName() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.AutoName
+}
+
+// SetAutoName updates whether this session should display a captured/live task
+// description instead of its machine-generated handle. Thread-safe.
+func (i *Instance) SetAutoName(autoName bool) {
+	i.mu.Lock()
+	i.AutoName = autoName
+	i.mu.Unlock()
+}
+
+// SetAutoNameDescription records the latest Claude task description for an
+// AutoName session so it can be persisted and shown on reopen. Thread-safe.
+func (i *Instance) SetAutoNameDescription(desc string) {
+	i.mu.Lock()
+	if strings.TrimSpace(desc) != "" {
+		i.autoNameDescription = desc
+	}
+	i.mu.Unlock()
+}
+
+// ClearHookStatus resets the hook-based status and removes the persisted hook
+// record, forcing the next UpdateStatus() to fall through to polling. Used
+// when the user manually overrides status (e.g., pressing 'u' to unacknowledge
+// after an Escape interrupt where the Stop hook didn't fire).
+func (i *Instance) ClearHookStatus() {
+	i.mu.Lock()
+	i.hookStatus = ""
+	i.hookLastUpdate = time.Time{}
+	i.mu.Unlock()
+
+	// Remove the persisted status file. Sandbox sessions bridge a PER-INSTANCE
+	// scoped subdir (…/hooks/sandbox/<id>/<id>.json) from the container, and the
+	// watcher attributes that file to this instance by its OWNING SUBDIR, so the
+	// scoped file is the one to clear. Non-sandbox sessions write the flat
+	// …/hooks/<id>.json. We remove only the FILE here (not the subdir): this can
+	// fire mid-session (attach-return / unacknowledge) while the container still
+	// has the subdir bind-mounted, and unlinking the mount source would orphan
+	// the live bridge. The subdir + its fsnotify watch are torn down at session
+	// end (see killInternal).
+	hookPath := filepath.Join(GetHooksDir(), i.ID+".json")
+	if i.IsSandboxed() {
+		hookPath = filepath.Join(GetHooksDir(), "sandbox", i.ID, i.ID+".json")
+	}
+	if err := os.Remove(hookPath); err != nil && !os.IsNotExist(err) {
+		sessionLog.Debug("clear_hook_status_file_failed",
+			slog.String("instance", i.ID),
+			slog.String("path", hookPath),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// ForceNextStatusCheck clears the idle polling optimization so the next
+// UpdateStatus() performs a full check instead of short-circuiting.
+// Call this before UpdateStatus() when a status-affecting change was made
+// externally (e.g. the u key toggling acknowledged state).
+func (i *Instance) ForceNextStatusCheck() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.lastIdleCheck = time.Time{}
+}
+
+// SetGeminiYoloMode sets the YOLO mode for Gemini and syncs it to the tmux environment.
+// This ensures the background status worker sees the correct state during restarts.
+func (i *Instance) SetGeminiYoloMode(enabled bool) {
+	if i.Tool != "gemini" {
+		return
+	}
+
+	i.GeminiYoloMode = &enabled
+
+	// Sync to tmux environment immediately if session exists
+	// This ensures background detection (UpdateGeminiSession) sees the new value
+	if i.tmuxSession != nil && i.tmuxSession.Exists() {
+		val := "false"
+		if enabled {
+			val = "true"
+		}
+		_ = i.tmuxSession.SetEnvironment("GEMINI_YOLO_MODE", val)
+	}
+}
+
+// UpdateGeminiSession updates the Gemini session ID, YOLO mode, analytics, and latest prompt.
+// Delegates to focused helpers for each concern.
+func (i *Instance) UpdateGeminiSession(excludeIDs map[string]bool) {
+	if i.Tool != "gemini" {
+		return
+	}
+	i.syncGeminiSessionFromTmux()
+	i.syncGeminiSessionFromDisk()
+	i.updateGeminiAnalytics()
+	i.updateGeminiLatestPrompt()
+}
+
+// UpdateOpenCodeSession refreshes the OpenCode session ID from OpenCode CLI
+// state without stealing a different tab's session from the same project.
+func (i *Instance) UpdateOpenCodeSession() {
+	i.updateOpenCodeSession(false)
+}
+
+// updateOpenCodeSession self-manages i.mu: state reads/writes happen under the
+// lock but the queryOpenCodeSession subprocess runs outside it, so a slow
+// opencode CLI cannot starve render-path RLocks on this instance.
+//
+// Contract: callers MUST NOT hold i.mu when invoking this function.
+func (i *Instance) updateOpenCodeSession(force bool) {
+	if i.Tool != "opencode" {
+		return
+	}
+
+	i.mu.Lock()
+	now := time.Now()
+	if !force && !i.lastOpenCodeScanAt.IsZero() && now.Sub(i.lastOpenCodeScanAt) < opencodeRotationScanInterval {
+		i.mu.Unlock()
+		return
+	}
+	i.lastOpenCodeScanAt = now
+	i.mu.Unlock()
+
+	candidate := i.queryOpenCodeSession()
+
+	i.mu.Lock()
+	i.applyOpenCodeSessionCandidate(candidate)
+	i.mu.Unlock()
+}
+
+func (i *Instance) applyOpenCodeSessionCandidate(candidate string) bool {
+	if candidate == "" {
+		return false
+	}
+
+	if candidate == i.OpenCodeSessionID {
+		if i.OpenCodeDetectedAt.IsZero() {
+			i.OpenCodeDetectedAt = time.Now()
+		}
+		return false
+	}
+
+	if i.OpenCodeSessionID != "" {
+		lastActivity := i.GetLastActivityTime()
+		if !lastActivity.IsZero() && time.Since(lastActivity) <= opencodeRotationActivityWindow {
+			sessionLog.Debug(
+				"opencode_session_rebind_recent_activity",
+				slog.String("old_id", i.OpenCodeSessionID),
+				slog.String("new_id", candidate),
+				slog.Time("last_activity", lastActivity),
+			)
+		}
+	}
+
+	sessionLog.Debug(
+		"opencode_session_rebind",
+		slog.String("old_id", i.OpenCodeSessionID),
+		slog.String("new_id", candidate),
+	)
+
+	i.setOpenCodeSession(candidate)
+	return true
+}
+
+// syncGeminiSessionFromTmux reads session ID and YOLO mode from tmux environment (authoritative source).
+func (i *Instance) syncGeminiSessionFromTmux() {
+	if i.tmuxSession == nil {
+		return
+	}
+	if sessionID, err := i.tmuxSession.GetEnvironment("GEMINI_SESSION_ID"); err == nil && sessionID != "" {
+		if i.GeminiSessionID != sessionID {
+			i.GeminiSessionID = sessionID
+		}
+		i.GeminiDetectedAt = time.Now()
+	}
+
+	// Detect YOLO Mode from environment (authoritative sync)
+	if yoloEnv, err := i.tmuxSession.GetEnvironment("GEMINI_YOLO_MODE"); err == nil && yoloEnv != "" {
+		enabled := yoloEnv == "true"
+		i.GeminiYoloMode = &enabled
+	}
+}
+
+// syncGeminiSessionFromDisk scans the filesystem for the most recent session.
+// Krudony fix: user may have started a NEW session, so always scan rather than using stale cached ID.
+func (i *Instance) syncGeminiSessionFromDisk() {
+	sessions, err := ListGeminiSessions(i.ProjectPath)
+	if err != nil || len(sessions) == 0 {
+		return
+	}
+
+	// Pick the most recent session (list is sorted by LastUpdated desc)
+	mostRecent := sessions[0]
+	if mostRecent.SessionID != i.GeminiSessionID {
+		sessionLog.Debug(
+			"gemini_session_update",
+			slog.String("old_id", i.GeminiSessionID),
+			slog.String("new_id", mostRecent.SessionID),
+		)
+	}
+	i.GeminiSessionID = mostRecent.SessionID
+	i.GeminiDetectedAt = time.Now()
+
+	// Sync back to tmux environment for future restarts
+	if i.tmuxSession != nil && i.tmuxSession.Exists() {
+		_ = i.tmuxSession.SetEnvironment("GEMINI_SESSION_ID", i.GeminiSessionID)
+	}
+}
+
+// updateGeminiAnalytics refreshes token counts, cost, and model from the session file.
+// Syncs the detected model back to the instance's GeminiModel field.
+func (i *Instance) updateGeminiAnalytics() {
+	if i.GeminiSessionID == "" {
+		return
+	}
+	if i.GeminiAnalytics == nil {
+		i.GeminiAnalytics = &GeminiSessionAnalytics{}
+	}
+	// Non-blocking update (ignore errors, best effort)
+	_ = UpdateGeminiAnalyticsFromDisk(i.ProjectPath, i.GeminiSessionID, i.GeminiAnalytics)
+
+	// Sync detected model from analytics to instance (if not explicitly set by user)
+	if i.GeminiModel == "" && i.GeminiAnalytics.Model != "" {
+		i.GeminiModel = i.GeminiAnalytics.Model
+	}
+}
+
+// updateGeminiLatestPrompt extracts the latest user prompt from the session file.
+// Uses mtime caching to skip re-reading unchanged files (important for large session files).
+func (i *Instance) updateGeminiLatestPrompt() {
+	if i.GeminiSessionID == "" || len(i.GeminiSessionID) < 8 {
+		return
+	}
+
+	sessionsDir := GetGeminiSessionsDir(i.ProjectPath)
+	pattern := filepath.Join(sessionsDir, "session-*-"+i.GeminiSessionID[:8]+".json")
+	filePath, fileMtime := findNewestFile(pattern)
+
+	// Fallback: cross-project search
+	if filePath == "" {
+		filePath = findGeminiSessionInAllProjects(i.GeminiSessionID)
+		if filePath != "" {
+			if info, err := os.Stat(filePath); err == nil {
+				fileMtime = info.ModTime()
+			}
+		}
+	}
+
+	if filePath == "" {
+		return
+	}
+
+	// mtime cache: skip re-read if file hasn't changed since last read
+	if !i.lastPromptModTime.IsZero() && !fileMtime.IsZero() && fileMtime.Equal(i.lastPromptModTime) {
+		return
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return
+	}
+	if prompt, err := parseGeminiLatestUserPrompt(data); err == nil && prompt != "" {
+		i.LatestPrompt = prompt
+	}
+	i.lastPromptModTime = fileMtime
+}
+
+// WaitForClaudeSession waits for the tmux environment variable to be set.
+// The capture-resume pattern sets CLAUDE_SESSION_ID in tmux env, so we poll for that.
+// Returns the detected session ID or empty string after timeout.
+func (i *Instance) WaitForClaudeSession(maxWait time.Duration) string {
+	if !IsClaudeCompatible(i.Tool) {
+		return ""
+	}
+
+	// Poll every 200ms for up to maxWait
+	interval := 200 * time.Millisecond
+	deadline := time.Now().Add(maxWait)
+
+	for time.Now().Before(deadline) {
+		// Check tmux environment (set by capture-resume pattern)
+		if sessionID := i.GetSessionIDFromTmux(); sessionID != "" {
+			i.ClaudeSessionID = sessionID
+			i.ClaudeDetectedAt = time.Now()
+			return sessionID
+		}
+		time.Sleep(interval)
+	}
+
+	return ""
+}
+
+// WaitForClaudeSessionWithExclude waits for the tmux environment variable to be set.
+// The excludeIDs parameter is kept for API compatibility but not used since tmux env
+// is authoritative and won't return duplicate IDs.
+func (i *Instance) WaitForClaudeSessionWithExclude(maxWait time.Duration, excludeIDs map[string]bool) string {
+	// tmux env is authoritative - no need for exclusion logic
+	return i.WaitForClaudeSession(maxWait)
+}
+
+// PostStartSync captures session IDs from tmux environment after Start() or Restart().
+// Designed for CLI commands that exit after starting. The TUI doesn't need this
+// because its background worker handles detection.
+//
+// For Claude: polls tmux env for CLAUDE_SESSION_ID (set by bash uuidgen before exec).
+// For Gemini: reads session ID from filesystem.
+// For OpenCode/Codex: no-op (async goroutine detection, too slow for sync CLI).
+func (i *Instance) PostStartSync(maxWait time.Duration) {
+	switch {
+	case IsClaudeCompatible(i.Tool):
+		i.WaitForClaudeSession(maxWait)
+		i.autoConfirmClaudeResumePicker()
+	case i.Tool == "gemini":
+		i.UpdateGeminiSession(nil)
+	case i.Tool == "copilot":
+		// Copilot uses async detection via detectCopilotSessionAsync().
+		// If the session was not yet detected, attempt a quick sync check.
+		if i.CopilotSessionID == "" {
+			cwd := i.EffectiveWorkingDir()
+			startedAfter := time.Now().Add(-30 * time.Second)
+			if i.CopilotStartedAt > 0 {
+				startedAfter = time.UnixMilli(i.CopilotStartedAt).Add(-2 * time.Second)
+			}
+			if sid := detectCopilotSessionFromDisk(cwd, startedAfter); sid != "" {
+				i.CopilotSessionID = sid
+				i.CopilotDetectedAt = time.Now()
+				if i.tmuxSession != nil {
+					_ = i.tmuxSession.SetEnvironment("COPILOT_SESSION_ID", sid)
+				}
+			}
+		}
+	}
+	// OpenCode/Codex: async detection already started by Start(), skip here
+}
+
+// autoConfirmClaudeResumePicker handles the "Resume from summary" picker that
+// claude --resume shows on long-running sessions (>~250k tokens). Without
+// this, an unattended conductor sits frozen on the picker indefinitely.
+// See issue #67. Disable via [claude].auto_resume_summary = false.
+func (i *Instance) autoConfirmClaudeResumePicker() {
+	if i.tmuxSession == nil {
+		return
+	}
+	cfg, _ := LoadUserConfig()
+	if cfg != nil && !cfg.Claude.GetAutoResumeSummary() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _ = autoResolveClaudeResumePicker(ctx, i.tmuxSession, i.tmuxSession, autoResumeOptions{
+		PollInterval: 250 * time.Millisecond,
+		Timeout:      3 * time.Second,
+	})
+}
+
+// Preview returns the last 3 lines of terminal output
+func (i *Instance) Preview() (string, error) {
+	if i.tmuxSession == nil {
+		return "", fmt.Errorf("tmux session not initialized")
+	}
+
+	content, err := i.tmuxSession.CapturePane()
+	if err != nil {
+		return "", err
+	}
+
+	lines := strings.Split(strings.TrimSpace(content), "\n")
+	if len(lines) > 3 {
+		lines = lines[len(lines)-3:]
+	}
+
+	return strings.Join(lines, "\n"), nil
+}
+
+// PreviewFull returns all terminal output
+func (i *Instance) PreviewFull() (string, error) {
+	if i.tmuxSession == nil {
+		return "", fmt.Errorf("tmux session not initialized")
+	}
+
+	return i.tmuxSession.CaptureFullHistory()
+}
+
+// PreviewWindowFull returns the full scrollback of a specific tmux window.
+func (i *Instance) PreviewWindowFull(windowIndex int) (string, error) {
+	if i.tmuxSession == nil {
+		return "", fmt.Errorf("tmux session not initialized")
+	}
+	return i.tmuxSession.CaptureWindowFullHistory(windowIndex)
+}
+
+// HasUpdated checks if there's new output since last check
+func (i *Instance) HasUpdated() bool {
+	if i.tmuxSession == nil {
+		return false
+	}
+
+	updated, err := i.tmuxSession.HasUpdated()
+	if err != nil {
+		return false
+	}
+
+	return updated
+}
+
+// SyncSessionIDsToTmux syncs session IDs from Instance to tmux environment.
+// PERFORMANCE: This is called on-demand (e.g., first attach) rather than at load time
+// to reduce subprocess overhead during TUI startup.
+//
+// Session IDs are needed in tmux environment for restart/resume operations that
+// spawn new processes. Without this sync, R key wouldn't resume the correct session.
+func (i *Instance) SyncSessionIDsToTmux() {
+	if i.tmuxSession == nil || !i.tmuxSession.Exists() {
+		return
+	}
+
+	// Sync ClaudeSessionID
+	if i.ClaudeSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("CLAUDE_SESSION_ID", i.ClaudeSessionID)
+	}
+
+	// Sync GeminiSessionID
+	if i.GeminiSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("GEMINI_SESSION_ID", i.GeminiSessionID)
+	}
+
+	// Sync OpenCodeSessionID
+	if i.OpenCodeSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("OPENCODE_SESSION_ID", i.OpenCodeSessionID)
+	}
+
+	// Sync CodexSessionID
+	if i.CodexSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", i.CodexSessionID)
+	}
+
+	// Sync CopilotSessionID
+	if i.CopilotSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("COPILOT_SESSION_ID", i.CopilotSessionID)
+	}
+}
+
+func (i *Instance) clearSessionBindingForFreshStart() {
+	if IsClaudeCompatible(i.Tool) {
+		i.ClaudeSessionID = ""
+		i.ClaudeDetectedAt = time.Time{}
+	}
+
+	if i.Tool == "gemini" {
+		i.GeminiSessionID = ""
+		i.GeminiDetectedAt = time.Time{}
+	}
+
+	if i.Tool == "opencode" {
+		i.OpenCodeSessionID = ""
+		i.OpenCodeDetectedAt = time.Time{}
+		i.OpenCodeStartedAt = 0
+		i.lastOpenCodeScanAt = time.Time{}
+	}
+
+	if i.Tool == "codex" {
+		i.CodexSessionID = ""
+		i.CodexDetectedAt = time.Time{}
+		i.CodexStartedAt = 0
+		i.lastCodexScanAt = time.Time{}
+		i.mu.Lock()
+		i.pendingCodexRestartWarning = ""
+		i.mu.Unlock()
+	}
+
+	if i.Tool == "copilot" {
+		i.CopilotSessionID = ""
+		i.CopilotDetectedAt = time.Time{}
+		i.CopilotStartedAt = 0
+	}
+}
+
+func (i *Instance) recreateTmuxSession() {
+	// Issue #663: multi-repo sessions must cwd into MultiRepoTempDir, not
+	// ProjectPath (which is a symlink into that parent dir). Delegates to
+	// EffectiveWorkingDir so single-repo sessions keep using ProjectPath.
+	i.tmuxSession = tmux.NewSession(i.Title, i.EffectiveWorkingDir())
+	// Preserve the socket the instance was originally created on (issue
+	// #687). A restart/respawn cycle must NOT silently relocate the session
+	// to the current default socket — that would strand the old tmux pane
+	// on the stored socket and create an invisible duplicate on the new
+	// one.
+	i.tmuxSession.SocketName = i.TmuxSocketName
+	i.tmuxSession.InstanceID = i.ID
+	i.tmuxSession.SetInjectStatusLine(GetTmuxSettings().GetInjectStatusLine())
+	i.tmuxSession.SetMouse(GetTmuxSettings().GetMouse())
+	i.tmuxSession.SetClearOnRestart(GetTmuxSettings().ClearOnRestart)
+	i.tmuxSession.SetTerminalChromeEnabled(GetTerminalSettings().GetITermBadge())
+}
+
+func (i *Instance) prepareRestartMCPConfig() {
+	// Clear flag immediately to prevent it staying set if restart fails.
+	skipRegen := i.SkipMCPRegenerate
+	i.SkipMCPRegenerate = false
+
+	if IsClaudeCompatible(i.Tool) && !skipRegen {
+		if err := i.regenerateMCPConfig(); err != nil {
+			mcpLog.Warn("mcp_config_regen_failed", slog.String("error", err.Error()))
+		}
+	} else if skipRegen {
+		mcpLog.Debug("mcp_regen_skipped", slog.String("reason", "flag_set_by_apply"))
+	}
+}
+
+// SyncSessionIDsFromTmux reads tool session IDs from the tmux environment
+// into the Instance struct. This is the reverse of SyncSessionIDsToTmux.
+// Used in the stop path to capture IDs that may not have been saved during
+// start (e.g., if PostStartSync timed out but the tool started late).
+// Only updates fields where the tmux env has a non-empty value; does not
+// blank existing IDs if the tmux env is missing the variable.
+func (i *Instance) SyncSessionIDsFromTmux() {
+	if i.tmuxSession == nil || !i.tmuxSession.Exists() {
+		return
+	}
+
+	if id, err := i.tmuxSession.GetEnvironment("CLAUDE_SESSION_ID"); err == nil && id != "" {
+		i.ClaudeSessionID = id
+		if i.ClaudeDetectedAt.IsZero() {
+			i.ClaudeDetectedAt = time.Now()
+		}
+	}
+
+	if id, err := i.tmuxSession.GetEnvironment("GEMINI_SESSION_ID"); err == nil && id != "" {
+		i.GeminiSessionID = id
+	}
+
+	if id, err := i.tmuxSession.GetEnvironment("OPENCODE_SESSION_ID"); err == nil && id != "" {
+		i.OpenCodeSessionID = id
+	}
+
+	if id, err := i.tmuxSession.GetEnvironment("CODEX_SESSION_ID"); err == nil && id != "" {
+		i.CodexSessionID = id
+	}
+
+	if id, err := i.tmuxSession.GetEnvironment("COPILOT_SESSION_ID"); err == nil && id != "" {
+		i.CopilotSessionID = id
+		if i.CopilotDetectedAt.IsZero() {
+			i.CopilotDetectedAt = time.Now()
+		}
+	}
+}
+
+// ResponseOutput represents a parsed response from an agent session
+type ResponseOutput struct {
+	Tool      string `json:"tool"`                 // Tool type (claude, gemini, etc.)
+	Role      string `json:"role"`                 // Always "assistant" for now
+	Content   string `json:"content"`              // The actual response text
+	Timestamp string `json:"timestamp,omitempty"`  // When the response was generated (Claude only)
+	SessionID string `json:"session_id,omitempty"` // Claude session ID (if available)
+}
+
+// GetLastResponse returns the last assistant response from the session
+// For Claude: Parses the JSONL file for the last assistant message
+// For Gemini: Parses the JSON session file for the last assistant message
+// For Codex/Others: Attempts to parse terminal output
+func (i *Instance) GetLastResponse() (*ResponseOutput, error) {
+	if IsClaudeCompatible(i.Tool) {
+		return i.getClaudeLastResponse()
+	}
+	if i.Tool == "gemini" {
+		return i.getGeminiLastResponse()
+	}
+	return i.getTerminalLastResponse()
+}
+
+// GetLastResponseBestEffortChecked is the collision-aware variant of
+// GetLastResponseBestEffort (issue #1400). `session output` (including -q)
+// parses the transcript that ClaudeSessionID resolves to; when multiple LIVE
+// instances share one claude_session_id they all resolve to the SAME transcript
+// and return byte-identical "last responses". Given the instance's profile
+// peers, this refuses the read with the same collision semantics #1352 gave
+// `session output --stream` (GetJSONLPathChecked: live peers sharing both the
+// session id and the transcript dir), instead of silently returning another
+// session's output. Non-Claude tools and the no-collision case delegate to
+// GetLastResponseBestEffort unchanged.
+func (i *Instance) GetLastResponseBestEffortChecked(peers []*Instance) (*ResponseOutput, error) {
+	if IsClaudeCompatible(i.Tool) {
+		if _, err := i.GetJSONLPathChecked(peers); err != nil {
+			return nil, fmt.Errorf("refusing to read a colliding transcript: %w", err)
+		}
+	}
+	return i.GetLastResponseBestEffort()
+}
+
+// GetLastResponseBestEffort returns the last assistant response with fallback logic
+// intended for CLI read paths (like `session output`) where we prefer useful output
+// over hard errors.
+//
+// Behavior for Claude:
+// 1. Try structured JSONL read via stored ClaudeSessionID.
+// 2. Refresh ID from tmux env and retry.
+// 3. Fallback to terminal parsing.
+// 4. If still unavailable, return an empty response (no error).
+//
+// Behavior for Gemini (mirrors Claude):
+// 1. Try structured JSON read via stored GeminiSessionID.
+// 2. Refresh ID from tmux env and retry.
+// 3. Scan disk for latest session and retry.
+// 4. Fallback to terminal parsing.
+// 5. If still unavailable, return an empty response (no error).
+func (i *Instance) GetLastResponseBestEffort() (*ResponseOutput, error) {
+	resp, err := i.GetLastResponse()
+	if err == nil {
+		return resp, nil
+	}
+
+	// Claude-specific recovery path
+	if IsClaudeCompatible(i.Tool) {
+		// Refresh from tmux env (fast path)
+		if sessionID := i.GetSessionIDFromTmux(); sessionID != "" {
+			i.ClaudeSessionID = sessionID
+			i.ClaudeDetectedAt = time.Now()
+			if recovered, recoverErr := i.getClaudeLastResponse(); recoverErr == nil {
+				return recovered, nil
+			}
+		}
+
+		// Disk scan: the tmux env var is fixed at launch, so after a /clear or
+		// compaction it points at a stale, empty transcript. Find the newest
+		// transcript on disk that carries a real assistant reply. Mirrors the
+		// Gemini syncGeminiSessionFromDisk fallback below.
+		if id, recovered := i.findLatestClaudeTranscriptOnDisk(); recovered != nil {
+			i.ClaudeSessionID = id
+			i.ClaudeDetectedAt = time.Now()
+			// Sync back to tmux so subsequent reads (and restarts) stay current.
+			if i.tmuxSession != nil && i.tmuxSession.Exists() {
+				_ = i.tmuxSession.SetEnvironment("CLAUDE_SESSION_ID", id)
+			}
+			return recovered, nil
+		}
+	}
+
+	// Gemini-specific recovery path (mirrors Claude recovery above)
+	if i.Tool == "gemini" {
+		// Refresh from tmux env (fast path)
+		i.syncGeminiSessionFromTmux()
+		if i.GeminiSessionID != "" {
+			if recovered, recoverErr := i.getGeminiLastResponse(); recoverErr == nil {
+				return recovered, nil
+			}
+		}
+
+		// Fallback: detect latest session on disk (handles startup race / stale ID)
+		i.syncGeminiSessionFromDisk()
+		if i.GeminiSessionID != "" {
+			if recovered, recoverErr := i.getGeminiLastResponse(); recoverErr == nil {
+				return recovered, nil
+			}
+		}
+	}
+
+	// Final fallback: terminal parsing (works for all tools).
+	if i.tmuxSession != nil {
+		if terminalResp, terminalErr := i.getTerminalLastResponse(); terminalErr == nil {
+			return terminalResp, nil
+		}
+	}
+
+	// For Claude and Gemini, prefer a graceful empty response instead of a hard error.
+	if IsClaudeCompatible(i.Tool) || i.Tool == "gemini" {
+		toolName := i.Tool
+		if IsClaudeCompatible(toolName) {
+			toolName = "claude"
+		}
+		return &ResponseOutput{
+			Tool:    toolName,
+			Role:    "assistant",
+			Content: "",
+		}, nil
+	}
+
+	return nil, err
+}
+
+// ClaudeSessionIDCollidesWith reports whether another LIVE instance in peers
+// would resolve to the SAME transcript as this instance: it shares this
+// instance's (non-empty) ClaudeSessionID AND resolves to the same transcript
+// directory (same Claude config dir + same encoded project path). A many-to-one
+// session-id → live-instance mapping on one transcript is the data-integrity
+// hazard #1349 describes: two live instances pointed at one transcript would
+// cross-route input/output. Two instances that happen to share a session id but
+// resolve to different transcript dirs (different project/config) are NOT a
+// collision and are not blocked.
+func (i *Instance) ClaudeSessionIDCollidesWith(peers []*Instance) bool {
+	if i.ClaudeSessionID == "" {
+		return false
+	}
+	mine := i.claudeTranscriptDir()
+	for _, p := range peers {
+		if p == nil || p.ID == i.ID {
+			continue
+		}
+		if p.ClaudeSessionID != i.ClaudeSessionID || !isLiveSessionStatus(p.Status) {
+			continue
+		}
+		if p.claudeTranscriptDir() == mine {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeTranscriptDir returns the directory that GetJSONLPath would place this
+// instance's transcript in (config dir + encoded project path), used to decide
+// whether two instances would collide on the same transcript file. It mirrors
+// GetJSONLPath's resolution (GetClaudeConfigDir + i.ProjectPath) exactly, so the
+// collision verdict matches the path the guard protects.
+func (i *Instance) claudeTranscriptDir() string {
+	configDir := GetClaudeConfigDir()
+	resolvedPath := i.ProjectPath
+	if resolved, err := filepath.EvalSymlinks(i.ProjectPath); err == nil {
+		resolvedPath = resolved
+	}
+	return filepath.Join(configDir, "projects", ConvertToClaudeDirName(resolvedPath))
+}
+
+// GetJSONLPathChecked is the collision-aware variant of GetJSONLPath (issue
+// #1349 defense-in-depth #2). Given the set of instances it shares a profile
+// with, it refuses to resolve a transcript path when this instance's
+// ClaudeSessionID collides with another LIVE instance's ClaudeSessionID —
+// because two live instances mapped to one session-id would otherwise read the
+// same transcript, corrupting routing. When there is no collision it delegates
+// to GetJSONLPath.
+func (i *Instance) GetJSONLPathChecked(peers []*Instance) (string, error) {
+	if i.ClaudeSessionIDCollidesWith(peers) {
+		_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
+			InstanceID: i.ID, Tool: i.Tool, Action: "reject",
+			Source: "jsonl_resolve", OldID: i.ClaudeSessionID, Candidate: i.ClaudeSessionID,
+			Reason: "claude_session_id_collision_across_live_instances",
+		})
+		return "", fmt.Errorf("claude_session_id %q is shared by more than one live instance; refusing to resolve a colliding transcript path for instance %s", i.ClaudeSessionID, i.ID)
+	}
+	return i.GetJSONLPath(), nil
+}
+
+// GetJSONLPath returns the path to the Claude session JSONL file for analytics
+// Returns empty string if this is not a Claude session or no session ID is available
+func (i *Instance) GetJSONLPath() string {
+	if !IsClaudeCompatible(i.Tool) || i.ClaudeSessionID == "" {
+		return ""
+	}
+
+	configDir := GetClaudeConfigDir()
+
+	// Resolve symlinks in project path (macOS: /tmp -> /private/tmp)
+	resolvedPath := i.ProjectPath
+	if resolved, err := filepath.EvalSymlinks(i.ProjectPath); err == nil {
+		resolvedPath = resolved
+	}
+
+	// Convert project path to Claude's directory format
+	// Claude replaces ALL non-alphanumeric chars (spaces, !, etc.) with hyphens
+	// /Users/master/Code cloud/!Project -> -Users-master-Code-cloud--Project
+	projectDirName := ConvertToClaudeDirName(resolvedPath)
+	projectDir := filepath.Join(configDir, "projects", projectDirName)
+
+	// Build the JSONL file path
+	sessionFile := filepath.Join(projectDir, i.ClaudeSessionID+".jsonl")
+
+	// Verify file exists before returning
+	if _, err := os.Stat(sessionFile); os.IsNotExist(err) {
+		return ""
+	}
+
+	return sessionFile
+}
+
+// getClaudeLastResponse extracts the last assistant message from Claude's JSONL file
+func (i *Instance) getClaudeLastResponse() (*ResponseOutput, error) {
+	// Require stored session ID - no fallback to file scanning
+	if i.ClaudeSessionID == "" {
+		return nil, fmt.Errorf("no Claude session ID available for this instance")
+	}
+
+	configDir := GetClaudeConfigDir()
+
+	// Resolve symlinks in project path (macOS: /tmp -> /private/tmp)
+	resolvedPath := i.ProjectPath
+	if resolved, err := filepath.EvalSymlinks(i.ProjectPath); err == nil {
+		resolvedPath = resolved
+	}
+
+	// Convert project path to Claude's directory format
+	// Claude replaces ALL non-alphanumeric chars (spaces, !, etc.) with hyphens
+	// /Users/master/Code cloud/!Project -> -Users-master-Code-cloud--Project
+	projectDirName := ConvertToClaudeDirName(resolvedPath)
+	projectDir := filepath.Join(configDir, "projects", projectDirName)
+
+	// Use stored session ID directly
+	sessionFile := filepath.Join(projectDir, i.ClaudeSessionID+".jsonl")
+
+	// Check file exists
+	if _, err := os.Stat(sessionFile); os.IsNotExist(err) {
+		return nil, fmt.Errorf("session file not found: %s", sessionFile)
+	}
+
+	// Read and parse the JSONL file
+	data, err := os.ReadFile(sessionFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read session file: %w", err)
+	}
+
+	return parseClaudeLastAssistantMessage(data, filepath.Base(sessionFile))
+}
+
+// findLatestClaudeTranscriptOnDisk scans the instance's Claude project directory
+// for the most recently modified transcript that carries a real (non-sidechain)
+// assistant message, returning its session ID and parsed response.
+//
+// This recovers from a stale CLAUDE_SESSION_ID: when a Claude session rolls over
+// (/clear or compaction starts a NEW transcript), the tmux env var — fixed at
+// launch — still points at the OLD, now-empty transcript. Without this fallback
+// the read path drops to raw tmux-pane parsing, which leaks tool output (e.g. a
+// `list --json` dump) into conductor chat replies. Mirrors the Gemini
+// syncGeminiSessionFromDisk fallback.
+//
+// Returns ("", nil) when no suitable transcript is found.
+func (i *Instance) findLatestClaudeTranscriptOnDisk() (string, *ResponseOutput) {
+	configDir := GetClaudeConfigDir()
+
+	resolvedPath := i.ProjectPath
+	if resolved, err := filepath.EvalSymlinks(i.ProjectPath); err == nil {
+		resolvedPath = resolved
+	}
+	projectDir := filepath.Join(configDir, "projects", ConvertToClaudeDirName(resolvedPath))
+
+	entries, err := os.ReadDir(projectDir)
+	if err != nil {
+		return "", nil
+	}
+
+	type candidate struct {
+		id  string
+		mod time.Time
+	}
+	var candidates []candidate
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, candidate{
+			id:  strings.TrimSuffix(e.Name(), ".jsonl"),
+			mod: info.ModTime(),
+		})
+	}
+
+	// Newest first; the current conversation is the most recently written file
+	// that still contains a real assistant reply.
+	sort.Slice(candidates, func(a, b int) bool {
+		return candidates[a].mod.After(candidates[b].mod)
+	})
+
+	for _, c := range candidates {
+		data, err := os.ReadFile(filepath.Join(projectDir, c.id+".jsonl"))
+		if err != nil {
+			continue
+		}
+		resp, err := parseClaudeLastAssistantMessage(data, c.id+".jsonl")
+		if err == nil && resp != nil && strings.TrimSpace(resp.Content) != "" {
+			return c.id, resp
+		}
+	}
+	return "", nil
+}
+
+// parseClaudeLastAssistantMessage parses a Claude JSONL file to extract the last assistant message
+func parseClaudeLastAssistantMessage(data []byte, sessionID string) (*ResponseOutput, error) {
+	// JSONL record structure (same as global_search.go)
+	type claudeMessage struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	type claudeRecord struct {
+		SessionID   string          `json:"sessionId"`
+		Type        string          `json:"type"`
+		Message     json.RawMessage `json:"message"`
+		Timestamp   string          `json:"timestamp"`
+		IsSidechain bool            `json:"isSidechain"`
+	}
+
+	var lastAssistantContent string
+	var lastTimestamp string
+	var foundSessionID string
+
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	// Handle large lines
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var record claudeRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			continue // Skip malformed lines
+		}
+
+		// Skip subagent sidechain records: the conversation's "last response"
+		// is the parent agent's reply, not a Task subagent's output.
+		if record.IsSidechain {
+			continue
+		}
+
+		// Capture session ID
+		if foundSessionID == "" && record.SessionID != "" {
+			foundSessionID = record.SessionID
+		}
+
+		// Only care about messages
+		if len(record.Message) == 0 {
+			continue
+		}
+
+		var msg claudeMessage
+		if err := json.Unmarshal(record.Message, &msg); err != nil {
+			continue
+		}
+
+		// Only care about assistant messages
+		if msg.Role != "assistant" {
+			continue
+		}
+
+		// Extract content (can be string or array of blocks)
+		var contentStr string
+		var extractedText string
+		if err := json.Unmarshal(msg.Content, &contentStr); err == nil {
+			// Simple string content
+			extractedText = contentStr
+		} else {
+			// Try as array of content blocks
+			var blocks []map[string]interface{}
+			if err := json.Unmarshal(msg.Content, &blocks); err == nil {
+				var sb strings.Builder
+				for _, block := range blocks {
+					// Check for text type blocks
+					if blockType, ok := block["type"].(string); ok && blockType == "text" {
+						if text, ok := block["text"].(string); ok {
+							sb.WriteString(text)
+							sb.WriteString("\n")
+						}
+					}
+				}
+				extractedText = strings.TrimSpace(sb.String())
+			}
+		}
+		// Only update if we found actual text content
+		if extractedText != "" {
+			lastAssistantContent = extractedText
+			lastTimestamp = record.Timestamp
+		}
+	}
+
+	if lastAssistantContent == "" {
+		return nil, fmt.Errorf("no assistant response found in session")
+	}
+
+	return &ResponseOutput{
+		Tool:      "claude",
+		Role:      "assistant",
+		Content:   lastAssistantContent,
+		Timestamp: lastTimestamp,
+		SessionID: foundSessionID,
+	}, nil
+}
+
+// parseClaudeLatestUserPrompt parses a Claude JSONL file to extract the last user message
+func parseClaudeLatestUserPrompt(data []byte) (string, error) {
+	// JSONL record structure
+	type claudeMessage struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	type claudeRecord struct {
+		Message json.RawMessage `json:"message"`
+	}
+
+	var latestPrompt string
+
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	// Handle large lines
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var record claudeRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			continue // Skip malformed lines
+		}
+
+		// Only care about messages
+		if len(record.Message) == 0 {
+			continue
+		}
+
+		var msg claudeMessage
+		if err := json.Unmarshal(record.Message, &msg); err != nil {
+			continue
+		}
+
+		// Only care about user messages
+		if msg.Role != "user" {
+			continue
+		}
+
+		// Extract content (can be string or array of blocks)
+		var contentStr string
+		var extractedText string
+		if err := json.Unmarshal(msg.Content, &contentStr); err == nil {
+			// Simple string content
+			extractedText = contentStr
+		} else {
+			// Try as array of content blocks
+			var blocks []map[string]interface{}
+			if err := json.Unmarshal(msg.Content, &blocks); err == nil {
+				var sb strings.Builder
+				for _, block := range blocks {
+					if blockType, ok := block["type"].(string); ok && blockType == "text" {
+						if text, ok := block["text"].(string); ok {
+							sb.WriteString(text)
+							sb.WriteString(" ")
+						}
+					}
+				}
+				extractedText = strings.TrimSpace(sb.String())
+			}
+		}
+
+		// Sanitize: strip newlines and extra spaces for single-line display
+		if extractedText != "" {
+			content := strings.ReplaceAll(extractedText, "\n", " ")
+			latestPrompt = strings.Join(strings.Fields(content), " ")
+		}
+	}
+
+	return latestPrompt, nil
+}
+
+// readJSONLTail reads the last user prompt from a JSONL file using tail-read with size caching.
+// Instead of reading the entire file (can be 100-800MB), it:
+// 1. Stats the file to get current size (cheap syscall)
+// 2. Skips reading entirely if size hasn't changed since last check
+// 3. Only reads the last 32KB when the file has grown
+func (i *Instance) readJSONLTail(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	size := info.Size()
+
+	// If same file and same size, return cached prompt
+	if path == i.lastJSONLPath && size == i.lastJSONLSize {
+		return i.cachedPrompt
+	}
+
+	// File changed or new file - read the tail
+	const tailSize int64 = 32 * 1024 // 32KB
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	offset := size - tailSize
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > 0 {
+		if _, err := f.Seek(offset, 0); err != nil {
+			return ""
+		}
+	}
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return ""
+	}
+
+	// If we seeked into the middle of the file, skip to the first complete line
+	if offset > 0 {
+		if idx := bytes.IndexByte(data, '\n'); idx >= 0 {
+			data = data[idx+1:]
+		}
+	}
+
+	prompt, err := parseClaudeLatestUserPrompt(data)
+	if err != nil || prompt == "" {
+		// Update cache even on empty result to avoid re-reading
+		i.lastJSONLPath = path
+		i.lastJSONLSize = size
+		return i.cachedPrompt // Return previous cached value
+	}
+
+	i.lastJSONLPath = path
+	i.lastJSONLSize = size
+	i.cachedPrompt = prompt
+	return prompt
+}
+
+// parseGeminiLatestUserPrompt parses a Gemini JSON file to extract the last user message
+func parseGeminiLatestUserPrompt(data []byte) (string, error) {
+	var session struct {
+		Messages []struct {
+			Type    string `json:"type"` // "user" or "gemini"
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+
+	if err := json.Unmarshal(data, &session); err != nil {
+		return "", fmt.Errorf("failed to parse Gemini session: %w", err)
+	}
+
+	var latestPrompt string
+	// Find last "user" type message
+	for i := len(session.Messages) - 1; i >= 0; i-- {
+		msg := session.Messages[i]
+		if msg.Type == "user" {
+			// Sanitize: strip newlines and extra spaces for single-line display
+			content := strings.ReplaceAll(msg.Content, "\n", " ")
+			latestPrompt = strings.Join(strings.Fields(content), " ")
+			break
+		}
+	}
+
+	return latestPrompt, nil
+}
+
+// getGeminiLastResponse extracts the last assistant message from Gemini's JSON file
+func (i *Instance) getGeminiLastResponse() (*ResponseOutput, error) {
+	// Require stored session ID - no fallback to file scanning
+	if i.GeminiSessionID == "" || len(i.GeminiSessionID) < 8 {
+		return nil, fmt.Errorf("no Gemini session ID available for this instance")
+	}
+
+	sessionsDir := GetGeminiSessionsDir(i.ProjectPath)
+
+	// Find file by session ID (first 8 chars in filename)
+	// Filename format is session-YYYY-MM-DDTHH-MM-<uuid8>.json
+	pattern := filepath.Join(sessionsDir, "session-*-"+i.GeminiSessionID[:8]+".json")
+	files, _ := filepath.Glob(pattern)
+
+	// Fallback: cross-project search if not found in expected location
+	if len(files) == 0 {
+		if fallbackPath := findGeminiSessionInAllProjects(i.GeminiSessionID); fallbackPath != "" {
+			files = []string{fallbackPath}
+		}
+	}
+
+	if len(files) == 0 {
+		return nil, fmt.Errorf("session file not found for ID: %s", i.GeminiSessionID)
+	}
+	sessionFile := files[0]
+
+	// Read and parse the JSON file
+	data, err := os.ReadFile(sessionFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read session file: %w", err)
+	}
+
+	return parseGeminiLastAssistantMessage(data)
+}
+
+// parseGeminiLastAssistantMessage parses a Gemini JSON file to extract the last assistant message
+// VERIFIED: Message type is "gemini" (NOT role: "assistant")
+func parseGeminiLastAssistantMessage(data []byte) (*ResponseOutput, error) {
+	var session struct {
+		SessionID string `json:"sessionId"` // VERIFIED: camelCase
+		Messages  []struct {
+			ID        string            `json:"id"`
+			Timestamp string            `json:"timestamp"`
+			Type      string            `json:"type"` // VERIFIED: "user" or "gemini"
+			Content   string            `json:"content"`
+			ToolCalls []json.RawMessage `json:"toolCalls,omitempty"`
+			Thoughts  []json.RawMessage `json:"thoughts,omitempty"`
+			Model     string            `json:"model,omitempty"`
+			Tokens    json.RawMessage   `json:"tokens,omitempty"`
+		} `json:"messages"`
+	}
+
+	if err := json.Unmarshal(data, &session); err != nil {
+		return nil, fmt.Errorf("failed to parse session file: %w", err)
+	}
+
+	// Find last "gemini" type message
+	for i := len(session.Messages) - 1; i >= 0; i-- {
+		msg := session.Messages[i]
+		if msg.Type == "gemini" {
+			return &ResponseOutput{
+				Tool:      "gemini",
+				Role:      "assistant",
+				Content:   msg.Content,
+				Timestamp: msg.Timestamp,
+				SessionID: session.SessionID,
+			}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no assistant response found in session")
+}
+
+// getTerminalLastResponse extracts the last response from terminal output
+// This is used for Gemini, Codex, and other tools without structured output
+func (i *Instance) getTerminalLastResponse() (*ResponseOutput, error) {
+	if i.tmuxSession == nil {
+		return nil, fmt.Errorf("tmux session not initialized")
+	}
+
+	// Capture full history
+	content, err := i.tmuxSession.CaptureFullHistory()
+	if err != nil {
+		return nil, fmt.Errorf("failed to capture terminal output: %w", err)
+	}
+
+	// Parse based on tool type
+	switch {
+	case i.Tool == "gemini":
+		return parseGeminiOutput(content)
+	case IsCodexCompatible(i.Tool):
+		return parseCodexOutput(content)
+	default:
+		return parseGenericOutput(content, i.Tool)
+	}
+}
+
+// parseGeminiOutput parses Gemini CLI output to extract the last response
+func parseGeminiOutput(content string) (*ResponseOutput, error) {
+	content = tmux.StripANSI(content)
+	lines := strings.Split(content, "\n")
+
+	// Gemini typically shows responses after "▸" prompt and before the next ">"
+	// Look for response blocks in reverse order
+	var responseLines []string
+	inResponse := false
+
+	for idx := len(lines) - 1; idx >= 0; idx-- {
+		line := lines[idx]
+		trimmed := strings.TrimSpace(line)
+
+		// Skip empty lines at the end
+		if trimmed == "" && !inResponse {
+			continue
+		}
+
+		// Detect prompt line (end of response when reading backwards)
+		// Common prompts: "> ", ">>> ", "$", "❯", "➜"
+		isPrompt := geminiPromptRE.MatchString(trimmed)
+
+		if isPrompt && inResponse {
+			// We've found the start of the response block
+			break
+		}
+
+		// Detect user input line (also marks start of assistant response when reading backwards)
+		if strings.HasPrefix(trimmed, "> ") && len(trimmed) > 5 && inResponse {
+			break
+		}
+
+		// We're in a response
+		inResponse = true
+		responseLines = append([]string{line}, responseLines...)
+	}
+
+	if len(responseLines) == 0 {
+		return nil, fmt.Errorf("no response found in Gemini output")
+	}
+
+	// Clean up the response
+	response := strings.TrimSpace(strings.Join(responseLines, "\n"))
+
+	return &ResponseOutput{
+		Tool:    "gemini",
+		Role:    "assistant",
+		Content: response,
+	}, nil
+}
+
+// parseCodexOutput parses OpenAI Codex CLI output
+func parseCodexOutput(content string) (*ResponseOutput, error) {
+	// Codex has similar structure - adapt as needed
+	return parseGenericOutput(content, "codex")
+}
+
+// parseGenericOutput is a fallback parser for unknown tools
+func parseGenericOutput(content, tool string) (*ResponseOutput, error) {
+	content = tmux.StripANSI(content)
+	lines := strings.Split(content, "\n")
+
+	// Look for the last substantial block of text (more than 2 lines)
+	// before a prompt character
+	var responseLines []string
+	inResponse := false
+	promptPattern := shellPromptRE
+
+	for idx := len(lines) - 1; idx >= 0; idx-- {
+		line := lines[idx]
+		trimmed := strings.TrimSpace(line)
+
+		// Skip empty lines at the end
+		if trimmed == "" && !inResponse {
+			continue
+		}
+
+		// Detect prompt line
+		if promptPattern.MatchString(trimmed) {
+			if inResponse {
+				break
+			}
+			continue
+		}
+
+		inResponse = true
+		responseLines = append([]string{line}, responseLines...)
+
+		// Stop if we've collected enough lines (limit to prevent huge outputs)
+		if len(responseLines) > 500 {
+			break
+		}
+	}
+
+	if len(responseLines) == 0 {
+		return nil, fmt.Errorf("no response found in terminal output")
+	}
+
+	// Clean up
+	response := strings.TrimSpace(strings.Join(responseLines, "\n"))
+
+	return &ResponseOutput{
+		Tool:    tool,
+		Role:    "assistant",
+		Content: response,
+	}, nil
+}
+
+// StopServiceUnit best-effort stops + resets-failed the transient
+// systemd-user service unit associated with this instance's tmux
+// server (if LaunchAs=service was used). Intended for the remove/delete
+// code path ONLY — NOT for restart, which needs the unit to persist so
+// it can re-spawn tmux.
+//
+// No-ops on non-systemd hosts. Returns nil when the unit doesn't exist
+// or was never started (best-effort semantics per v1.7.21 spec).
+func (i *Instance) StopServiceUnit() error {
+	if i.tmuxSession == nil {
+		return nil
+	}
+	return tmux.StopServiceUnit(i.tmuxSession.Name)
+}
+
+// Kill terminates the tmux session and cleans up sandbox container if present.
+func (i *Instance) Kill() error {
+	return i.killInternal(false)
+}
+
+// KillAndWait is the synchronous companion to Kill. It performs the
+// same teardown AND blocks until the pane process tree has been
+// verified dead (SIGTERM → SIGKILL escalation inline, not in a
+// background goroutine). Callers in short-lived CLI processes
+// (`agent-deck remove`, `agent-deck session remove`) MUST use this
+// variant — see issue #59 (v1.7.68). The TUI and web callers can
+// keep using Kill for the non-blocking path.
+func (i *Instance) KillAndWait() error {
+	return i.killInternal(true)
+}
+
+func (i *Instance) killInternal(sync bool) error {
+	// Issue #965 wiring (PR #1000 follow-up): claude/codex/gemini spawn
+	// stdio MCP children when they read .mcp.json — agent-deck never
+	// has a direct exec.Command for them, so spawn-time PID
+	// registration is impossible. Discover descendants from the pane
+	// process tree while the shell+tool are still alive, then SIGTERM
+	// them before tmux teardown. Without this, detached children
+	// (e.g., npx-wrapped MCPs that setsid into their own session)
+	// reparent to PID 1 and accumulate.
+	i.discoverMCPChildrenFromPaneTree()
+
+	// Reap tracked MCP child PIDs first (issue #965). Stdio MCP children
+	// don't die with their parent claude process — they get reparented to
+	// PID 1 and accumulate. SIGTERM with a short grace period, then
+	// SIGKILL anything still alive.
+	i.reapTrackedMCPChildren()
+
+	// Issue #953: kill the tmux session AND publish StatusStopped
+	// atomically under i.mu so concurrent UpdateStatus() callers (most
+	// notably the TUI's backgroundStatusUpdate poller) cannot observe
+	// the intermediate state where the tmux pane is gone but Status
+	// still reflects the pre-kill running/idle value. The pre-existing
+	// !tmuxSession.Exists() branch in UpdateStatus then short-circuits
+	// on `Status == StatusStopped` (lines around 3221/3237) and leaves
+	// the status alone. Setting Status only AFTER the tmux Kill (and
+	// not before) also prevents the symmetric "Status is stopped, tmux
+	// is alive — must be a user-initiated restart, flip to Running"
+	// path at line 3245 from firing during the cleanup window.
+	//
+	// Holding the lock around the kill is safe: tmuxSession.Kill() is
+	// a single tmux command (the process-tree reaping is deferred to a
+	// goroutine via ensureProcessesDead). The KillAndWait variant can
+	// take up to 3s when escalating to SIGKILL — only short-lived CLI
+	// processes (session remove) take that path, and they have no
+	// concurrent TUI render contending for the lock.
+	var tmuxErr error
+	i.mu.Lock()
+	if i.tmuxSession != nil {
+		if sync {
+			tmuxErr = i.tmuxSession.KillAndWait()
+		} else {
+			tmuxErr = i.tmuxSession.Kill()
+		}
+	}
+	i.Status = StatusStopped
+	i.mu.Unlock()
+
+	// Clean up sandbox container (only if name matches our prefix convention).
+	// Runs regardless of tmux kill result to avoid orphaned containers.
+	if i.SandboxContainer != "" && docker.IsManagedContainer(i.SandboxContainer) {
+		dockerCfg := GetDockerSettings()
+		if dockerCfg.GetAutoCleanup() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			ctr := docker.FromName(i.SandboxContainer)
+			_ = ctr.Remove(ctx, true) // Force remove, ignore errors.
+			i.SandboxContainer = ""
+		} else {
+			sessionLog.Info("sandbox_container_kept", slog.String("container", i.SandboxContainer))
+		}
+	}
+
+	// Remove plaintext keychain credential files extracted during sandbox sync.
+	// Gated on IsSandboxed() (not SandboxContainer) so cleanup runs even if
+	// container creation failed after credential extraction.
+	if i.IsSandboxed() {
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			docker.CleanupKeychainCredentials(homeDir)
+		}
+
+		// Tear down the per-instance scoped hook bridge dir (…/hooks/sandbox/<id>).
+		// Each ended sandbox session otherwise leaks a directory AND (on Linux) an
+		// fsnotify inotify watch held by the notify-daemon's StatusFileWatcher →
+		// watch exhaustion on long-lived hosts. Removing the dir on disk also makes
+		// the kernel auto-drop that watch (IN_IGNORED). Skip when the container is
+		// intentionally kept (auto-cleanup off): it still has the dir bind-mounted.
+		// Follow-up: an explicit watcher.Remove() from here would require threading
+		// the daemon's StatusFileWatcher into the session-end lifecycle (it is not
+		// reachable from this layer), so we rely on the on-delete auto-drop.
+		if i.ID != "" && GetDockerSettings().GetAutoCleanup() {
+			scopedDir := filepath.Join(GetHooksDir(), "sandbox", i.ID)
+			if err := os.RemoveAll(scopedDir); err != nil {
+				sessionLog.Debug("sandbox_hook_dir_cleanup_failed",
+					slog.String("instance", i.ID),
+					slog.String("dir", scopedDir),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
+	}
+
+	// Remove the scratch CLAUDE_CONFIG_DIR prepared at spawn time for
+	// this worker (issue #59, v1.7.68). Best-effort — leaking a scratch
+	// dir on an unclean shutdown is harmless, just wasteful.
+	i.CleanupWorkerScratchConfigDir()
+
+	// Issue #953: StatusStopped was already written under i.mu at the top
+	// of this function. Re-asserting it here without the lock would
+	// reintroduce the write/write data race with concurrent UpdateStatus.
+
+	if tmuxErr != nil {
+		return fmt.Errorf("failed to kill tmux session: %w", tmuxErr)
+	}
+	return nil
+}
+
+// Restart restarts the Claude session
+// For Claude sessions with known ID: sends Ctrl+C twice and resume command to existing session
+// For dead sessions or unknown ID: recreates the tmux session
+//
+// Issue #1040: gated by acquireInstanceSpawnLock plus a "spawned-while-
+// we-waited" stamp so concurrent callers (TUI poller + RC-exit handler
+// in-process; multiple `agent-deck session start` CLI invocations
+// cross-process) cannot each race to recreate a tmux session for the
+// same instance. A legitimate manual restart still proceeds because the
+// stamp from any prior spawn pre-dates the new caller's beforeLock.
+func (i *Instance) Restart() error {
+	beforeLock := nowFn()
+	release, lockErr := acquireInstanceSpawnLock(i.ID)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer release()
+	if spawnedSince(i.ID, beforeLock) {
+		return nil
+	}
+	defer recordInstanceSpawn(i.ID)
+
+	mcpLog.Debug(
+		"restart_called",
+		slog.String("tool", i.Tool),
+		slog.String("claude_session_id", i.ClaudeSessionID),
+		slog.Bool("tmux_session", i.tmuxSession != nil),
+		slog.Bool("tmux_exists", i.tmuxSession != nil && i.tmuxSession.Exists()),
+	)
+
+	// Regenerate .mcp.json before restart to use socket pool if available.
+	// Skip if MCP dialog just wrote the config (avoids race condition).
+	i.prepareRestartMCPConfig()
+
+	// Regenerate worker-scratch CLAUDE_CONFIG_DIR before restart so
+	// changes to Instance.Plugins (added/removed via TUI Plugin Manager
+	// or `agent-deck plugin attach/detach`) propagate into the scratch
+	// settings.json before claude re-reads it. Without this, the
+	// respawn-pane fast path below uses the OLD scratch and claude
+	// sees the plugin enablement state from session creation, not the
+	// current state. Same call as Start()/recreate paths — idempotent
+	// per (sourceProfileDir, plugins-set) and best-effort on failure.
+	i.prepareWorkerScratchConfigDirForSpawn()
+
+	// Issue #956: custom-command Claude sessions whose hooks never fired
+	// (or whose wrapper script overrode CLAUDE_CONFIG_DIR) arrive at
+	// Restart() with empty ClaudeSessionID even when the live conversation
+	// wrote a JSONL to disk. Without this prelude the fallback recreate
+	// path below dispatches through buildClaudeCommand(i.Command), re-runs
+	// the wrapper fresh, and silently drops chat history. Discovery here
+	// populates ClaudeSessionID so the respawn-pane fast path
+	// (buildClaudeResumeCommand) engages and emits `claude --resume <uuid>`.
+	// Mirrors Start()'s ensureClaudeSessionIDFromDisk but bypasses the
+	// #608 brand-new-session gate — Restart() implies the instance ran.
+	if IsClaudeCompatible(i.Tool) && i.ClaudeSessionID == "" {
+		i.ensureClaudeSessionIDFromDiskForRestart()
+	}
+
+	// If Claude session with known ID AND tmux session exists, use respawn-pane.
+	if IsClaudeCompatible(i.Tool) && i.ClaudeSessionID != "" && i.tmuxSession != nil && i.tmuxSession.Exists() {
+		resumeCmd, containerName, err := i.prepareCommand(i.buildClaudeResumeCommand())
+		if err != nil {
+			return err
+		}
+		if containerName != "" {
+			i.SandboxContainer = containerName
+		}
+		mcpLog.Debug("respawn_pane_claude", slog.String("command", resumeCmd))
+
+		// Use respawn-pane for atomic restart
+		// This is more reliable than Ctrl+C + wait for shell + send command
+		// respawn-pane -k kills the current process and starts the new command atomically
+		if err := i.tmuxSession.RespawnPane(resumeCmd); err != nil {
+			mcpLog.Debug("respawn_pane_claude_failed", slog.String("error", err.Error()))
+			return fmt.Errorf("failed to restart Claude session: %w", err)
+		}
+
+		mcpLog.Debug("respawn_pane_claude_succeeded")
+
+		// Re-assert AGENTDECK_PROFILE host-side: this respawn branch returns
+		// before the fallback recreate path that would otherwise set it.
+		i.ensureProfileEnv()
+
+		// Persist .sid sidecar so hook events after restart can be correlated
+		WriteHookSessionAnchor(i.ID, i.ClaudeSessionID)
+
+		// Issue #666: kill OTHER agentdeck tmux sessions sharing this
+		// Claude session id so two `claude --resume` processes don't
+		// race the same conversation (and stack two telegram pollers).
+		i.sweepDuplicateToolSessions()
+
+		// Re-capture MCPs after restart (they may have changed since session started)
+		i.CaptureLoadedMCPs()
+
+		// Start as WAITING - will go GREEN on next tick if Claude shows busy indicator
+		i.Status = StatusWaiting
+		return nil
+	}
+
+	// For Gemini: ALWAYS update session to get the most recent one
+	// Krudony fix: don't skip when we already have an ID - the user may have started a NEW session
+	if i.Tool == "gemini" {
+		i.UpdateGeminiSession(nil)
+	}
+
+	// If Gemini session with known ID AND tmux session exists, use respawn-pane.
+	if i.Tool == "gemini" && i.GeminiSessionID != "" && i.tmuxSession != nil && i.tmuxSession.Exists() {
+		resumeCmd, containerName, err := i.prepareCommand(i.buildGeminiCommand("gemini"))
+		if err != nil {
+			return err
+		}
+		if containerName != "" {
+			i.SandboxContainer = containerName
+		}
+		sessionLog.Info("restart_gemini_respawn", slog.String("command", resumeCmd))
+
+		if err := i.tmuxSession.RespawnPane(resumeCmd); err != nil {
+			sessionLog.Info("restart_gemini_respawn_failed", slog.String("error", err.Error()))
+			return fmt.Errorf("failed to restart Gemini session: %w", err)
+		}
+
+		sessionLog.Info("restart_gemini_respawn_succeeded")
+
+		// Re-assert AGENTDECK_PROFILE host-side: gemini's rebuilt resume command
+		// carries no inline AGENTDECK_PROFILE prefix, and this branch returns
+		// before the fallback recreate path that would otherwise set it.
+		i.ensureProfileEnv()
+
+		// Persist .sid sidecar so hook events after restart can be correlated
+		WriteHookSessionAnchor(i.ID, i.GeminiSessionID)
+
+		// Issue #666: sweep cross-tmux duplicates on the respawn path too.
+		i.sweepDuplicateToolSessions()
+
+		i.Status = StatusWaiting
+		return nil
+	}
+
+	// If OpenCode session AND tmux session exists, use respawn-pane
+	if i.Tool == "opencode" && i.tmuxSession != nil && i.tmuxSession.Exists() {
+		// Refresh from OpenCode state before deciding the resume target.
+		i.updateOpenCodeSession(true)
+
+		// Try to get session ID from tmux environment if not already set
+		// (async detection stores it there but Instance might not have been saved)
+		if i.OpenCodeSessionID == "" {
+			if envID, err := i.tmuxSession.GetEnvironment("OPENCODE_SESSION_ID"); err == nil && envID != "" {
+				i.OpenCodeSessionID = envID
+				i.OpenCodeDetectedAt = time.Now()
+				sessionLog.Info("restart_opencode_recovered_id", slog.String("session_id", envID))
+			}
+		}
+
+		var rawCmd string
+		if i.OpenCodeSessionID != "" {
+			// OPENCODE_SESSION_ID is propagated via host-side SetEnvironment after tmux start.
+			rawCmd = fmt.Sprintf("opencode -s %s", i.OpenCodeSessionID)
+		} else {
+			rawCmd = "opencode"
+			i.OpenCodeStartedAt = time.Now().UnixMilli()
+		}
+		resumeCmd, containerName, err := i.prepareCommand(rawCmd)
+		if err != nil {
+			return err
+		}
+		if containerName != "" {
+			i.SandboxContainer = containerName
+		}
+		sessionLog.Info("restart_opencode_respawn", slog.String("command", resumeCmd))
+
+		if err := i.tmuxSession.RespawnPane(resumeCmd); err != nil {
+			sessionLog.Info("restart_opencode_respawn_failed", slog.String("error", err.Error()))
+			return fmt.Errorf("failed to restart OpenCode session: %w", err)
+		}
+
+		// If no session ID, start async detection
+		if i.OpenCodeSessionID == "" {
+			go i.detectOpenCodeSessionAsync()
+		}
+
+		sessionLog.Info("restart_opencode_respawn_succeeded")
+
+		// Re-assert AGENTDECK_PROFILE host-side: opencode's rebuilt resume command
+		// carries no inline AGENTDECK_PROFILE prefix, and this branch returns
+		// before the fallback recreate path that would otherwise set it.
+		i.ensureProfileEnv()
+
+		// Persist .sid sidecar so hook events after restart can be correlated
+		if i.OpenCodeSessionID != "" {
+			WriteHookSessionAnchor(i.ID, i.OpenCodeSessionID)
+		}
+
+		// Issue #666: sweep cross-tmux duplicates on the respawn path too.
+		i.sweepDuplicateToolSessions()
+
+		i.Status = StatusWaiting
+		return nil
+	}
+
+	// For Codex: try to update session ID, but only if we don't already have one.
+	// When we already have a known session ID (from the database), trust it —
+	// the disk scan can return a wrong ID when multiple instances share the same
+	// project_path. The process probe is authoritative but only works when the
+	// process is running, which it isn't during a restart.
+	if IsCodexCompatible(i.Tool) && i.CodexSessionID == "" {
+		i.mu.Lock()
+		i.pendingCodexRestartWarning = ""
+		i.mu.Unlock()
+		if missingDep := i.updateCodexSession(i.collectOtherCodexSessionIDs(), true); missingDep != "" {
+			i.mu.Lock()
+			i.pendingCodexRestartWarning = codexProbeMissingWarning(missingDep)
+			i.mu.Unlock()
+			sessionLog.Warn("codex_probe_dep_missing_for_restart", slog.String("dependency", missingDep))
+		}
+	}
+
+	// If Codex session AND tmux session exists, use respawn-pane
+	if IsCodexCompatible(i.Tool) && i.tmuxSession != nil && i.tmuxSession.Exists() {
+		// Try to get session ID from tmux environment if not already set
+		if i.CodexSessionID == "" {
+			if envID, err := i.tmuxSession.GetEnvironment("CODEX_SESSION_ID"); err == nil && envID != "" {
+				i.CodexSessionID = envID
+				i.CodexDetectedAt = time.Now()
+				sessionLog.Info("restart_codex_recovered_id", slog.String("session_id", envID))
+			}
+		}
+
+		if i.CodexSessionID == "" {
+			i.CodexStartedAt = time.Now().UnixMilli()
+		}
+		resumeCmd, containerName, err := i.prepareCommand(i.buildCodexCommand(i.Command))
+		if err != nil {
+			return err
+		}
+		if containerName != "" {
+			i.SandboxContainer = containerName
+		}
+		sessionLog.Info("restart_codex_respawn", slog.String("command", resumeCmd))
+
+		if err := i.tmuxSession.RespawnPane(resumeCmd); err != nil {
+			sessionLog.Info("restart_codex_respawn_failed", slog.String("error", err.Error()))
+			return fmt.Errorf("failed to restart Codex session: %w", err)
+		}
+
+		// If no session ID, start async detection
+		if i.CodexSessionID == "" {
+			go i.detectCodexSessionAsync()
+		}
+
+		sessionLog.Info("restart_codex_respawn_succeeded")
+
+		// Re-assert AGENTDECK_PROFILE host-side as a belt-and-suspenders to the
+		// inline prefix buildCodexCommand already injects; this branch returns
+		// before the fallback recreate path that would otherwise set it.
+		i.ensureProfileEnv()
+
+		// Persist .sid sidecar so hook events after restart can be correlated
+		WriteHookSessionAnchor(i.ID, i.CodexSessionID)
+
+		// Issue #666: sweep cross-tmux duplicates on the respawn path too.
+		i.sweepDuplicateToolSessions()
+
+		i.Status = StatusWaiting
+		return nil
+	}
+
+	// If Cursor session AND tmux session exists, use respawn-pane.
+	if i.Tool == "cursor" && i.tmuxSession != nil && i.tmuxSession.Exists() {
+		resumeCmd, containerName, err := i.prepareCommand(i.buildCursorCommand(i.Command, true))
+		if err != nil {
+			return err
+		}
+		if containerName != "" {
+			i.SandboxContainer = containerName
+		}
+		sessionLog.Info("restart_cursor_respawn", slog.String("command", resumeCmd))
+
+		if err := i.tmuxSession.RespawnPane(resumeCmd); err != nil {
+			sessionLog.Info("restart_cursor_respawn_failed", slog.String("error", err.Error()))
+			return fmt.Errorf("failed to restart Cursor session: %w", err)
+		}
+
+		sessionLog.Info("restart_cursor_respawn_succeeded")
+		i.ensureProfileEnv()
+		i.sweepDuplicateToolSessions()
+		i.CaptureLoadedMCPs()
+		i.Status = StatusWaiting
+		return nil
+	}
+
+	// If custom tool with session resume support AND tmux session exists, use respawn-pane.
+	if i.CanRestartGeneric() && i.tmuxSession != nil && i.tmuxSession.Exists() {
+		toolDef := GetToolDef(i.Tool)
+		sessionID := i.GetGenericSessionID()
+
+		// The session ID env var is propagated via host-side SetEnvironment after tmux start.
+		var rawCmd string
+		if toolDef.DangerousMode && toolDef.DangerousFlag != "" {
+			rawCmd = fmt.Sprintf("%s %s %s %s",
+				i.Command, toolDef.ResumeFlag, sessionID, toolDef.DangerousFlag)
+		} else {
+			rawCmd = fmt.Sprintf("%s %s %s",
+				i.Command, toolDef.ResumeFlag, sessionID)
+		}
+		resumeCmd, containerName, err := i.prepareCommand(rawCmd)
+		if err != nil {
+			return err
+		}
+		if containerName != "" {
+			i.SandboxContainer = containerName
+		}
+
+		sessionLog.Info("restart_generic_respawn", slog.String("tool", i.Tool), slog.String("command", resumeCmd))
+
+		if err := i.tmuxSession.RespawnPane(resumeCmd); err != nil {
+			sessionLog.Info(
+				"restart_generic_respawn_failed",
+				slog.String("tool", i.Tool),
+				slog.String("error", err.Error()),
+			)
+			return fmt.Errorf("failed to restart %s session: %w", i.Tool, err)
+		}
+
+		sessionLog.Info("restart_generic_respawn_succeeded", slog.String("tool", i.Tool))
+
+		// Re-assert AGENTDECK_PROFILE host-side: the generic resume command is a
+		// bare `<cmd> <resumeFlag> <sid>` with no inline AGENTDECK_PROFILE prefix,
+		// and this branch returns before the fallback recreate path.
+		i.ensureProfileEnv()
+
+		i.loadCustomPatternsFromConfig() // Reload custom patterns
+		i.Status = StatusWaiting
+		return nil
+	}
+
+	mcpLog.Debug("restart_fallback_recreate")
+
+	// Kill old tmux session to prevent orphans before recreating (#138)
+	if i.tmuxSession != nil && i.tmuxSession.Exists() {
+		mcpLog.Debug("restart_killing_old_session", slog.String("session_name", i.tmuxSession.Name))
+		if killErr := i.tmuxSession.Kill(); killErr != nil {
+			mcpLog.Warn("restart_kill_old_session_failed", slog.String("error", killErr.Error()))
+		}
+	}
+
+	// Fallback: recreate tmux session (for dead sessions or unknown ID)
+	i.recreateTmuxSession()
+
+	// Prepare scratch CLAUDE_CONFIG_DIR for non-conductor claude workers
+	// on the restart path too (issue #59, v1.7.68).
+	i.prepareWorkerScratchConfigDirForSpawn() // also runs plugin auto-install per fix C1
+
+	var command string
+	if IsClaudeCompatible(i.Tool) && i.ClaudeSessionID != "" {
+		command = i.buildClaudeResumeCommand()
+	} else if i.Tool == "gemini" && i.GeminiSessionID != "" {
+		command = i.buildGeminiCommand("gemini")
+	} else if i.Tool == "opencode" && i.OpenCodeSessionID != "" {
+		command = i.buildOpenCodeCommand("opencode")
+	} else if IsCodexCompatible(i.Tool) && i.CodexSessionID != "" {
+		command = i.buildCodexCommand(i.Command)
+	} else {
+		// Route to appropriate command builder based on tool
+		switch {
+		case IsClaudeCompatible(i.Tool):
+			command = i.buildClaudeCommand(i.Command)
+		case i.Tool == "gemini":
+			command = i.buildGeminiCommand(i.Command)
+		case i.Tool == "opencode":
+			command = i.buildOpenCodeCommand(i.Command)
+			// Record start time for async session ID detection
+			i.OpenCodeStartedAt = time.Now().UnixMilli()
+		case IsCodexCompatible(i.Tool):
+			command = i.buildCodexCommand(i.Command)
+			// Record start time for async session ID detection
+			i.CodexStartedAt = time.Now().UnixMilli()
+		case i.Tool == "pi":
+			command = i.buildPiCommand(i.Command)
+		case i.Tool == "copilot":
+			command = i.buildCopilotCommand(i.Command)
+		case i.Tool == "crush":
+			command = i.buildCrushCommand(i.Command)
+		case i.Tool == "cursor":
+			command = i.buildCursorCommand(i.Command, true)
+		case i.Tool == "hermes":
+			command = i.buildHermesCommand(i.Command)
+		default:
+			// Check if this is a custom tool with session resume config
+			if toolDef := GetToolDef(i.Tool); toolDef != nil {
+				command = i.buildGenericCommand(i.Command)
+			} else {
+				command = i.Command
+			}
+		}
+	}
+	command, containerName, err := i.prepareCommand(command)
+	if err != nil {
+		return err
+	}
+	if containerName != "" {
+		i.SandboxContainer = containerName
+	}
+
+	// Load custom patterns for status detection (for custom tools).
+	i.loadCustomPatternsFromConfig()
+
+	// Build tmux option overrides from config (e.g. allow-passthrough = "all").
+	// Sandbox sessions also get remain-on-exit for dead-pane detection.
+	i.tmuxSession.OptionOverrides = i.buildTmuxOptionOverrides()
+	i.tmuxSession.RunCommandAsInitialProcess = i.IsSandboxed() || i.Tool != "shell"
+	i.applyLaunchSettingsFromConfig()
+
+	mcpLog.Debug("restart_starting_new_session", slog.String("command", command))
+
+	if err := i.tmuxSession.Start(command); err != nil {
+		mcpLog.Debug("restart_start_failed", slog.String("error", err.Error()))
+		i.Status = StatusError
+		return fmt.Errorf("failed to restart tmux session: %w", err)
+	}
+
+	mcpLog.Debug("restart_start_succeeded")
+
+	// CFG-07: emit the config-resolution log on restart too — triage must not
+	// go dark on the exact scenario most likely to need debugging.
+	if IsClaudeCompatible(i.Tool) {
+		i.logClaudeConfigResolution()
+	}
+
+	// Set AGENTDECK_INSTANCE_ID for Claude hooks to identify this session
+	// This enables real-time status updates via Stop/SessionStart hooks
+	if err := i.tmuxSession.SetEnvironment("AGENTDECK_INSTANCE_ID", i.ID); err != nil {
+		sessionLog.Warn("set_instance_id_failed", slog.String("error", err.Error()))
+	}
+
+	// Set AGENTDECK_PROFILE (host-side, tool-agnostic) so a bare `agent-deck`
+	// command run inside this session resolves the session's own profile rather
+	// than falling back to "default". Covers shells/OpenCode/etc. that have no
+	// inline env-prefix injection of their own.
+	i.ensureProfileEnv()
+
+	// Propagate all known tool session IDs to the tmux environment (host-side).
+	// This covers Restart() which uses buildClaudeResumeCommand() and similar
+	// builders that no longer embed "tmux set-environment" in the shell string.
+	i.SyncSessionIDsToTmux()
+
+	// Kill any other agentdeck tmux session that duplicates this instance.
+	// Routed through sweepDuplicateToolSessions so the fallback restart path
+	// gets the same tool-session-id guard (#596) AND instance-id guard (#678)
+	// as the respawn-pane paths. The instance-id guard is what catches shell
+	// / placeholder sessions that have no tool-level session id.
+	i.sweepDuplicateToolSessions()
+
+	// Re-capture MCPs after restart
+	i.CaptureLoadedMCPs()
+
+	// Start async session ID detection for OpenCode (if no ID yet)
+	if i.Tool == "opencode" && i.OpenCodeSessionID == "" {
+		go i.detectOpenCodeSessionAsync()
+	}
+
+	// Start async session ID detection for Codex (if no ID yet)
+	if IsCodexCompatible(i.Tool) && i.CodexSessionID == "" {
+		go i.detectCodexSessionAsync()
+	}
+
+	// Start as WAITING - will go GREEN on next tick if Claude shows busy indicator
+	if command != "" {
+		i.Status = StatusWaiting
+	} else {
+		i.Status = StatusIdle
+	}
+
+	return nil
+}
+
+// RestartFresh restarts the current tool without resuming the existing tool session.
+// This recreates the tmux session and clears the stored tool session binding first,
+// so the next start gets a brand-new tool session ID.
+func (i *Instance) RestartFresh() error {
+	i.prepareRestartMCPConfig()
+
+	i.clearSessionBindingForFreshStart()
+
+	if i.tmuxSession != nil && i.tmuxSession.Exists() {
+		if killErr := i.tmuxSession.Kill(); killErr != nil {
+			mcpLog.Warn("restart_fresh_kill_old_session_failed", slog.String("error", killErr.Error()))
+		}
+	}
+
+	i.recreateTmuxSession()
+
+	if err := i.Start(); err != nil {
+		i.Status = StatusError
+		return fmt.Errorf("failed to restart session fresh: %w", err)
+	}
+
+	return nil
+}
+
+// buildClaudeResumeCommand builds the claude resume command with proper config options
+// Respects: CLAUDE_CONFIG_DIR, dangerous_mode, and [shell].env_files + init_script
+// CLAUDE_SESSION_ID is set via host-side SetEnvironment (called by SyncSessionIDsToTmux after restart)
+func (i *Instance) buildClaudeResumeCommand() string {
+	// Source env files and init_script so resumed sessions have the same
+	// shell environment as freshly started ones (fixes #409).
+	envPrefix := i.buildEnvSourceCommand()
+
+	// Get the configured Claude command (e.g., "claude", "cdw", "cdp")
+	// If a custom command is set, we skip CLAUDE_CONFIG_DIR prefix since the alias handles it
+	claudeCmd := GetClaudeCommand()
+	hasCustomCommand := claudeCmd != "claude"
+
+	// Resolve CLAUDE_CONFIG_DIR for this restart. Mirrors the gating logic
+	// in buildClaudeCommandWithMessage: we inject only when an explicit
+	// config_dir is resolved, with WorkerScratchConfigDir overriding the
+	// resolved value when set. See the comment there (issue #949) for the
+	// macOS-OAuth-keying motivation.
+	// Issue #922 (reporter @bautrey): route the worker-scratch swap through
+	// applyWorkerScratchOverride so the third spawn-env builder logs the swap
+	// with identical wording to the other two.
+	configDirPrefix := ""
+	if !hasCustomCommand && IsClaudeConfigDirExplicitForInstance(i) {
+		configDir := i.applyWorkerScratchOverride(GetClaudeConfigDirForInstance(i))
+		configDirPrefix = fmt.Sprintf("CLAUDE_CONFIG_DIR=%s ", configDir)
+	}
+
+	// AGENTDECK_INSTANCE_ID is set as an inline env var so hook subprocesses
+	// can identify which agent-deck session they belong to. AGENTDECK_PROFILE is
+	// injected alongside it so an in-session `agent-deck` command resolves this
+	// session's own profile instead of falling back to "default".
+	instanceIDPrefix := fmt.Sprintf("AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s ", i.ID, shellescape.Quote(sessionProfileEnvValue()))
+	configDirPrefix = instanceIDPrefix + configDirPrefix
+
+	// Get per-session permission settings (falls back to config if not persisted)
+	opts := i.GetClaudeOptions()
+	if opts == nil {
+		userConfig, _ := LoadUserConfig()
+		opts = NewClaudeOptions(userConfig)
+	}
+
+	// Check if session has actual conversation data.
+	// If not, use --session-id instead of --resume to avoid "No conversation found" error.
+	//
+	// Issue #662: a bounded retry-once at this call site covers the
+	// SessionEnd-flush race — the helper is called synchronously with
+	// restart, and Claude may still be flushing its jsonl for a few
+	// hundred milliseconds after the SessionEnd hook fires. Waiting 200ms
+	// and re-checking turns a shipped-fresh-session into a resume for the
+	// common flush-race case without slowing the happy path (retry only
+	// fires when the first check comes back negative AND we have a
+	// non-empty ClaudeSessionID).
+	useResume := sessionHasConversationData(i, i.ClaudeSessionID)
+	if !useResume && i.ClaudeSessionID != "" {
+		time.Sleep(resumeCheckRetryDelay)
+		useResume = sessionHasConversationData(i, i.ClaudeSessionID)
+		sessionLog.Debug(
+			"session_data_retry_after_wait",
+			slog.String("session_id", i.ClaudeSessionID),
+			slog.Duration("wait", resumeCheckRetryDelay),
+			slog.Bool("use_resume_after_retry", useResume),
+		)
+	}
+	sessionLog.Debug(
+		"session_data_build_resume",
+		slog.String("session_id", i.ClaudeSessionID),
+		slog.String("path", i.ProjectPath),
+		slog.Bool("use_resume", useResume),
+	)
+
+	// OBS-02: per-call grep-stable Info record. One emission per
+	// buildClaudeResumeCommand call — NOT sync.Once'd. See CONTEXT Decision 2.
+	// Every Start / StartWithMessage / Restart dispatch that routes through
+	// this helper produces exactly one "resume: id=<id> reason=<why>" line.
+	if useResume {
+		sessionLog.Info("resume: id="+i.ClaudeSessionID+" reason=conversation_data_present",
+			slog.String("instance_id", i.ID),
+			slog.String("claude_session_id", i.ClaudeSessionID),
+			slog.String("path", i.ProjectPath),
+			slog.String("reason", "conversation_data_present"))
+	} else {
+		sessionLog.Info("resume: id="+i.ClaudeSessionID+" reason=session_id_flag_no_jsonl",
+			slog.String("instance_id", i.ID),
+			slog.String("claude_session_id", i.ClaudeSessionID),
+			slog.String("path", i.ProjectPath),
+			slog.String("reason", "session_id_flag_no_jsonl"))
+	}
+
+	// Delegate flag assembly to buildClaudeExtraFlags so restart stays in
+	// lockstep with the start path. Handles permission modes (dangerous /
+	// auto / allow), --add-dir for parented sessions, and --channels for
+	// plugin channel subscriptions. Without this, any flag added to
+	// buildClaudeExtraFlags silently disappears on session restart — the
+	// phase-5 loopback regression (TestResumeCommandAppendsChannels).
+	extraFlags := i.buildClaudeExtraFlags(opts)
+
+	// CLAUDE_SESSION_ID is propagated via host-side SetEnvironment (SyncSessionIDsToTmux)
+	// after the tmux session is restarted. No inline tmux set-environment in the shell string
+	// (which silently fails inside Docker sandbox containers).
+	if useResume {
+		return fmt.Sprintf("%s%s%s --resume %s%s",
+			envPrefix, configDirPrefix, claudeCmd, i.ClaudeSessionID, extraFlags)
+	}
+	// Session was never interacted with - use --session-id to create fresh session.
+	return fmt.Sprintf("%s%s%s --session-id %s%s",
+		envPrefix, configDirPrefix, claudeCmd, i.ClaudeSessionID, extraFlags)
+}
+
+// SetGeminiModel sets the Gemini model for this session and triggers a restart if running.
+func (i *Instance) SetGeminiModel(model string) error {
+	i.GeminiModel = model
+	sessionLog.Debug(
+		"gemini_model_set",
+		slog.String("model", model),
+		slog.String("session_id", i.ID),
+		slog.String("title", i.Title),
+	)
+
+	// Restart if the session is running so it picks up the new model
+	if i.Exists() {
+		return i.Restart()
+	}
+	return nil
+}
+
+// SupportsLaunchModel reports whether a newly-created session can receive an
+// explicit model override through Agent Deck's generic session creation path.
+func SupportsLaunchModel(tool string) bool {
+	return IsClaudeCompatible(tool) || tool == "gemini" || tool == "opencode" || IsCodexCompatible(tool)
+}
+
+// ApplyLaunchModel stores a per-session model override in the tool-specific
+// field that the relevant command builder already reads on start/restart.
+func (i *Instance) ApplyLaunchModel(model string) error {
+	model = strings.TrimSpace(model)
+	if i == nil || model == "" {
+		return nil
+	}
+
+	switch {
+	case IsClaudeCompatible(i.Tool):
+		opts := i.GetClaudeOptions()
+		if opts == nil {
+			userConfig, _ := LoadUserConfig()
+			opts = NewClaudeOptions(userConfig)
+		}
+		opts.Model = model
+		return i.SetClaudeOptions(opts)
+	case i.Tool == "gemini":
+		i.GeminiModel = model
+		return nil
+	case i.Tool == "opencode":
+		opts := i.GetOpenCodeOptions()
+		if opts == nil {
+			userConfig, _ := LoadUserConfig()
+			opts = NewOpenCodeOptions(userConfig)
+		}
+		opts.Model = model
+		return i.SetOpenCodeOptions(opts)
+	case IsCodexCompatible(i.Tool):
+		opts := i.GetCodexOptions()
+		if opts == nil {
+			userConfig, _ := LoadUserConfig()
+			opts = NewCodexOptions(userConfig)
+		}
+		opts.Model = model
+		return i.SetCodexOptions(opts)
+	default:
+		return fmt.Errorf("model selection is not supported for tool %q", i.Tool)
+	}
+}
+
+// ClearLaunchModel removes any per-session model override so the session falls
+// back to the configured default ([claude].default_model, etc.) on the next
+// start/restart (#1436). Mirrors ApplyLaunchModel across tools; a no-op when
+// no override is set.
+func (i *Instance) ClearLaunchModel() error {
+	if i == nil {
+		return nil
+	}
+	switch {
+	case IsClaudeCompatible(i.Tool):
+		opts := i.GetClaudeOptions()
+		if opts == nil {
+			return nil
+		}
+		opts.Model = ""
+		return i.SetClaudeOptions(opts)
+	case i.Tool == "gemini":
+		i.GeminiModel = ""
+		return nil
+	case i.Tool == "opencode":
+		opts := i.GetOpenCodeOptions()
+		if opts == nil {
+			return nil
+		}
+		opts.Model = ""
+		return i.SetOpenCodeOptions(opts)
+	case IsCodexCompatible(i.Tool):
+		opts := i.GetCodexOptions()
+		if opts == nil {
+			return nil
+		}
+		opts.Model = ""
+		return i.SetCodexOptions(opts)
+	default:
+		return nil
+	}
+}
+
+// CanRestart returns true if the session can be restarted
+// For Claude sessions with known ID: can always restart (interrupt and resume)
+// For Gemini sessions with known ID: can always restart (interrupt and resume)
+// For OpenCode sessions with known ID: can always restart (interrupt and resume)
+// For Codex sessions with known ID: can always restart (interrupt and resume)
+// For custom tools with session resume config: can restart if session ID available
+// For other sessions: only if dead/error state
+func (i *Instance) CanRestart() bool {
+	// Gemini sessions with known session ID can always be restarted
+	if i.Tool == "gemini" && i.GeminiSessionID != "" {
+		return true
+	}
+
+	// Claude sessions with known session ID can always be restarted
+	if IsClaudeCompatible(i.Tool) && i.ClaudeSessionID != "" {
+		return true
+	}
+
+	// Claude sessions without ID can still restart (will start fresh or
+	// resume the latest JSONL via ensureClaudeSessionIDFromDisk). REQ-7
+	// reopen #911: custom-command Claude sessions (Tool=claude with a
+	// wrapper Command) bypass happy-path session-id capture and have an
+	// intentionally empty ClaudeSessionID. Without this branch they fall
+	// to the dead-or-error fallback below and the registry refuses
+	// restart even when the underlying tmux pane is alive — the false-
+	// error class this issue tracks. Mirrors the opencode/codex policy.
+	if IsClaudeCompatible(i.Tool) {
+		return true
+	}
+
+	// OpenCode sessions with known session ID can always be restarted
+	if i.Tool == "opencode" && i.OpenCodeSessionID != "" {
+		return true
+	}
+
+	// OpenCode sessions without ID can still restart (will start fresh)
+	// This allows restart even before session ID is detected
+	if i.Tool == "opencode" {
+		return true
+	}
+
+	// Codex sessions with known session ID can always be restarted
+	if IsCodexCompatible(i.Tool) && i.CodexSessionID != "" {
+		return true
+	}
+
+	// Codex sessions without ID can still restart (will start fresh)
+	// This allows restart even before session ID is detected
+	if IsCodexCompatible(i.Tool) {
+		return true
+	}
+
+	// Pi sessions are scoped to an Agent Deck instance-specific session dir and
+	// can always be relaunched with --continue.
+	if i.Tool == "pi" {
+		return true
+	}
+
+	// Cursor sessions resume via --continue on restart (workspace-scoped chat).
+	if i.Tool == "cursor" {
+		return true
+	}
+
+	// Custom tools: check if they have session resume support
+	if i.CanRestartGeneric() {
+		return true
+	}
+
+	// Other sessions: only if dead or error
+	return i.Status == StatusError || i.tmuxSession == nil || !i.tmuxSession.Exists()
+}
+
+// CanRestartFresh returns true when the session has a known tool session binding
+// that can be intentionally discarded to start with a new session ID.
+func (i *Instance) CanRestartFresh() bool {
+	if IsClaudeCompatible(i.Tool) {
+		return i.ClaudeSessionID != ""
+	}
+	if i.Tool == "gemini" {
+		return i.GeminiSessionID != ""
+	}
+	if i.Tool == "opencode" {
+		return i.OpenCodeSessionID != ""
+	}
+	if i.Tool == "codex" {
+		return i.CodexSessionID != ""
+	}
+	return i.CanRestartGeneric()
+}
+
+// CanFork returns true if this session can be forked
+func (i *Instance) CanFork() bool {
+	// Gemini CLI doesn't support forking
+	if i.Tool == "gemini" {
+		return false
+	}
+
+	// OpenCode sessions can fork if session ID is recent
+	if i.Tool == "opencode" {
+		return i.CanForkOpenCode()
+	}
+
+	// Pi sessions fork by source JSONL path under Agent Deck's per-instance
+	// Pi session directory. The launch command validates that a JSONL exists.
+	if i.Tool == "pi" {
+		return i.CanForkPi()
+	}
+
+	// Codex-compatible sessions fork via `codex fork <sid>`, gated on a
+	// flushed on-disk rollout (same invariant as `codex resume`).
+	if IsCodexCompatible(i.Tool) {
+		return i.CanForkCodex()
+	}
+
+	// Claude sessions can fork if session ID is recent
+	if i.ClaudeSessionID == "" {
+		return false
+	}
+	return time.Since(i.ClaudeDetectedAt) < 5*time.Minute
+}
+
+// CanForkOpenCode returns true if this OpenCode session can be forked
+func (i *Instance) CanForkOpenCode() bool {
+	sessionID, err := normalizeToolSessionID(FieldOpenCodeSessionID, i.OpenCodeSessionID)
+	return i.Tool == "opencode" && err == nil && sessionID != "" && sessionID == strings.TrimSpace(i.OpenCodeSessionID) && time.Since(i.OpenCodeDetectedAt) < 5*time.Minute
+}
+
+// CanForkPi returns true if this Pi session can be forked by Agent Deck.
+func (i *Instance) CanForkPi() bool {
+	if i.Tool != "pi" || i.ID == "" {
+		return false
+	}
+	// For local non-sandboxed Pi sessions, require an actual source JSONL so
+	// CLI/TUI fork attempts fail before creating an immediately-dead child tmux
+	// pane. Remote/sandboxed sessions use target-side $HOME, which this process
+	// cannot inspect, so the launch command performs the runtime validation.
+	if i.SSHHost == "" && !i.IsSandboxed() {
+		return i.hasLocalPiSessionFile()
+	}
+	return true
+}
+
+func (i *Instance) hasLocalPiSessionFile() bool {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	sessionDir := filepath.Join(home, ".pi", "agent-deck", i.ID)
+	found := false
+	_ = filepath.WalkDir(sessionDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() {
+			return nil
+		}
+		if strings.EqualFold(filepath.Ext(path), ".jsonl") {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+// Fork returns the command to create a forked Claude session
+// Uses capture-resume pattern: starts fork in print mode to get new session ID,
+// stores in tmux environment, then resumes interactively
+// Deprecated: Use ForkWithOptions instead
+func (i *Instance) Fork(newTitle, newGroupPath string) (string, error) {
+	return i.ForkWithOptions(newTitle, newGroupPath, nil)
+}
+
+// ForkWithOptions returns the command to create a forked Claude session with custom options
+// Uses capture-resume pattern: starts fork in print mode to get new session ID,
+// stores in tmux environment, then resumes interactively
+func (i *Instance) ForkWithOptions(newTitle, newGroupPath string, opts *ClaudeOptions) (string, error) {
+	projectPath := i.ProjectPath
+	if opts != nil && opts.WorkDir != "" {
+		projectPath = opts.WorkDir
+	}
+	target := NewInstance(newTitle, projectPath)
+	if newGroupPath != "" {
+		target.GroupPath = newGroupPath
+	} else {
+		target.GroupPath = i.GroupPath
+	}
+	target.Tool = "claude"
+
+	return i.buildClaudeForkCommandForTarget(target, opts)
+}
+
+func (i *Instance) buildClaudeForkCommandForTarget(target *Instance, opts *ClaudeOptions) (string, error) {
+	if target == nil {
+		return "", fmt.Errorf("cannot build fork command: target instance is nil")
+	}
+
+	if !i.CanFork() {
+		return "", fmt.Errorf("cannot fork: no active Claude session")
+	}
+
+	workDir := target.ProjectPath
+
+	// IMPORTANT: For capture-resume commands (which contain $(...) syntax), we MUST use
+	// "claude" binary + explicit env exports, NOT a custom command alias like "cdw".
+	// Reason: Commands with $(...) get wrapped in `bash -c` for fish compatibility (#47),
+	// and shell aliases are not available in non-interactive bash shells.
+	bashExportPrefix := target.buildBashExportPrefix()
+
+	// If no options provided, use defaults from config
+	if opts == nil {
+		userConfig, _ := LoadUserConfig()
+		opts = NewClaudeOptions(userConfig)
+	}
+
+	// Build extra flags from options (for fork, we use ToArgsForFork which excludes session mode)
+	extraFlags := i.buildClaudeExtraFlags(opts)
+
+	// Pre-generate UUID for forked session to avoid shell uuidgen dependency.
+	// CLAUDE_SESSION_ID is propagated via host-side SetEnvironment after tmux start.
+	// Use `exec` before claude so that when this compound command is wrapped
+	// in `bash -c` (for fish compatibility), claude replaces the bash process,
+	// enabling proper job control (Ctrl+Z suspend / fg resume).
+	forkUUID := generateUUID()
+	target.ClaudeSessionID = forkUUID
+	cmd := fmt.Sprintf(
+		`cd '%s' && `+
+			`%sexec claude --session-id "%s" --resume %s --fork-session%s`,
+		workDir,
+		bashExportPrefix, forkUUID, i.ClaudeSessionID, extraFlags)
+	cmd, err := i.applyWrapper(cmd)
+	if err != nil {
+		return "", err
+	}
+
+	return cmd, nil
+}
+
+// GetActualWorkDir returns the actual working directory from tmux, or falls back to ProjectPath
+func (i *Instance) GetActualWorkDir() string {
+	if i.tmuxSession != nil {
+		if workDir := i.tmuxSession.GetWorkDir(); workDir != "" {
+			return workDir
+		}
+	}
+	return i.ProjectPath
+}
+
+// CreateForkedInstance creates a new Instance configured for forking
+// Deprecated: Use CreateForkedInstanceWithOptions instead
+func (i *Instance) CreateForkedInstance(newTitle, newGroupPath string) (*Instance, string, error) {
+	return i.CreateForkedInstanceWithOptions(newTitle, newGroupPath, nil)
+}
+
+// CreateForkedInstanceWithOptions creates a new Instance configured for forking with custom options
+func (i *Instance) CreateForkedInstanceWithOptions(
+	newTitle, newGroupPath string,
+	opts *ClaudeOptions,
+) (*Instance, string, error) {
+	// Create new instance - use worktree path if provided, otherwise parent's project path
+	projectPath := i.ProjectPath
+	if opts != nil && opts.WorkDir != "" {
+		projectPath = opts.WorkDir
+	}
+	forked := NewInstance(newTitle, projectPath)
+	if newGroupPath != "" {
+		forked.GroupPath = newGroupPath
+	} else {
+		forked.GroupPath = i.GroupPath
+	}
+	forked.Tool = "claude"
+	if IsClaudeCompatible(i.Tool) {
+		forked.Tool = i.Tool
+	}
+	forked.Wrapper = i.Wrapper
+
+	// #1407: persist the parent's ExtraArgs onto the fork record. The baked
+	// one-shot fork command below inherits them implicitly via the builder
+	// (which reads the PARENT's ExtraArgs), but without persisting them on
+	// the fork they silently drop on the fork's first restart
+	// (buildClaudeResumeCommand reads the fork's own ExtraArgs) and a
+	// fork-of-a-fork never sees them at all. Mirrors how ClaudeOptions are
+	// persisted via SetClaudeOptions further down. Copied, not aliased.
+	if len(i.ExtraArgs) > 0 {
+		forked.ExtraArgs = append([]string(nil), i.ExtraArgs...)
+	}
+
+	cmd, err := i.buildClaudeForkCommandForTarget(forked, opts)
+	if err != nil {
+		return nil, "", err
+	}
+	forked.Command = cmd
+	// #745: flag Start() to run cmd verbatim. Without this, Start() rebuilds
+	// the command through buildClaudeResumeCommand and silently drops
+	// --resume <parent-id> / --fork-session because the brand-new fork UUID
+	// has no JSONL on disk yet.
+	forked.IsForkAwaitingStart = true
+
+	// Store options in the new instance for persistence
+	if opts != nil {
+		if err := forked.SetClaudeOptions(opts); err != nil {
+			// Log but don't fail - options are not critical for fork
+			sessionLog.Warn("set_claude_options_failed", slog.String("error", err.Error()))
+		}
+		// Copy transient worktree fields to the forked instance
+		if opts.WorktreePath != "" {
+			forked.WorktreePath = opts.WorktreePath
+			forked.WorktreeRepoRoot = opts.WorktreeRepoRoot
+			forked.WorktreeBranch = opts.WorktreeBranch
+		}
+	}
+
+	return forked, cmd, nil
+}
+
+// CreateForkedInstanceForTool creates a forked instance using the correct
+// tool-specific fork implementation. opts is the shared fork carrier for
+// worktree fields; non-Claude tool options continue to come from global config.
+func (i *Instance) CreateForkedInstanceForTool(newTitle, newGroupPath string, opts *ClaudeOptions) (*Instance, string, error) {
+	switch {
+	case i.Tool == "opencode":
+		workDir := i.ProjectPath
+		repoRoot := ""
+		branch := ""
+		if opts != nil && opts.WorkDir != "" {
+			workDir = opts.WorkDir
+			repoRoot = opts.WorktreeRepoRoot
+			branch = opts.WorktreeBranch
+		}
+		return i.CreateForkedOpenCodeInstanceWithOptionsAndWorkDir(newTitle, newGroupPath, nil, workDir, repoRoot, branch)
+	case i.Tool == "pi":
+		return i.CreateForkedPiInstanceWithOptions(newTitle, newGroupPath, opts)
+	case IsCodexCompatible(i.Tool):
+		return i.CreateForkedCodexInstanceWithOptions(newTitle, newGroupPath, opts)
+	default:
+		return i.CreateForkedInstanceWithOptions(newTitle, newGroupPath, opts)
+	}
+}
+
+// ForkOpenCode returns the command to create a forked OpenCode session.
+// Uses export/import to clone the session with a new ID, then launches
+// the forked session with opencode -s <new-id>.
+// Deprecated: Use ForkOpenCodeWithOptions instead.
+func (i *Instance) ForkOpenCode(newTitle, newGroupPath string) (string, error) {
+	return i.ForkOpenCodeWithOptions(newTitle, newGroupPath, nil)
+}
+
+// ForkOpenCodeWithOptions returns the command to create a forked OpenCode session with custom options.
+// Uses export/import to clone the session with a new ID, then launches
+// the forked session with opencode -s <new-id> plus any model/agent flags.
+func (i *Instance) ForkOpenCodeWithOptions(newTitle, newGroupPath string, opts *OpenCodeOptions) (string, error) {
+	return i.forkOpenCodeWithOptionsInWorkDir(newTitle, newGroupPath, opts, i.ProjectPath)
+}
+
+func (i *Instance) forkOpenCodeWithOptionsInWorkDir(newTitle, newGroupPath string, opts *OpenCodeOptions, workDir string) (string, error) {
+	if !i.CanForkOpenCode() {
+		return "", fmt.Errorf("cannot fork: no active OpenCode session")
+	}
+	if strings.TrimSpace(workDir) == "" {
+		workDir = i.ProjectPath
+	}
+
+	envPrefix := i.buildEnvSourceCommand()
+
+	// Build extra flags from options (for fork, exclude session mode flags)
+	var extraFlags string
+	if opts != nil {
+		for _, arg := range opts.ToArgsForFork() {
+			extraFlags += " " + shellescape.Quote(arg)
+		}
+	} else if config, err := LoadUserConfig(); err == nil && config != nil {
+		defaultOpts := NewOpenCodeOptions(config)
+		for _, arg := range defaultOpts.ToArgsForFork() {
+			extraFlags += " " + shellescape.Quote(arg)
+		}
+	}
+
+	scriptPath, err := i.writeOpenCodeForkScript(workDir, envPrefix, extraFlags)
+	if err != nil {
+		return "", fmt.Errorf("failed to create fork script: %w", err)
+	}
+
+	return fmt.Sprintf("bash '%s'", scriptPath), nil
+}
+
+// writeOpenCodeForkScript writes a bash script that forks via export/import.
+// The script self-deletes after execution.
+func (i *Instance) writeOpenCodeForkScript(workDir, envPrefix, extraFlags string) (string, error) {
+	quotedWorkDir := shellescape.Quote(workDir)
+	quotedSessionID := shellescape.Quote(i.OpenCodeSessionID)
+	sedSessionID := strings.ReplaceAll(i.OpenCodeSessionID, ".", `\.`)
+	script := fmt.Sprintf(`#!/bin/bash
+cd %s || { printf 'cd failed to: %%s\n' %s; exit 1; }
+%s
+tmpfile=$(mktemp -t opencode-fork)
+trap "rm -f \"$tmpfile\" \"$0\"" EXIT
+
+opencode export %s 2>/dev/null > "$tmpfile"
+export_status=$?
+if [ $export_status -ne 0 ]; then
+  echo "Export failed (exit $export_status):"
+  cat "$tmpfile"
+  exit 1
+fi
+
+hash_cmd="md5sum"
+command -v md5sum >/dev/null 2>&1 || hash_cmd="md5"
+new_id="ses_$(date +%%s | $hash_cmd | head -c12)$(openssl rand -base64 20 | tr -dc a-zA-Z0-9 | head -c14)"
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  sed -i "" "s/%s/$new_id/g" "$tmpfile" || { echo "Sed failed"; exit 1; }
+else
+  sed -i "s/%s/$new_id/g" "$tmpfile" || { echo "Sed failed"; exit 1; }
+fi
+opencode import "$tmpfile" 2>&1 || { echo "Import failed"; exit 1; }
+# OPENCODE_SESSION_ID is propagated via host-side SetEnvironment after tmux start.
+echo "Forked to: $new_id"
+opencode -s "$new_id"%s
+`, quotedWorkDir, quotedWorkDir, envPrefix, quotedSessionID,
+		sedSessionID, sedSessionID, extraFlags)
+
+	f, err := os.CreateTemp("", "opencode-fork-*.sh")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(script); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+
+	if err := f.Chmod(0o755); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+
+	return f.Name(), nil
+}
+
+// CreateForkedOpenCodeInstance creates a new Instance configured for forking an OpenCode session
+// Deprecated: Use CreateForkedOpenCodeInstanceWithOptions instead.
+func (i *Instance) CreateForkedOpenCodeInstance(newTitle, newGroupPath string) (*Instance, string, error) {
+	return i.CreateForkedOpenCodeInstanceWithOptions(newTitle, newGroupPath, nil)
+}
+
+// CreateForkedOpenCodeInstanceWithOptions creates a new Instance configured for forking with custom options
+func (i *Instance) CreateForkedOpenCodeInstanceWithOptions(
+	newTitle, newGroupPath string,
+	opts *OpenCodeOptions,
+) (*Instance, string, error) {
+	return i.CreateForkedOpenCodeInstanceWithOptionsAndWorkDir(newTitle, newGroupPath, opts, i.ProjectPath, "", "")
+}
+
+// CreateForkedOpenCodeInstanceWithOptionsAndWorkDir creates a forked OpenCode instance
+// rooted at workDir and copies worktree metadata when worktreeRepoRoot is set.
+func (i *Instance) CreateForkedOpenCodeInstanceWithOptionsAndWorkDir(
+	newTitle, newGroupPath string,
+	opts *OpenCodeOptions,
+	workDir, worktreeRepoRoot, worktreeBranch string,
+) (*Instance, string, error) {
+	if strings.TrimSpace(workDir) == "" {
+		workDir = i.ProjectPath
+	}
+	cmd, err := i.forkOpenCodeWithOptionsInWorkDir(newTitle, newGroupPath, opts, workDir)
+	if err != nil {
+		return nil, "", err
+	}
+
+	forked := NewInstance(newTitle, workDir)
+	if newGroupPath != "" {
+		forked.GroupPath = newGroupPath
+	} else {
+		forked.GroupPath = i.GroupPath
+	}
+	// Defer the one-shot fork script via ForkStartCommand (Pi/Codex pattern): the
+	// script self-deletes after first run, so storing it as the persistent Command
+	// would make a later restart re-run a missing file. Command holds a stable base
+	// ("opencode") that restart resumes from via OpenCodeSessionID.
+	forked.Command = "opencode"
+	forked.ForkStartCommand = cmd
+	forked.IsForkAwaitingStart = true
+	forked.Tool = "opencode"
+	if worktreeRepoRoot != "" {
+		forked.WorktreePath = workDir
+		forked.WorktreeRepoRoot = worktreeRepoRoot
+		forked.WorktreeBranch = worktreeBranch
+	}
+
+	// Store options in the new instance for persistence
+	if opts != nil {
+		if err := forked.SetOpenCodeOptions(opts); err != nil {
+			sessionLog.Warn("set_opencode_options_failed", slog.String("error", err.Error()))
+		}
+	}
+
+	return forked, cmd, nil
+}
+
+// CreateForkedPiInstance creates a new Instance configured for forking a Pi session.
+// Deprecated: Use CreateForkedPiInstanceWithOptions instead.
+func (i *Instance) CreateForkedPiInstance(newTitle, newGroupPath string) (*Instance, string, error) {
+	return i.CreateForkedPiInstanceWithOptions(newTitle, newGroupPath, nil)
+}
+
+// CreateForkedPiInstanceWithOptions creates a new Instance configured for forking a Pi session.
+// The opts parameter is accepted for the shared fork worktree flow; only WorkDir
+// and Worktree* fields are consumed for Pi.
+func (i *Instance) CreateForkedPiInstanceWithOptions(
+	newTitle, newGroupPath string,
+	opts *ClaudeOptions,
+) (*Instance, string, error) {
+	projectPath := i.ProjectPath
+	if opts != nil && opts.WorkDir != "" {
+		projectPath = opts.WorkDir
+	}
+
+	forked := NewInstance(newTitle, projectPath)
+	if newGroupPath != "" {
+		forked.GroupPath = newGroupPath
+	} else {
+		forked.GroupPath = i.GroupPath
+	}
+	forked.Tool = "pi"
+	forked.Wrapper = i.Wrapper
+
+	baseCommand := strings.TrimSpace(i.Command)
+	if baseCommand == "" {
+		baseCommand = "pi"
+	}
+	forked.Command = baseCommand
+
+	cmd, err := i.buildPiForkCommandForTarget(forked, baseCommand)
+	if err != nil {
+		return nil, "", err
+	}
+	forked.ForkStartCommand = cmd
+	forked.IsForkAwaitingStart = true
+
+	if opts != nil && opts.WorktreePath != "" {
+		forked.WorktreePath = opts.WorktreePath
+		forked.WorktreeRepoRoot = opts.WorktreeRepoRoot
+		forked.WorktreeBranch = opts.WorktreeBranch
+	}
+
+	return forked, cmd, nil
+}
+
+// CanForkCodex reports whether this Codex session can be forked. Forkability
+// requires a flushed on-disk rollout for the captured session id — the same
+// invariant buildCodexCommand uses to gate `codex resume` (#756). `codex fork`
+// is a newer codex CLI subcommand; if the installed binary predates it the
+// launched command fails into a recoverable error state.
+func (i *Instance) CanForkCodex() bool {
+	if !IsCodexCompatible(i.Tool) || i.CodexSessionID == "" {
+		return false
+	}
+	sessionID, err := normalizeToolSessionID(FieldCodexSessionID, i.CodexSessionID)
+	return err == nil && sessionID != "" && sessionID == strings.TrimSpace(i.CodexSessionID) && codexRolloutExistsInHome(sessionID, i.getCodexHomeDir())
+}
+
+// buildCodexForkCommandForTarget builds the one-time `codex fork <parent-sid>`
+// launch command for a forked codex instance. Mirrors buildCodexCommand's resume
+// path (instance.go:1374) but uses `fork`, which clones the parent transcript into
+// a new thread with a fresh id while leaving the parent intact.
+func (i *Instance) buildCodexForkCommandForTarget(target *Instance, baseCommand string) (string, error) {
+	if !i.CanForkCodex() {
+		return "", fmt.Errorf("cannot fork: no resumable Codex session")
+	}
+	envPrefix := target.buildEnvSourceCommand()
+	// Shell-quote the injected env values: target.Title is user-editable and could
+	// contain shell metacharacters (e.g. $(...) or backticks), and custom Codex-tool
+	// identities are config-defined — keep the generated fork command injection-safe.
+	envPrefix += fmt.Sprintf("AGENTDECK_INSTANCE_ID=%s AGENTDECK_TITLE=%s AGENTDECK_TOOL=%s AGENTDECK_PROFILE=%s ",
+		shellescape.Quote(target.ID), shellescape.Quote(target.Title), shellescape.Quote(target.Tool), shellescape.Quote(sessionProfileEnvValue()))
+	yoloFlag := target.resolveCodexYoloFlag()
+	modelFlag := target.resolveCodexModelFlag()
+	command := target.resolveCodexCommand(baseCommand)
+	if isCodexHomeExplicit() {
+		codexHome := strings.TrimSpace(getCodexHomeDir())
+		if codexHome != "" {
+			if err := os.MkdirAll(codexHome, 0o755); err != nil {
+				sessionLog.Warn("codex_home_mkdir_failed",
+					slog.String("path", codexHome),
+					slog.String("error", err.Error()))
+			}
+			envPrefix += "CODEX_HOME=" + shellescape.Quote(codexHome) + " "
+		}
+	}
+	return envPrefix + fmt.Sprintf("%s%s%s fork %s", command, yoloFlag, modelFlag, shellescape.Quote(i.CodexSessionID)), nil
+}
+
+// CreateForkedCodexInstanceWithOptions creates a forked Codex instance. Mirrors
+// CreateForkedPiInstanceWithOptions: opts is the shared worktree carrier (only
+// WorkDir/Worktree* consumed); launch is deferred via ForkStartCommand.
+func (i *Instance) CreateForkedCodexInstanceWithOptions(
+	newTitle, newGroupPath string,
+	opts *ClaudeOptions,
+) (*Instance, string, error) {
+	projectPath := i.ProjectPath
+	if opts != nil && opts.WorkDir != "" {
+		projectPath = opts.WorkDir
+	}
+
+	forked := NewInstance(newTitle, projectPath)
+	if newGroupPath != "" {
+		forked.GroupPath = newGroupPath
+	} else {
+		forked.GroupPath = i.GroupPath
+	}
+	forked.Tool = i.Tool
+	forked.Wrapper = i.Wrapper
+
+	baseCommand := strings.TrimSpace(i.Command)
+	if baseCommand == "" {
+		baseCommand = "codex"
+	}
+	forked.Command = baseCommand
+
+	cmd, err := i.buildCodexForkCommandForTarget(forked, baseCommand)
+	if err != nil {
+		return nil, "", err
+	}
+	forked.ForkStartCommand = cmd
+	forked.IsForkAwaitingStart = true
+
+	if opts != nil && opts.WorktreePath != "" {
+		forked.WorktreePath = opts.WorktreePath
+		forked.WorktreeRepoRoot = opts.WorktreeRepoRoot
+		forked.WorktreeBranch = opts.WorktreeBranch
+	}
+
+	return forked, cmd, nil
+}
+
+// Exists checks if the tmux session still exists
+func (i *Instance) Exists() bool {
+	if i.tmuxSession == nil {
+		return false
+	}
+	return i.tmuxSession.Exists()
+}
+
+// GetTmuxSession returns the tmux session object
+func (i *Instance) GetTmuxSession() *tmux.Session {
+	return i.tmuxSession
+}
+
+// Substate returns the additive Honest-Status-v2 refinement for this session
+// (see Substate). It reads the live tmux pane and classifies it; SubstateNone
+// when there is no tmux session, the pane is dead, or the tool has no substate
+// heuristics. This is an enrichment of Status, not a replacement — it never
+// changes the canonical status reported by GetStatus/UpdateStatus.
+func (i *Instance) Substate() Substate {
+	tmuxSess := i.GetTmuxSession()
+	if tmuxSess == nil {
+		return SubstateNone
+	}
+	return tmuxSess.GetSubstate()
+}
+
+// CachedSubstate returns the last substate computed by a prior status check
+// WITHOUT capturing the pane. Use it on the TUI render hot path; the background
+// status loop keeps the value fresh.
+func (i *Instance) CachedSubstate() Substate {
+	tmuxSess := i.GetTmuxSession()
+	if tmuxSess == nil {
+		return SubstateNone
+	}
+	return tmuxSess.CachedSubstate()
+}
+
+// SetAcknowledgedFromShared applies an acknowledgment from another TUI instance
+// (read from SQLite). This transitions a YELLOW (waiting) session to GRAY (idle)
+// without requiring the user to interact with this specific TUI instance.
+func (i *Instance) SetAcknowledgedFromShared(ack bool) {
+	if !ack || i.tmuxSession == nil {
+		return
+	}
+
+	// Running/starting is authoritative: don't let stale shared ack force
+	// an active session back to idle.
+	status := i.GetStatusThreadSafe()
+	if status == StatusRunning || status == StatusStarting {
+		return
+	}
+
+	i.tmuxSession.Acknowledge()
+}
+
+// SyncTmuxDisplayName updates tmux-rendered UI that reflects the current title.
+func (i *Instance) SyncTmuxDisplayName() {
+	if tmuxSess := i.GetTmuxSession(); tmuxSess != nil && tmuxSess.Exists() {
+		tmuxSess.DisplayName = i.Title
+		tmuxSess.ConfigureStatusBar()
+		tmuxSess.ConfigureTerminalTitle()
+	}
+}
+
+// GetClaudeOptions returns Claude-specific options, or nil if not set
+func (i *Instance) GetClaudeOptions() *ClaudeOptions {
+	if len(i.ToolOptionsJSON) == 0 {
+		return nil
+	}
+	opts, err := UnmarshalClaudeOptions(i.ToolOptionsJSON)
+	if err != nil {
+		return nil
+	}
+	return opts
+}
+
+// SetClaudeOptions stores Claude-specific options
+func (i *Instance) SetClaudeOptions(opts *ClaudeOptions) error {
+	if opts == nil {
+		i.ToolOptionsJSON = nil
+		return nil
+	}
+	data, err := MarshalToolOptions(opts)
+	if err != nil {
+		return err
+	}
+	i.ToolOptionsJSON = data
+	return nil
+}
+
+// GetCodexOptions returns Codex-specific options, or nil if not set
+func (i *Instance) GetCodexOptions() *CodexOptions {
+	if len(i.ToolOptionsJSON) == 0 {
+		return nil
+	}
+	opts, err := UnmarshalCodexOptions(i.ToolOptionsJSON)
+	if err != nil {
+		return nil
+	}
+	return opts
+}
+
+// SetCodexOptions stores Codex-specific options
+func (i *Instance) SetCodexOptions(opts *CodexOptions) error {
+	if opts == nil {
+		i.ToolOptionsJSON = nil
+		return nil
+	}
+	data, err := MarshalToolOptions(opts)
+	if err != nil {
+		return err
+	}
+	i.ToolOptionsJSON = data
+	return nil
+}
+
+// GetHermesOptions returns Hermes-specific options from ToolOptionsJSON, or nil if not set.
+func (i *Instance) GetHermesOptions() *HermesOptions {
+	if len(i.ToolOptionsJSON) == 0 {
+		return nil
+	}
+	opts, err := UnmarshalHermesOptions(i.ToolOptionsJSON)
+	if err != nil {
+		return nil
+	}
+	return opts
+}
+
+// SetHermesOptions stores Hermes-specific options into ToolOptionsJSON.
+func (i *Instance) SetHermesOptions(opts *HermesOptions) error {
+	if opts == nil {
+		i.ToolOptionsJSON = nil
+		return nil
+	}
+	data, err := MarshalToolOptions(opts)
+	if err != nil {
+		return err
+	}
+	i.ToolOptionsJSON = data
+	return nil
+}
+
+// GetOpenCodeOptions returns OpenCode-specific options, or nil if not set
+func (i *Instance) GetOpenCodeOptions() *OpenCodeOptions {
+	if len(i.ToolOptionsJSON) == 0 {
+		return nil
+	}
+	opts, err := UnmarshalOpenCodeOptions(i.ToolOptionsJSON)
+	if err != nil {
+		return nil
+	}
+	return opts
+}
+
+// SetOpenCodeOptions stores OpenCode-specific options
+func (i *Instance) SetOpenCodeOptions(opts *OpenCodeOptions) error {
+	if opts == nil {
+		i.ToolOptionsJSON = nil
+		return nil
+	}
+	data, err := MarshalToolOptions(opts)
+	if err != nil {
+		return err
+	}
+	i.ToolOptionsJSON = data
+	return nil
+}
+
+// GetSessionIDFromTmux reads Claude session ID from tmux environment
+// This is the primary method for sessions started with the capture-resume pattern
+func (i *Instance) GetSessionIDFromTmux() string {
+	if i.tmuxSession == nil {
+		return ""
+	}
+	sessionID, err := i.tmuxSession.GetEnvironment("CLAUDE_SESSION_ID")
+	if err != nil {
+		return ""
+	}
+	return sessionID
+}
+
+// RefreshLiveSessionIDs re-reads tool-specific session identifiers from the
+// live tmux environment and updates the instance's stored IDs when a newer
+// non-empty value is found. Safe no-op when tmuxSession is nil or the tool
+// has no live-env handle.
+//
+// Call this before reads that must reflect the CURRENT conversation (e.g.
+// TUI cross-session send-output, issue #598). Reads that tolerate stale data
+// (status polling) don't need it.
+func (i *Instance) RefreshLiveSessionIDs() {
+	if i.tmuxSession == nil {
+		return
+	}
+	if IsClaudeCompatible(i.Tool) {
+		if id := i.GetSessionIDFromTmux(); id != "" && id != i.ClaudeSessionID {
+			i.ClaudeSessionID = id
+			i.ClaudeDetectedAt = time.Now()
+		}
+	}
+	if i.Tool == "gemini" {
+		i.syncGeminiSessionFromTmux()
+	}
+}
+
+// GetMCPInfo returns MCP server information for this session.
+// Returns nil if not a Claude-compatible, Gemini, or Cursor session.
+// Hermes is intentionally excluded: it uses its own ~/.hermes/config.yaml
+// `mcp_servers:` schema (user-scoped, YAML), not Claude's project-scoped
+// .mcp.json — agent-deck does not manage it yet.
+func (i *Instance) GetMCPInfo() *MCPInfo {
+	switch {
+	case IsClaudeCompatible(i.Tool):
+		return GetMCPInfo(i.ProjectPath)
+	case i.Tool == "gemini":
+		return GetGeminiMCPInfo(i.ProjectPath)
+	case i.Tool == "cursor":
+		return GetCursorMCPInfo(i.ProjectPath)
+	default:
+		return nil
+	}
+}
+
+// CaptureLoadedMCPs captures the current MCP names as the "loaded" state
+// This should be called when a session starts or restarts, so we can track
+// which MCPs are actually loaded in the running Claude session vs just configured
+func (i *Instance) CaptureLoadedMCPs() {
+	if !IsClaudeCompatible(i.Tool) && i.Tool != "cursor" {
+		i.LoadedMCPNames = nil
+		return
+	}
+
+	mcpInfo := i.GetMCPInfo()
+	if mcpInfo == nil {
+		i.LoadedMCPNames = nil
+		return
+	}
+
+	i.LoadedMCPNames = mcpInfo.AllNames()
+}
+
+// regenerateMCPConfig regenerates .mcp.json with current pool status
+// If socket pool is running, MCPs will use socket configs (nc -U /tmp/...)
+// Otherwise, MCPs will use stdio configs (npx ...)
+// Returns error if .mcp.json write fails
+func (i *Instance) regenerateMCPConfig() error {
+	if i.Tool == "cursor" {
+		ClearCursorMCPCache(i.ProjectPath)
+		mcpInfo := i.GetMCPInfo()
+		if mcpInfo == nil || !mcpInfo.HasAny() {
+			return nil
+		}
+
+		switch GetMCPDefaultScope() {
+		case "global", "user":
+			globalMCPs := mcpInfo.Global
+			if len(globalMCPs) == 0 {
+				return nil
+			}
+			if err := i.WriteGlobalMCPConfig(globalMCPs); err != nil {
+				mcpLog.Debug("regen_cursor_global_mcp_failed", slog.String("error", err.Error()))
+				return fmt.Errorf("failed to regenerate Cursor global MCP config: %w", err)
+			}
+			mcpLog.Debug("regen_cursor_global_mcp_succeeded", slog.String("title", i.Title), slog.Int("mcp_count", len(globalMCPs)))
+		default:
+			localMCPs := mcpInfo.Local()
+			if len(localMCPs) == 0 {
+				return nil
+			}
+			if err := i.WriteLocalMCPConfig(localMCPs); err != nil {
+				mcpLog.Debug("regen_cursor_project_mcp_failed", slog.String("error", err.Error()))
+				return fmt.Errorf("failed to regenerate .cursor/mcp.json: %w", err)
+			}
+			mcpLog.Debug("regen_cursor_project_mcp_succeeded", slog.String("title", i.Title), slog.Int("mcp_count", len(localMCPs)))
+		}
+		return nil
+	}
+
+	ClearMCPCache(i.ProjectPath) // Force fresh read from disk (not stale 30s cache)
+	mcpInfo := GetMCPInfo(i.ProjectPath)
+	if mcpInfo == nil {
+		return nil // No MCP info, nothing to regenerate
+	}
+
+	switch GetMCPDefaultScope() {
+	case "global":
+		globalMCPs := mcpInfo.Global
+		if len(globalMCPs) == 0 {
+			return nil
+		}
+		if err := WriteGlobalMCP(globalMCPs); err != nil {
+			mcpLog.Debug("regen_global_mcp_failed", slog.String("error", err.Error()))
+			return fmt.Errorf("failed to regenerate global MCP config: %w", err)
+		}
+		mcpLog.Debug(
+			"regen_global_mcp_succeeded",
+			slog.String("title", i.Title),
+			slog.Int("mcp_count", len(globalMCPs)),
+		)
+	case "user":
+		userMCPs := GetUserMCPNames()
+		if len(userMCPs) == 0 {
+			return nil
+		}
+		if err := WriteUserMCP(userMCPs); err != nil {
+			mcpLog.Debug("regen_user_mcp_failed", slog.String("error", err.Error()))
+			return fmt.Errorf("failed to regenerate user MCP config: %w", err)
+		}
+		mcpLog.Debug("regen_user_mcp_succeeded", slog.String("title", i.Title), slog.Int("mcp_count", len(userMCPs)))
+	default:
+		localMCPs := mcpInfo.Local()
+		if len(localMCPs) == 0 {
+			return nil
+		}
+		// WriteMCPJsonFromConfig checks pool status and writes socket configs if pool is running
+		if err := WriteMCPJsonFromConfig(i.ProjectPath, localMCPs); err != nil {
+			mcpLog.Debug("regen_local_mcp_failed", slog.String("error", err.Error()))
+			return fmt.Errorf("failed to regenerate .mcp.json: %w", err)
+		}
+		mcpLog.Debug("regen_local_mcp_succeeded", slog.String("title", i.Title), slog.Int("mcp_count", len(localMCPs)))
+	}
+	return nil
+}
+
+// geminiSessionHasConversationData checks whether a Gemini session file exists
+// and contains at least one message record.
+//
+// Returns true on read/parse errors as a safe fallback, matching Claude quality-gate
+// behavior (avoid dropping potentially valid sessions due to transient I/O issues).
+func geminiSessionHasConversationData(sessionID, projectPath string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || len(sessionID) < 8 {
+		return false
+	}
+
+	sessionsDir := GetGeminiSessionsDir(projectPath)
+	pattern := filepath.Join(sessionsDir, "session-*-"+sessionID[:8]+".json")
+	filePath, _ := findNewestFile(pattern)
+	if filePath == "" {
+		filePath = findGeminiSessionInAllProjects(sessionID)
+	}
+	if filePath == "" {
+		return false
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return true
+	}
+
+	var payload struct {
+		SessionID string            `json:"sessionId"`
+		Messages  []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return true
+	}
+
+	// If full ID is present in file and mismatches, treat candidate as invalid.
+	if payload.SessionID != "" && payload.SessionID != sessionID {
+		return false
+	}
+	return len(payload.Messages) > 0
+}
+
+// sessionConversationByteSize returns the size in bytes of the Claude
+// session's jsonl file (or 0 if it cannot be located). Used as a robust
+// "how much history does this session hold" proxy when choosing between
+// two non-empty candidates during hook rebind — a 974KB historic jsonl
+// should always win over a fresh 1-record jsonl, regardless of whether
+// both pass the binary `sessionHasConversationData` check.
+//
+// Uses the PER-INSTANCE Claude config dir (same lookup as
+// sessionHasConversationData) so conductors with config_dir overrides
+// resolve correctly. Errors return 0 — this is a tiebreaker, not the
+// primary gate, so a missing file degrades gracefully to "candidate
+// doesn't appear larger, reject" rather than false-accepting.
+func sessionConversationByteSize(inst *Instance, sessionID string) int64 {
+	var configDir string
+	if inst != nil {
+		configDir = GetClaudeConfigDirForInstance(inst)
+	} else {
+		configDir = GetClaudeConfigDir()
+	}
+	if configDir == "" {
+		configDir = filepath.Join(os.Getenv("HOME"), ".claude")
+	}
+	// Issue #663: for multi-repo sessions ProjectPath is a symlink into
+	// MultiRepoTempDir; EvalSymlinks would resolve away from the parent
+	// dir Claude actually used as cwd. EffectiveWorkingDir() is the
+	// authoritative cwd for JSONL encoding.
+	projectPath := ""
+	if inst != nil {
+		projectPath = inst.EffectiveWorkingDir()
+	}
+	resolvedPath := projectPath
+	if resolved, err := filepath.EvalSymlinks(projectPath); err == nil {
+		resolvedPath = resolved
+	}
+	encodedPath := ConvertToClaudeDirName(resolvedPath)
+	if encodedPath == "" {
+		encodedPath = "-"
+	}
+	sessionFile := filepath.Join(configDir, "projects", encodedPath, sessionID+".jsonl")
+	if info, err := os.Stat(sessionFile); err == nil {
+		return info.Size()
+	}
+	if fallback := findSessionFileInAllProjects(inst, sessionID); fallback != "" {
+		if info, err := os.Stat(fallback); err == nil {
+			return info.Size()
+		}
+	}
+	return 0
+}
+
+// sessionConversationMtime returns the modification time of the Claude
+// session's jsonl file (or the zero time if it cannot be located). Issue
+// #856: when both current and candidate jsonls have data, mtime gap is the
+// discriminator between a stale flap (rich session still being actively
+// written, candidate is a momentary blip) and a user-initiated new session
+// like /clear (rich session is dormant, candidate is the new active jsonl).
+// Path resolution mirrors sessionConversationByteSize.
+func sessionConversationMtime(inst *Instance, sessionID string) time.Time {
+	var configDir string
+	if inst != nil {
+		configDir = GetClaudeConfigDirForInstance(inst)
+	} else {
+		configDir = GetClaudeConfigDir()
+	}
+	if configDir == "" {
+		configDir = filepath.Join(os.Getenv("HOME"), ".claude")
+	}
+	projectPath := ""
+	if inst != nil {
+		projectPath = inst.EffectiveWorkingDir()
+	}
+	resolvedPath := projectPath
+	if resolved, err := filepath.EvalSymlinks(projectPath); err == nil {
+		resolvedPath = resolved
+	}
+	encodedPath := ConvertToClaudeDirName(resolvedPath)
+	if encodedPath == "" {
+		encodedPath = "-"
+	}
+	sessionFile := filepath.Join(configDir, "projects", encodedPath, sessionID+".jsonl")
+	if info, err := os.Stat(sessionFile); err == nil {
+		return info.ModTime()
+	}
+	if fallback := findSessionFileInAllProjects(inst, sessionID); fallback != "" {
+		if info, err := os.Stat(fallback); err == nil {
+			return info.ModTime()
+		}
+	}
+	return time.Time{}
+}
+
+// bindClaudeSessionFromHook performs the common bookkeeping when
+// UpdateHookStatus has decided a candidate session ID wins: log the
+// lifecycle event, update the in-memory instance fields, and propagate
+// the ID into the tmux environment so a future restart's
+// capture-resume pattern picks it up. `action` is "bind" (cold start)
+// or "rebind" (replacing an existing ID).
+func (i *Instance) bindClaudeSessionFromHook(sessionID, hookSource, hookEvent, action string) {
+	sessionLog.Debug("claude_session_update_from_hook",
+		slog.String("old_id", i.ClaudeSessionID),
+		slog.String("new_id", sessionID),
+		slog.String("event", hookEvent),
+	)
+	_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
+		InstanceID: i.ID, Tool: i.Tool, Action: action,
+		Source: hookSource, OldID: i.ClaudeSessionID, NewID: sessionID,
+		HookEvent: hookEvent,
+	})
+	i.ClaudeSessionID = sessionID
+	i.ClaudeDetectedAt = time.Now()
+	i.hookSessionID = sessionID
+
+	if i.tmuxSession != nil && i.tmuxSession.Exists() {
+		_ = i.tmuxSession.SetEnvironment("CLAUDE_SESSION_ID", sessionID)
+	}
+
+	// Persist the rebind to SQLite. The PERSIST-12 contract above assumed
+	// an "external save cycle" would pick this up, but none of the three
+	// UpdateHookStatus callers (TUI tick, web refresh, CLI status refresh)
+	// actually save after rebind — leaving tool_data.claude_session_id
+	// stuck at the pre-/clear UUID indefinitely for DB-direct consumers,
+	// and producing a runaway loop of fresh "rebind" lifecycle entries
+	// because peer processes keep reloading the stale row and clobbering
+	// the in-memory mutation.
+	//
+	// What this UPDATE guarantees: the write is atomic at SQLite's row
+	// lock against WriteStatus (different columns) and SaveInstance
+	// (same row, serialized). What it does NOT prevent: a concurrent
+	// SaveInstance from a peer process holding a stale Instance snapshot
+	// can still clobber the value we just wrote, because
+	// claude_session_id is a typed schema field — MergeToolDataExtras
+	// only protects keys outside that typed set, so the peer's stale
+	// typed value wins. The runaway-rebind loop terminates anyway
+	// because the writer that decided to rebind also persists
+	// synchronously here, not because clobbering is impossible — a
+	// later peer reload that observes the new ID will short-circuit at
+	// the `sessionID == i.ClaudeSessionID` check in UpdateHookStatus.
+	if db := statedb.GetGlobal(); db != nil {
+		if err := db.WriteClaudeSessionBinding(i.ID, sessionID, i.ClaudeDetectedAt); err != nil {
+			sessionLog.Warn("claude_session_rebind_persist_failed",
+				slog.String("instance_id", i.ID),
+				slog.String("new_id", sessionID),
+				slog.String("error", err.Error()))
+		}
+	}
+}
+
+// sessionHasConversationData checks if a Claude session file contains actual
+// conversation data (has "sessionId" field in records).
+//
+// Uses the PER-INSTANCE Claude config dir (via GetClaudeConfigDirForInstance)
+// so sessions with [conductors.<name>.claude].config_dir or
+// [groups."<group>".claude].config_dir overrides detect their own JSONL
+// history correctly. Prior versions (≤v1.7.6) consulted the process-wide
+// GetClaudeConfigDir(), which silently ignored per-instance overrides and
+// caused restart-with-history to mis-route to --session-id (Claude rejects
+// that as "already in use") instead of --resume. Passing inst == nil
+// degrades to the global lookup, preserving legacy call sites without an
+// Instance.
+//
+// Returns true if:
+// - File has any "sessionId" field (user interacted with session)
+// - Error reading file (safe fallback - don't risk losing sessions)
+//
+// Returns false if:
+// - File doesn't exist (nothing to resume, use --session-id)
+// - File exists but has zero "sessionId" occurrences (never interacted)
+func sessionHasConversationData(inst *Instance, sessionID string) bool {
+	// Build the session file path
+	// Format: {config_dir}/projects/{encoded_path}/{sessionID}.jsonl
+	var configDir string
+	if inst != nil {
+		configDir = GetClaudeConfigDirForInstance(inst)
+	} else {
+		configDir = GetClaudeConfigDir()
+	}
+	if configDir == "" {
+		configDir = filepath.Join(os.Getenv("HOME"), ".claude")
+	}
+
+	// Issue #663: see sessionConversationByteSize rationale above.
+	// Multi-repo sessions must encode EffectiveWorkingDir(), not the
+	// ProjectPath symlink.
+	projectPath := ""
+	if inst != nil {
+		projectPath = inst.EffectiveWorkingDir()
+	}
+
+	// Resolve symlinks in project path (macOS: /tmp -> /private/tmp)
+	resolvedPath := projectPath
+	if resolved, err := filepath.EvalSymlinks(projectPath); err == nil {
+		resolvedPath = resolved
+	}
+
+	// Encode project path using Claude's directory format
+	encodedPath := ConvertToClaudeDirName(resolvedPath)
+	if encodedPath == "" {
+		encodedPath = "-"
+	}
+
+	sessionFile := filepath.Join(configDir, "projects", encodedPath, sessionID+".jsonl")
+
+	// Issue #662 diagnostic contract: emit a single structured "decision"
+	// log line per call with every field needed to reconstruct the false
+	// negatives in production logs (config_dir, resolved_project_path,
+	// encoded_path, primary_path_tested, primary_path_stat_err,
+	// fallback_lookup_tried, fallback_path_found, final_result).
+	primaryStatErr := ""
+	fallbackTried := false
+	fallbackPathFound := ""
+
+	emitDecision := func(result bool, reason string) {
+		sessionLog.Debug(
+			"session_data_decision",
+			slog.String("session_id", sessionID),
+			slog.String("config_dir", configDir),
+			slog.String("resolved_project_path", resolvedPath),
+			slog.String("encoded_path", encodedPath),
+			slog.String("primary_path_tested", sessionFile),
+			slog.String("primary_path_stat_err", primaryStatErr),
+			slog.Bool("fallback_lookup_tried", fallbackTried),
+			slog.String("fallback_path_found", fallbackPathFound),
+			slog.Bool("final_result", result),
+			slog.String("reason", reason),
+		)
+	}
+
+	sessionLog.Debug("session_data_checking_file", slog.String("file", sessionFile))
+
+	// Check if file exists
+	if _, err := os.Stat(sessionFile); os.IsNotExist(err) {
+		if err != nil {
+			primaryStatErr = err.Error()
+		}
+		// File doesn't exist at expected location - try cross-project search
+		// This handles path hash mismatches (e.g., session created from different directory)
+		fallbackTried = true
+		if fallbackPath := findSessionFileInAllProjects(inst, sessionID); fallbackPath != "" {
+			fallbackPathFound = fallbackPath
+			sessionLog.Debug("session_data_cross_project_found", slog.String("path", fallbackPath))
+			sessionFile = fallbackPath
+		} else {
+			// File doesn't exist anywhere - use --session-id to create fresh session
+			// (there's nothing to resume if the file doesn't exist)
+			sessionLog.Debug("session_data_file_not_found", slog.String("result", "use_session_id"))
+			emitDecision(false, "file_not_found")
+			return false
+		}
+	}
+
+	sessionLog.Debug("session_data_file_exists", slog.String("file", sessionFile))
+
+	// Read file and search for "sessionId" field
+	file, err := os.Open(sessionFile)
+	if err != nil {
+		// Error opening - safe fallback to --resume
+		sessionLog.Debug(
+			"session_data_open_error",
+			slog.String("error", err.Error()),
+			slog.String("fallback", "use_resume"),
+		)
+		emitDecision(true, "open_error_safe_fallback")
+		return true
+	}
+	defer file.Close()
+
+	// Use scanner to read line by line (memory efficient for large files)
+	scanner := bufio.NewScanner(file)
+	// Increase buffer size for long lines
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		// Simple string search - faster than JSON parsing
+		if strings.Contains(line, `"sessionId"`) {
+			sessionLog.Debug("session_data_found_session_id", slog.String("result", "use_resume"))
+			emitDecision(true, "session_id_line_present")
+			return true // Found conversation data
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		// Error reading - safe fallback to --resume
+		sessionLog.Debug(
+			"session_data_scanner_error",
+			slog.String("error", err.Error()),
+			slog.String("fallback", "use_resume"),
+		)
+		emitDecision(true, "scanner_error_safe_fallback")
+		return true
+	}
+
+	// No sessionId found - session was never interacted with
+	sessionLog.Debug("session_data_no_session_id", slog.String("result", "use_session_id"))
+	emitDecision(false, "no_session_id_line")
+	return false
+}
+
+// findSessionFileInAllProjects searches all Claude project directories for a session file
+// This handles path hash mismatches when agent-deck runs from a different directory
+// than where the Claude session was originally created.
+// Returns the full path to the session file, or empty string if not found.
+// Uses the PER-INSTANCE config dir (via GetClaudeConfigDirForInstance) when
+// inst is non-nil so sessions with conductor/group config_dir overrides find
+// their own JSONLs. Passing inst == nil degrades to the global lookup.
+func findSessionFileInAllProjects(inst *Instance, sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+
+	var configDir string
+	if inst != nil {
+		configDir = GetClaudeConfigDirForInstance(inst)
+	} else {
+		configDir = GetClaudeConfigDir()
+	}
+	if configDir == "" {
+		configDir = filepath.Join(os.Getenv("HOME"), ".claude")
+	}
+
+	projectsDir := filepath.Join(configDir, "projects")
+
+	// List all project hash directories
+	entries, err := os.ReadDir(projectsDir)
+	if err != nil {
+		return ""
+	}
+
+	// Session filename format: {sessionID}.jsonl
+	sessionFile := sessionID + ".jsonl"
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		filePath := filepath.Join(projectsDir, entry.Name(), sessionFile)
+		if _, err := os.Stat(filePath); err == nil {
+			return filePath
+		}
+	}
+
+	return ""
+}
+
+// OpenContainerShell creates a tmux session running an interactive shell inside
+// the sandbox container. Returns the tmux session name for attaching.
+// Uses /bin/sh for portability (not all images have bash).
+func (i *Instance) OpenContainerShell() (string, error) {
+	if !i.IsSandboxed() {
+		return "", fmt.Errorf("session %s is not sandboxed", i.ID)
+	}
+	if i.SandboxContainer == "" || !docker.IsManagedContainer(i.SandboxContainer) {
+		return "", fmt.Errorf("no valid sandbox container for session %s", i.ID)
+	}
+
+	// Verify the container is still running before attempting docker exec.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	ctr := docker.FromName(i.SandboxContainer)
+	running, err := ctr.IsRunning(ctx)
+	if err != nil {
+		return "", fmt.Errorf("checking container %s: %w", i.SandboxContainer, err)
+	}
+	if !running {
+		return "", fmt.Errorf("sandbox container %s is not running", i.SandboxContainer)
+	}
+
+	// Reuse the GenerateName prefix logic for consistency.
+	tmuxName := "ad-term-" + docker.GenerateName(i.ID, i.Title)[len("agent-deck-"):]
+
+	// Kill any existing terminal session to prevent orphans from repeated T presses.
+	// Target the same socket the parent agent-deck instance lives on so the
+	// terminal helper is visible to `tmux -L <socket> ls` and agent-deck's
+	// own reap paths (issue #687).
+	killCtx, killCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer killCancel()
+	_ = tmux.ExecContext(killCtx, i.TmuxSocketName, "kill-session", "-t", tmuxName).Run()
+
+	// Omit -w flag: the container's workdir was set during create (respects worktree path).
+	// Pass the docker exec command as discrete tmux args to avoid shell interpolation of
+	// the container name (defence-in-depth against state file tampering).
+	newCtx, newCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer newCancel()
+	out, err := tmux.ExecContext(newCtx, i.TmuxSocketName,
+		"new-session", "-d", "-s", tmuxName,
+		"docker", "exec", "-it", i.SandboxContainer, "/bin/sh",
+	).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("creating terminal session: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return tmuxName, nil
+}
+
+// wrapForSSH wraps the command in an SSH invocation if the instance targets a remote host.
+// Uses ControlMaster for connection multiplexing to avoid repeated handshakes.
+func (i *Instance) wrapForSSH(command string) string {
+	if !i.IsSSH() {
+		return command
+	}
+
+	// Ensure ControlMaster socket directory exists
+	sshDir := "/tmp/agent-deck-ssh"
+	_ = os.MkdirAll(sshDir, 0700)
+
+	remoteCmd := command
+	if i.SSHRemotePath != "" {
+		// Escape single quotes in the remote path and command
+		escapedPath := strings.ReplaceAll(i.SSHRemotePath, "'", "'\\''")
+		escapedCmd := strings.ReplaceAll(command, "'", "'\\''")
+		remoteCmd = fmt.Sprintf("cd '%s' && %s", escapedPath, escapedCmd)
+	}
+
+	return fmt.Sprintf(
+		"ssh -t -o ControlMaster=auto -o ControlPath=/tmp/agent-deck-ssh/%%r@%%h:%%p -o ControlPersist=600 %s %s",
+		shellQuote(i.SSHHost),
+		shellQuote(remoteCmd),
+	)
+}
+
+// shellQuote wraps a string in single quotes, escaping embedded single quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// wrapForSandbox wraps command in docker exec if the instance is sandboxed.
+// Returns the wrapped command and the container name. The caller is responsible
+// for persisting the container name to i.SandboxContainer.
+func (i *Instance) wrapForSandbox(command string) (string, string, error) {
+	if !i.IsSandboxed() {
+		return command, "", nil
+	}
+
+	userCfg, cfgErr := LoadUserConfig()
+	if cfgErr != nil {
+		sessionLog.Warn("load_user_config_for_sandbox", slog.String("error", cfgErr.Error()))
+	}
+
+	wrappedCmd, containerName, err := ensureSandboxContainer(i, userCfg, command)
+	if err != nil {
+		return "", "", err
+	}
+	return wrappedCmd, containerName, nil
+}
+
+// builtinAgentTools are the first-party agent CLIs agent-deck launches as a
+// pane's initial process and whose clean exit (e.g. `/exit`) can fall back to
+// an interactive shell when exit_to_shell is enabled (issue #1161).
+var builtinAgentTools = map[string]bool{
+	"claude":   true,
+	"gemini":   true,
+	"opencode": true,
+	"codex":    true,
+	"copilot":  true,
+	"cursor":   true,
+	"hermes":   true,
+	"crush":    true,
+}
+
+// isBuiltinAgentTool reports whether tool is a first-party agent (or a custom
+// tool wrapping claude/codex). Custom non-agent commands and "shell" are not
+// agents and must never be exit-to-shell wrapped.
+func isBuiltinAgentTool(tool string) bool {
+	if builtinAgentTools[tool] {
+		return true
+	}
+	return IsClaudeCompatible(tool) || IsCodexCompatible(tool)
+}
+
+// exitToShellEnabled resolves the exit-to-shell toggle for this instance.
+// Per-session override (Instance.ExitToShell) wins; otherwise the global
+// [shell] exit_to_shell config flag applies. Default is OFF (opt-in). #1161.
+func (i *Instance) exitToShellEnabled() bool {
+	if i.ExitToShell != nil {
+		return *i.ExitToShell
+	}
+	cfg, _ := LoadUserConfig()
+	return cfg != nil && cfg.Shell.GetExitToShell()
+}
+
+// wrapExitToShell rewrites a built-in agent's spawn command so the pane falls
+// back to an interactive shell at the same cwd when the agent exits, restoring
+// the pre-#503 exit→shell→resume workflow (issue #1161, Option A).
+//
+// The transform is:
+//
+//	<agent cmd>; exec "$SHELL" -i
+//
+// with the agent's own `exec ` launcher neutralised — claude execs itself for
+// job control, which would replace the wrapping bash and prevent the trailing
+// shell exec from ever running. Only the first `exec ` (the launcher) is
+// stripped; any later "exec " lives inside a shell-quoted startup-query suffix.
+// Agents that do not exec (gemini, codex, …) are unaffected by the strip and
+// simply get the suffix appended.
+//
+// No-op when the flag is off, the command is empty, the session is sandboxed
+// (docker exec owns the in-container process), or the tool is not a built-in
+// agent. Resume is unaffected: i.ClaudeSessionID is captured in Go before the
+// command is built, so the `--session-id`/`--resume` id still targets the same
+// session after the shell detour.
+func (i *Instance) wrapExitToShell(command string) string {
+	if command == "" || i.IsSandboxed() || !i.exitToShellEnabled() || !isBuiltinAgentTool(i.Tool) {
+		return command
+	}
+	rewritten := strings.Replace(command, "exec ", "", 1)
+	return rewritten + `; exec "$SHELL" -i`
+}
+
+// launchShellEnabled returns whether the session should wrap agent commands
+// with a shell invocation that loads startup files before launching the agent.
+// Checks per-session override first, then falls back to global [shell].launch_shell config.
+func (i *Instance) launchShellEnabled() bool {
+	if i.LaunchShell != nil {
+		return *i.LaunchShell
+	}
+	cfg, _ := LoadUserConfig()
+	return cfg != nil && cfg.Shell.GetLaunchShell()
+}
+
+// wrapLaunchShell wraps the command with an interactive shell invocation so
+// that environment variables from ~/.zshrc, ~/.bashrc, etc. are available to
+// the agent process (issue #1218).
+//
+// The transform is:
+//
+//	$SHELL -il -c '<command>'
+//
+// where $SHELL is the user's configured shell (e.g. /bin/zsh, /bin/bash).
+// For bash, ~/.bashrc is sourced explicitly before the command because
+// interactive login bash does not read it automatically.
+//
+// This solves the issue where OpenCode MCP configs with {env:VAR} references
+// fail when launched from the TUI because agent-deck spawns the agent directly
+// without going through the user's interactive shell environment.
+//
+// No-op when the flag is off, the command is empty, the session is sandboxed
+// (container already handles environment), or for shell tools (to avoid
+// double-wrapping). SSH remote sessions are also excluded because the remote
+// SSH invocation should handle the login shell setup.
+func (i *Instance) wrapLaunchShell(command string) string {
+	if command == "" || i.IsSandboxed() || !i.launchShellEnabled() {
+		return command
+	}
+	// Don't wrap shell sessions or SSH sessions
+	if i.Tool == "shell" || i.SSHHost != "" {
+		return command
+	}
+	// Get the shell from environment, default to bash
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/bash"
+	}
+	// Escape single quotes in the command for safe shell quoting
+	escaped := strings.ReplaceAll(command, "'", "'\"'\"'")
+	if filepath.Base(shell) == "bash" {
+		return fmt.Sprintf("%s -il -c 'if [ -f ~/.bashrc ]; then source ~/.bashrc; fi; %s'", shell, escaped)
+	}
+	return fmt.Sprintf("%s -il -c '%s'", shell, escaped)
+}
+
+// prepareCommand applies the full command wrapping chain: user wrapper → sandbox → ignore-suspend.
+// Returns the wrapped command, the sandbox container name (empty if not sandboxed), and an error.
+// All code paths that launch or respawn a tmux pane should use this instead of calling
+// applyWrapper/wrapForSandbox/wrapIgnoreSuspend individually.
+func (i *Instance) prepareCommand(cmd string) (string, string, error) {
+	// Exit-to-shell wrap FIRST, on the bare agent command, so the agent's own
+	// `exec ` launcher is still visible to neutralise and the trailing shell
+	// exec stays the outermost statement before any user-wrapper / bash -c /
+	// SSH layering. No-op unless opt-in for a built-in agent (issue #1161).
+	cmd = i.wrapExitToShell(cmd)
+
+	// Launch-shell wrap SECOND, before user wrapper, so the interactive shell
+	// loads its startup files and then executes the complete command (with
+	// exit-to-shell suffix if enabled). This ensures env vars from ~/.zshrc,
+	// ~/.bashrc, etc. are available to the agent and any trailing shell
+	// (issue #1218). No-op unless opt-in.
+	cmd = i.wrapLaunchShell(cmd)
+
+	// Apply the user wrapper THIRD so that extra args folded into a
+	// "{command} --flag1 --flag2" wrapper template become part of the string
+	// that the bash -c wrap protects. Previously the order was reversed
+	// (bash -c wrap then wrapper substitution), which produced
+	// "bash -c '<cmd>' --flag1 --flag2" — bash treated --flag1/--flag2 as
+	// positional parameters ($0, $1, …) and the child process never saw them.
+	// See issue #601.
+	wrapped, err := i.applyWrapper(cmd)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Wrap the fully-substituted command under bash -c when a wrapper is
+	// configured. This keeps shell metacharacters (&&, $(), inline env) in the
+	// base command from leaking into the outer shell parse, and — critically —
+	// keeps trailing wrapper-suffix flags INSIDE a single quoted argv so they
+	// reach the child process intact.
+	if i.hasEffectiveWrapper() {
+		escaped := strings.ReplaceAll(wrapped, "'", "'\"'\"'")
+		wrapped = fmt.Sprintf("bash -c '%s'", escaped)
+	}
+	wrapped = i.wrapForSSH(wrapped)
+	wrapped, containerName, err := i.wrapForSandbox(wrapped)
+	if err != nil {
+		return "", "", err
+	}
+	// Only disable Ctrl+Z suspend for sandboxed sessions where the command
+	// runs as the pane's initial process (no interactive shell for job control).
+	// Non-sandbox sessions use send-keys into an interactive shell, so Ctrl+Z
+	// naturally suspends the process and the user can `fg` to resume.
+	if wrapped != "" && i.IsSandboxed() {
+		wrapped = wrapIgnoreSuspend(wrapped)
+	}
+	return wrapped, containerName, nil
+}
+
+// terminalEnvVars are always passed through to containers for proper UI/theming.
+var terminalEnvVars = []string{"TERM", "COLORTERM", "FORCE_COLOR", "NO_COLOR", "COLORFGBG"}
+
+// collectDockerEnvVars returns host environment variables to forward to containers.
+// Each call reads fresh values from the host environment via os.LookupEnv so that
+// changes between session starts (e.g. updated TERM) are picked up immediately.
+// Terminal-related variables (TERM, COLORTERM, FORCE_COLOR, NO_COLOR, COLORFGBG) are always
+// included when set. Additional names from DockerSettings.Environment are appended.
+func collectDockerEnvVars(names []string) map[string]string {
+	env := make(map[string]string, len(terminalEnvVars)+len(names))
+	for _, name := range terminalEnvVars {
+		if val, ok := os.LookupEnv(name); ok {
+			env[name] = val
+			continue
+		}
+		if name == "COLORFGBG" {
+			env[name] = ThemeColorFGBG()
+		}
+	}
+	for _, name := range names {
+		if val, ok := os.LookupEnv(name); ok {
+			env[name] = val
+		}
+	}
+	return env
+}
+
+// ensureSandboxContainer creates and starts the Docker container if needed,
+// then returns the tool command wrapped in "docker exec" and the container name.
+// The userCfg parameter avoids a redundant LoadUserConfig call — the caller
+// (wrapForSandbox) already loaded it.
+func ensureSandboxContainer(inst *Instance, userCfg *UserConfig, toolCommand string) (string, string, error) {
+	// Use a bounded context to prevent indefinite hangs if Docker is unresponsive.
+	// Image pulls may take longer, but CheckAvailability/Exists/Create/Start should be fast.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	if err := docker.CheckAvailability(ctx); err != nil {
+		return "", "", fmt.Errorf("sandbox unavailable: %w", err)
+	}
+
+	if err := docker.EnsureImage(ctx, inst.Sandbox.Image); err != nil {
+		return "", "", fmt.Errorf("ensuring sandbox image: %w", err)
+	}
+
+	containerName := docker.GenerateName(inst.ID, inst.Title)
+	ctr := docker.NewContainer(containerName, inst.Sandbox.Image)
+
+	homeDir, homeErr := os.UserHomeDir()
+	if homeErr != nil {
+		sessionLog.Warn("user_home_dir", slog.String("error", homeErr.Error()))
+	}
+
+	// Skip agent config sync when home directory is unavailable — RefreshAgentConfigs
+	// would produce broken paths rooted at "/" with an empty homeDir.
+	var bindMounts []docker.VolumeMount
+	var homeMounts []docker.VolumeMount
+	if homeDir != "" {
+		bindMounts, homeMounts = docker.RefreshAgentConfigs(homeDir, "")
+	}
+
+	if err := ensureContainerRunning(ctx, inst, ctr, userCfg, homeDir, bindMounts, homeMounts); err != nil {
+		return "", "", err
+	}
+
+	return buildExecCommand(ctr, userCfg, toolCommand), containerName, nil
+}
+
+// ensureContainerRunning creates and starts the container if it doesn't exist or is stopped.
+func ensureContainerRunning(
+	ctx context.Context,
+	inst *Instance,
+	ctr *docker.Container,
+	userCfg *UserConfig,
+	homeDir string,
+	bindMounts []docker.VolumeMount,
+	homeMounts []docker.VolumeMount,
+) error {
+	exists, err := ctr.Exists(ctx)
+	if err != nil {
+		return fmt.Errorf("checking sandbox container: %w", err)
+	}
+
+	if !exists {
+		cfg := buildSandboxConfig(inst, userCfg, homeDir, bindMounts, homeMounts)
+		if _, createErr := ctr.Create(ctx, cfg); createErr != nil {
+			return fmt.Errorf("creating sandbox container: %w", createErr)
+		}
+	}
+
+	running, err := ctr.IsRunning(ctx)
+	if err != nil {
+		return fmt.Errorf("checking sandbox container status: %w", err)
+	}
+	if !running {
+		if startErr := ctr.Start(ctx); startErr != nil {
+			return fmt.Errorf("starting sandbox container: %w", startErr)
+		}
+	}
+
+	// Migration guard: older containers were created with root-owned tmpfs mounts
+	// for /root/.npm and /root/.cache. With --user uid:gid this causes plugin
+	// bootstrap failures (EACCES mkdir '/root/.npm/_cacache'). Recreate the
+	// container once if those paths are not writable.
+	cacheWritable := sandboxCacheDirsWritable(ctx, ctr)
+	tmpExecutable := sandboxTmpExecutable(ctx, ctr)
+	if !cacheWritable || !tmpExecutable {
+		sessionLog.Warn(
+			"sandbox_recreating_for_runtime_compat",
+			slog.Bool("cache_writable", cacheWritable),
+			slog.Bool("tmp_executable", tmpExecutable),
+		)
+		if rmErr := ctr.Remove(ctx, true); rmErr != nil {
+			return fmt.Errorf("removing incompatible sandbox container: %w", rmErr)
+		}
+		cfg := buildSandboxConfig(inst, userCfg, homeDir, bindMounts, homeMounts)
+		if _, createErr := ctr.Create(ctx, cfg); createErr != nil {
+			return fmt.Errorf("recreating sandbox container: %w", createErr)
+		}
+		if startErr := ctr.Start(ctx); startErr != nil {
+			return fmt.Errorf("starting recreated sandbox container: %w", startErr)
+		}
+	}
+
+	return nil
+}
+
+func sandboxCacheDirsWritable(ctx context.Context, ctr *docker.Container) bool {
+	return sandboxExecProbe(ctx, ctr, "test -w /root/.npm && test -w /root/.cache")
+}
+
+func sandboxTmpExecutable(ctx context.Context, ctr *docker.Container) bool {
+	probe := `f=/tmp/.agent_deck_exec_probe.sh; printf '#!/bin/sh\nexit 0\n' > "$f" && chmod +x "$f" && "$f" >/dev/null 2>&1 && rm -f "$f"`
+	return sandboxExecProbe(ctx, ctr, probe)
+}
+
+func sandboxExecProbe(ctx context.Context, ctr *docker.Container, script string) bool {
+	prefix := ctr.ExecPrefixNonInteractive()
+	args := append(prefix[1:], "bash", "-lc", script)
+	// #nosec G204 -- prefix comes from docker.Container.ExecPrefixNonInteractive
+	// (returns ["docker", "exec", containerName]); script is a hardcoded probe
+	// snippet from callers above. No external input.
+	_, err := exec.CommandContext(ctx, prefix[0], args...).CombinedOutput()
+	return err == nil
+}
+
+// buildSandboxConfig assembles the ContainerConfig from session and user settings.
+func buildSandboxConfig(
+	inst *Instance,
+	userCfg *UserConfig,
+	homeDir string,
+	bindMounts []docker.VolumeMount,
+	homeMounts []docker.VolumeMount,
+) *docker.ContainerConfig {
+	var cpuLimit, memLimit string
+	if inst.Sandbox.CPULimit != nil {
+		cpuLimit = *inst.Sandbox.CPULimit
+	}
+	if inst.Sandbox.MemoryLimit != nil {
+		memLimit = *inst.Sandbox.MemoryLimit
+	}
+	if cpuLimit == "" && userCfg != nil {
+		cpuLimit = userCfg.Docker.CPULimit
+	}
+	if memLimit == "" && userCfg != nil {
+		memLimit = userCfg.Docker.MemoryLimit
+	}
+
+	configOpts := []docker.ContainerConfigOption{
+		docker.WithCPULimit(cpuLimit),
+		docker.WithMemoryLimit(memLimit),
+		docker.WithAgentConfigs(bindMounts, homeMounts),
+	}
+
+	// Bridge in-container hook-handler status writes to a PER-INSTANCE host dir.
+	// The container's own hooks path sits on the read-only rootfs, so without
+	// this mount Stop/transition events from sandboxed sessions are lost. The
+	// dir is scoped to this instance (…/hooks/sandbox/<id>) rather than the
+	// global fleet-wide hooks dir. Three properties keep this safe: (1) only this
+	// instance's subdir is mounted, so a compromised container can read/write
+	// files ONLY inside its own subdir — it can never see siblings' or the
+	// conductor's status; (2) the host StatusFileWatcher keys a scoped file
+	// by its OWNING SUBDIR and ingests only <id>.json, so a container cannot
+	// forge a sibling's transition (or inject a done_summary into the conductor)
+	// by naming a file after a victim inside its own subdir; and (3) every host
+	// read of a status file is no-follow (O_NOFOLLOW, plus Lstat on the scoped
+	// path) and size-bounded, so the container cannot symlink its own <id>.json
+	// at a sibling/host file or /dev/zero, nor write a huge <id>.json, to read
+	// host files or DoS the shared notify-daemon. The host read path
+	// (readHookStatusFile / hookStatusFilePath) also builds the path from the
+	// requested <id>, so it cannot be cross-attributed either.
+	if hooksDir := GetHooksDir(); hooksDir != "" {
+		perInstanceDir := filepath.Join(hooksDir, "sandbox", inst.ID)
+		if mkErr := os.MkdirAll(perInstanceDir, 0o700); mkErr == nil {
+			configOpts = append(configOpts, docker.WithHooksDir(perInstanceDir))
+		} else {
+			// Don't fail the spawn, but surface it: without the scoped hooks dir
+			// the bridge mount is silently skipped, leaving the host watcher blind
+			// to this sandboxed session — the exact problem this bridge solves.
+			sessionLog.Warn("scoped_hooks_dir_create_failed",
+				slog.String("instance_id", inst.ID),
+				slog.String("dir", perInstanceDir),
+				slog.String("error", mkErr.Error()))
+		}
+	}
+
+	// Note: Docker.Environment names (e.g. TERM) are NOT forwarded at create time.
+	// They are forwarded at exec time via buildExecCommand with fresh host values.
+	// Only Docker.EnvironmentValues (static key=value pairs) are baked into the container.
+
+	if homeDir != "" {
+		gitconfigPath := filepath.Join(homeDir, ".gitconfig")
+		if _, statErr := os.Stat(gitconfigPath); statErr == nil {
+			configOpts = append(configOpts, docker.WithGitConfig(gitconfigPath))
+		}
+	}
+
+	if userCfg != nil && userCfg.Docker.MountSSH && homeDir != "" {
+		sshPath := filepath.Join(homeDir, ".ssh")
+		if _, statErr := os.Stat(sshPath); statErr == nil {
+			configOpts = append(configOpts, docker.WithSSH(sshPath))
+		}
+	}
+
+	if userCfg != nil && len(userCfg.Docker.VolumeIgnores) > 0 {
+		configOpts = append(configOpts, docker.WithVolumeIgnores(userCfg.Docker.VolumeIgnores))
+	}
+
+	if userCfg != nil && len(userCfg.Docker.ExtraVolumes) > 0 {
+		configOpts = append(configOpts, docker.WithExtraVolumes(userCfg.Docker.ExtraVolumes))
+	}
+
+	if userCfg != nil && len(userCfg.Docker.EnvironmentValues) > 0 {
+		configOpts = append(configOpts, docker.WithEnvironment(userCfg.Docker.EnvironmentValues))
+	}
+
+	// Multi-repo: mount each path under /workspace/<dirname> instead of single project mount.
+	if inst.MultiRepoEnabled {
+		configOpts = append(configOpts, docker.WithMultiRepoPaths(inst.AllProjectPaths()))
+	}
+
+	return docker.NewContainerConfig(inst.ProjectPath, configOpts...)
+}
+
+// buildExecCommand returns a shell-safe "docker exec ... bash -c toolCommand" string.
+// The two-layer bash -c architecture:
+//  1. Inner: docker exec ... bash -c <toolCommand> — runs the agent command inside
+//     the container, properly shell-quoted by ShellJoinArgs.
+//  2. Outer: wrapIgnoreSuspend wraps the entire string in bash -c with stty susp undef,
+//     which tmux then delivers via its implicit /bin/sh -c.
+//
+// This prevents shell injection: toolCommand (which may contain user-controlled text
+// like session IDs) is passed as a single quoted argument to bash -c inside the container.
+func buildExecCommand(ctr *docker.Container, userCfg *UserConfig, toolCommand string) string {
+	// Always collect terminal env vars; append user-configured env var names.
+	var userNames []string
+	if userCfg != nil {
+		userNames = userCfg.Docker.Environment
+	}
+	runtimeEnv := collectDockerEnvVars(userNames)
+
+	var prefix []string
+	if len(runtimeEnv) > 0 {
+		prefix = ctr.ExecPrefixWithEnv(runtimeEnv)
+	} else {
+		prefix = ctr.ExecPrefix()
+	}
+	// Wrap toolCommand in bash -c inside the container so it is passed as a single
+	// shell-quoted argument, preventing injection of shell metacharacters.
+	return docker.ShellJoinArgs(append(prefix, "bash", "-c", toolCommand))
+}
+
+// generateUUID generates a cryptographically random UUID v4 as a lowercase string.
+// Pre-generating in Go (instead of using shell $(uuidgen)) ensures the ID is immediately
+// known to the Instance and avoids Docker-sandbox failures where uuidgen is unavailable.
+func generateUUID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback: timestamp-based placeholder; unique but not a valid UUID v4.
+		return fmt.Sprintf("00000000-0000-4000-8000-%012x", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant bits (RFC 4122)
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// generateID generates a unique session ID
+// GenerateID creates a unique session identifier.
+func GenerateID() string {
+	return fmt.Sprintf("%s-%d", randomString(8), time.Now().Unix())
+}
+
+// randomString generates a random hex string of specified length
+func randomString(length int) string {
+	bytes := make([]byte, length/2)
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to timestamp-based ID
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(bytes)
+}
+
+// UpdateClaudeSessionsWithDedup clears duplicate Claude session IDs across instances.
+// The oldest session (by CreatedAt) keeps its ID, newer duplicates are cleared.
+// With tmux env being authoritative, duplicates shouldn't occur in normal use,
+// but we handle them defensively for loaded/migrated sessions.
+func UpdateClaudeSessionsWithDedup(instances []*Instance) {
+	// Work on a copy so callers don't observe order mutation as a side effect.
+	ordered := make([]*Instance, len(instances))
+	copy(ordered, instances)
+
+	// Sort instances by CreatedAt (older first get priority for keeping IDs).
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].CreatedAt.Before(ordered[j].CreatedAt)
+	})
+
+	// Find and clear duplicate IDs (keep only the oldest session's claim)
+	idOwner := make(map[string]*Instance)
+	for _, inst := range ordered {
+		if !IsClaudeCompatible(inst.Tool) || inst.ClaudeSessionID == "" {
+			continue
+		}
+		if owner, exists := idOwner[inst.ClaudeSessionID]; exists {
+			// Duplicate found! The older session (owner) keeps the ID
+			// Clear the newer session's ID (it will get a new one from tmux env)
+			inst.ClaudeSessionID = ""
+			inst.ClaudeDetectedAt = time.Time{}
+			_ = owner // Older session keeps its ID
+		} else {
+			idOwner[inst.ClaudeSessionID] = inst
+		}
+	}
+	// No re-detection step - tmux env is the authoritative source
+	// Sessions will get their IDs from UpdateClaudeSession() during normal status updates
+}
+
+// wrapIgnoreSuspend wraps cmd in a bash -c invocation that disables CTRL+Z
+// suspension before running the command. This is the sole bash -c layer
+// in the command chain — ensureSandboxContainer returns a plain docker exec
+// string, matching AoE's single-wrapper pattern.
+//
+// No `exec` is used: compound commands (&&, ||, pipes) must remain valid
+// when passed through Restart() resume paths. The extra shell process is
+// negligible overhead.
+func wrapIgnoreSuspend(cmd string) string {
+	// Escape single quotes for safe embedding inside a single-quoted string.
+	// Pattern: end quote, add double-quoted literal quote, restart quote.
+	// Example: it's -> it'"'"'s -> bash sees: it's.
+	escaped := strings.ReplaceAll(cmd, `'`, `'"'"'`)
+	return "bash -c 'stty susp undef; " + escaped + "'"
+}

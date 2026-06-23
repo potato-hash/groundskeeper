@@ -1,0 +1,1325 @@
+package session
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/potato-hash/groundskeeper/internal/logging"
+	"github.com/potato-hash/groundskeeper/internal/statedb"
+	"github.com/potato-hash/groundskeeper/internal/tmux"
+)
+
+var storageLog = logging.ForComponent(logging.CompStorage)
+
+// fixMalformedTildePath fixes paths where the UI textinput suggestion appended
+// instead of replacing, producing paths like "/some/path~/actual/path".
+// Returns the path starting from the last "~/" occurrence.
+func fixMalformedTildePath(path string) string {
+	if idx := strings.Index(path, "~/"); idx > 0 {
+		return path[idx:]
+	}
+	return path
+}
+
+// StorageData represents the JSON structure for persistence (kept for migration/compat)
+type StorageData struct {
+	Instances []*InstanceData `json:"instances"`
+	Groups    []*GroupData    `json:"groups,omitempty"` // Persist empty groups
+	UpdatedAt time.Time       `json:"updated_at"`
+}
+
+// InstanceData represents the serializable session data
+type InstanceData struct {
+	ID                  string    `json:"id"`
+	Title               string    `json:"title"`
+	ProjectPath         string    `json:"project_path"`
+	GroupPath           string    `json:"group_path"`
+	Order               int       `json:"order"`
+	ParentSessionID     string    `json:"parent_session_id,omitempty"`     // Links to parent session (sub-session support)
+	IsConductor         bool      `json:"is_conductor,omitempty"`          // True if this session is a conductor orchestrator
+	NoTransitionNotify  bool      `json:"no_transition_notify,omitempty"`  // Suppress transition event dispatch
+	TitleLocked         bool      `json:"title_locked,omitempty"`          // #697: block Claude session-name sync into Title
+	AutoName            bool      `json:"auto_name,omitempty"`             // marks Title as a machine-generated quick-session handle
+	AutoNameDescription string    `json:"auto_name_description,omitempty"` // last captured Claude task description for an AutoName session
+	Command             string    `json:"command"`
+	Wrapper             string    `json:"wrapper,omitempty"`
+	Tool                string    `json:"tool"`
+	Status              Status    `json:"status"`
+	CreatedAt           time.Time `json:"created_at"`
+	LastAccessedAt      time.Time `json:"last_accessed_at,omitempty"`
+	ArchivedAt          time.Time `json:"archived_at,omitempty"`
+	TmuxSession         string    `json:"tmux_session"`
+	// TmuxSocketName is the tmux -L selector captured at Instance creation
+	// (issue #687, v1.7.50). Empty for pre-v1.7.50 rows — those keep hitting
+	// the default server after upgrade.
+	TmuxSocketName string `json:"tmux_socket_name,omitempty"`
+
+	// Worktree support
+	WorktreePath     string `json:"worktree_path,omitempty"`
+	WorktreeRepoRoot string `json:"worktree_repo_root,omitempty"`
+	WorktreeBranch   string `json:"worktree_branch,omitempty"`
+
+	// Account is the per-session named account (issue #924). See
+	// Instance.Account for full semantics.
+	Account string `json:"account,omitempty"`
+
+	// Pin anchors the session to the top/bottom of its group (pin-sessions).
+	// Round-trips through the pin column. Empty = not pinned.
+	Pin PinMode `json:"pin,omitempty"`
+
+	// Claude session (persisted for resume after app restart)
+	ClaudeSessionID  string    `json:"claude_session_id,omitempty"`
+	ClaudeDetectedAt time.Time `json:"claude_detected_at,omitempty"`
+
+	// Gemini session (persisted for resume after app restart)
+	GeminiSessionID  string    `json:"gemini_session_id,omitempty"`
+	GeminiDetectedAt time.Time `json:"gemini_detected_at,omitempty"`
+	GeminiYoloMode   *bool     `json:"gemini_yolo_mode,omitempty"`
+	GeminiModel      string    `json:"gemini_model,omitempty"`
+
+	// OpenCode session (persisted for resume after app restart)
+	OpenCodeSessionID  string    `json:"opencode_session_id,omitempty"`
+	OpenCodeDetectedAt time.Time `json:"opencode_detected_at,omitempty"`
+
+	// Codex session (persisted for resume after app restart)
+	CodexSessionID  string    `json:"codex_session_id,omitempty"`
+	CodexDetectedAt time.Time `json:"codex_detected_at,omitempty"`
+
+	// Latest user input for context
+	LatestPrompt string `json:"latest_prompt,omitempty"`
+	Notes        string `json:"notes,omitempty"`
+
+	// Tool-specific launch options (generic for all tools: claude, codex, etc.)
+	ToolOptionsJSON json.RawMessage `json:"tool_options,omitempty"`
+
+	// MCP tracking (persisted for sync status display)
+	LoadedMCPNames []string `json:"loaded_mcp_names,omitempty"`
+
+	// Plugin channels (persisted for --channels CLI flag on Claude restart)
+	Channels []string `json:"channels,omitempty"`
+
+	// Plugins is the catalog-key list of Claude Code plugins enabled for
+	// this session (RFC docs/rfc/PLUGIN_ATTACH.md). Resolved through
+	// [plugins.<name>] in ~/.agent-deck/config.toml at spawn time and
+	// emitted as enabledPlugins[<id>] = true in the per-session scratch
+	// settings.json by EnsureWorkerScratchConfigDir.
+	Plugins []string `json:"plugins,omitempty"`
+
+	// PluginChannelLinkDisabled mirrors Instance.PluginChannelLinkDisabled
+	// (RFC §4.7) for state.db round-trip.
+	PluginChannelLinkDisabled bool `json:"plugin_channel_link_disabled,omitempty"`
+
+	// AutoLinkedChannels mirrors Instance.AutoLinkedChannels (RFC §4.7,
+	// fixes G4/C2). Persisted so reconciliation can clean up channels
+	// auto-added in a previous session even after the user toggles
+	// PluginChannelLinkDisabled or removes the plugin from the catalog.
+	AutoLinkedChannels []string `json:"auto_linked_channels,omitempty"`
+
+	// User-supplied claude CLI tokens, appended to every start/resume/fork
+	// command. Persisted so restarts preserve custom flags like --agent/--model.
+	ExtraArgs []string `json:"extra_args,omitempty"`
+
+	// Color is an optional per-session TUI row tint (issue #391). Empty = no tint.
+	Color string `json:"color,omitempty"`
+
+	// Sandbox support
+	Sandbox          *SandboxConfig `json:"sandbox,omitempty"`
+	SandboxContainer string         `json:"sandbox_container,omitempty"`
+
+	// SSH remote support
+	SSHHost       string `json:"ssh_host,omitempty"`
+	SSHRemotePath string `json:"ssh_remote_path,omitempty"`
+
+	// Multi-repo support
+	MultiRepoEnabled   bool                            `json:"multi_repo_enabled,omitempty"`
+	AdditionalPaths    []string                        `json:"additional_paths,omitempty"`
+	MultiRepoTempDir   string                          `json:"multi_repo_temp_dir,omitempty"`
+	MultiRepoWorktrees []statedb.MultiRepoWorktreeData `json:"multi_repo_worktrees,omitempty"`
+
+	// IdleTimeoutSecs mirrors Instance.IdleTimeoutSecs (#1143). 0 = disabled.
+	IdleTimeoutSecs int64 `json:"idle_timeout_secs,omitempty"`
+}
+
+// GroupData represents serializable group data
+type GroupData struct {
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Expanded    bool   `json:"expanded"`
+	Order       int    `json:"order"`
+	DefaultPath string `json:"default_path,omitempty"`
+	// MaxConcurrent caps simultaneous running sessions in this group (v1.9.1).
+	// 0 = unlimited (legacy default for groups predating this field); 1 = serial
+	// (default for newly-created groups); N>=2 = bounded parallelism.
+	MaxConcurrent int `json:"max_concurrent,omitempty"`
+}
+
+// Storage handles persistence of session data via SQLite.
+// Thread-safe with mutex protection for concurrent access within a single process.
+// Multiple processes share data via SQLite WAL mode.
+type Storage struct {
+	db      *statedb.StateDB
+	dbPath  string     // Path to state.db (for change detection)
+	profile string     // The profile this storage is for
+	mu      sync.Mutex // Protects operations during transition
+}
+
+// NewStorageWithProfile creates a storage instance for a specific profile.
+// If profile is empty, uses the effective profile (from env var or config).
+// Automatically runs migration from old layout if needed, then opens SQLite.
+// If sessions.json exists and state.db is empty, auto-migrates data.
+func NewStorageWithProfile(profile string) (*Storage, error) {
+	// Run profile layout migration if needed (safe to call multiple times)
+	needsMigration, err := NeedsMigration()
+	if err != nil {
+		storageLog.Warn("migration_check_failed", slog.String("error", err.Error()))
+	} else if needsMigration {
+		result, err := MigrateToProfiles()
+		if err != nil {
+			return nil, fmt.Errorf("migration failed: %w", err)
+		}
+		if result.Migrated {
+			storageLog.Info("migration_complete", slog.String("message", result.Message))
+		}
+	}
+
+	// Get effective profile
+	effectiveProfile := GetEffectiveProfile(profile)
+
+	// Get profile directory
+	profileDir, err := GetProfileDir(effectiveProfile)
+	if err != nil {
+		return nil, err
+	}
+
+	// Ensure directory exists with secure permissions (0700 = owner only)
+	if err := os.MkdirAll(profileDir, 0700); err != nil {
+		return nil, fmt.Errorf("failed to create storage directory: %w", err)
+	}
+
+	// Open SQLite database
+	dbPath := filepath.Join(profileDir, "state.db")
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open state database: %w", err)
+	}
+
+	// Create tables if they don't exist.
+	// Retry transient lock contention because daemon/background writers may hold
+	// short-lived transactions during startup.
+	if err := migrateStateDBWithRetry(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate state database: %w", err)
+	}
+
+	// Auto-migrate from sessions.json if state.db is empty
+	jsonPath := filepath.Join(profileDir, "sessions.json")
+	if _, jsonErr := os.Stat(jsonPath); jsonErr == nil {
+		empty, emptyErr := db.IsEmpty()
+		if emptyErr == nil && empty {
+			nInst, nGroups, migrateErr := statedb.MigrateFromJSON(jsonPath, db)
+			if migrateErr != nil {
+				storageLog.Warn("json_migration_failed", slog.String("error", migrateErr.Error()))
+				// Continue with empty database rather than failing completely
+			} else {
+				storageLog.Info("migrated_from_json",
+					slog.Int("instances", nInst),
+					slog.Int("groups", nGroups))
+				// Rename sessions.json to sessions.json.migrated as safety backup
+				migratedPath := jsonPath + ".migrated"
+				if renameErr := os.Rename(jsonPath, migratedPath); renameErr != nil {
+					storageLog.Warn("json_rename_failed", slog.String("error", renameErr.Error()))
+				}
+			}
+		}
+	}
+
+	return &Storage{
+		db:      db,
+		dbPath:  dbPath,
+		profile: effectiveProfile,
+	}, nil
+}
+
+// Profile returns the profile name this storage is using
+func (s *Storage) Profile() string {
+	return s.profile
+}
+
+// Path returns the database path this storage is using
+func (s *Storage) Path() string {
+	return s.dbPath
+}
+
+// GetDB returns the underlying StateDB for direct access (status writes, heartbeat, etc.)
+func (s *Storage) GetDB() *statedb.StateDB {
+	return s.db
+}
+
+// Close closes the underlying database connection.
+func (s *Storage) Close() error {
+	if s.db != nil {
+		return s.db.Close()
+	}
+	return nil
+}
+
+func migrateStateDBWithRetry(db *statedb.StateDB) error {
+	var lastErr error
+	for attempt := 0; attempt < 6; attempt++ {
+		if err := db.Migrate(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			if !isSQLiteBusyError(err) {
+				return err
+			}
+		}
+		time.Sleep(time.Duration(100*(attempt+1)) * time.Millisecond)
+	}
+	return lastErr
+}
+
+func isSQLiteBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "sqlite_busy") || strings.Contains(msg, "database is locked")
+}
+
+// Save persists instances to SQLite
+// DEPRECATED: Use SaveWithGroups to ensure groups are not lost
+func (s *Storage) Save(instances []*Instance) error {
+	return s.SaveWithGroups(instances, nil)
+}
+
+// SaveWithGroups persists instances and groups to SQLite.
+// Converts Instance objects to database rows, then batch-inserts in a transaction.
+func (s *Storage) SaveWithGroups(instances []*Instance, groupTree *GroupTree) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.db == nil {
+		return fmt.Errorf("storage database not initialized")
+	}
+
+	// Enforce one Claude conversation owner across persisted sessions.
+	// This protects CLI-only flows as well (the TUI already applies this in-memory).
+	UpdateClaudeSessionsWithDedup(instances)
+
+	// Convert instances to database rows
+	rows := make([]*statedb.InstanceRow, len(instances))
+	for i, inst := range instances {
+		row, err := instanceToRow(inst)
+		if err != nil {
+			return err
+		}
+		rows[i] = row
+	}
+
+	if err := s.db.SaveInstances(rows); err != nil {
+		return fmt.Errorf("failed to save instances: %w", err)
+	}
+
+	// Save groups (including empty ones)
+	if groupTree != nil {
+		groupRows := make([]*statedb.GroupRow, 0, len(groupTree.GroupList))
+		for _, g := range groupTree.GroupList {
+			groupRows = append(groupRows, &statedb.GroupRow{
+				Path:          g.Path,
+				Name:          g.Name,
+				Expanded:      g.Expanded,
+				Order:         g.Order,
+				DefaultPath:   g.DefaultPath,
+				MaxConcurrent: g.MaxConcurrent,
+			})
+		}
+		if err := s.db.SaveGroups(groupRows); err != nil {
+			return fmt.Errorf("failed to save groups: %w", err)
+		}
+	}
+
+	// Touch metadata for change detection by other instances
+	_ = s.db.Touch()
+
+	return nil
+}
+
+// DeleteInstance removes a single instance from the database by ID.
+// This ensures the row is immediately removed, preventing resurrection on reload.
+func (s *Storage) DeleteInstance(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.db == nil {
+		return fmt.Errorf("storage database not initialized")
+	}
+
+	if err := s.db.DeleteInstance(id); err != nil {
+		return fmt.Errorf("failed to delete instance %s: %w", id, err)
+	}
+
+	_ = s.db.Touch()
+	return nil
+}
+
+// WriteAutoNameDescription persists a single auto-named session's last captured
+// Claude task description via a targeted column update — no whole-row rewrite,
+// no full-table reconcile (see statedb.WriteAutoNameDescription). This lets the
+// archive path snapshot the display name without a full save.
+func (s *Storage) WriteAutoNameDescription(id, description string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.db == nil {
+		return fmt.Errorf("storage database not initialized")
+	}
+
+	if err := s.db.WriteAutoNameDescription(id, description); err != nil {
+		return fmt.Errorf("failed to persist auto-name description for %s: %w", id, err)
+	}
+
+	_ = s.db.Touch()
+	return nil
+}
+
+// InstanceExists returns true iff a row with the given id is currently
+// persisted. Used by RemoveSessionAndVerify to confirm a DELETE actually
+// landed (issue #909).
+func (s *Storage) InstanceExists(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.db == nil {
+		return false, fmt.Errorf("storage database not initialized")
+	}
+	return s.db.InstanceExists(id)
+}
+
+// ErrRemovalNotPersistent is returned by RemoveSessionAndVerify when, after
+// retries, the row is still observed in the database. The most likely cause
+// is a concurrent SaveInstances rewrite from another agent-deck process
+// that loaded the instances slice before this DELETE landed and re-inserted
+// the row via INSERT OR REPLACE.
+//
+// Surfacing this as a real error (rather than silently printing "✓ Removed")
+// is the user-facing half of the issue #909 fix.
+var ErrRemovalNotPersistent = errors.New("removal not persistent: row resurrected by concurrent writer")
+
+// rmVerifyAttempts and rmVerifyBackoff control the post-commit verify loop
+// inside RemoveSessionAndVerify. The defaults absorb the bounded window in
+// which a competing rewriter can resurrect the row (parallel xargs -P N).
+// Tests override via the package-private setters so they don't sit through
+// the production backoff schedule.
+var (
+	rmVerifyAttempts = 6
+	rmVerifyBackoff  = []time.Duration{
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		80 * time.Millisecond,
+		160 * time.Millisecond,
+		320 * time.Millisecond,
+	}
+)
+
+// RemoveSessionAndVerify performs a durable session removal.
+//
+// Flow (v1.9.1 issue #909 fix):
+//  1. DeleteInstance(id) — targeted DELETE, busy-retry inside statedb.
+//  2. SaveGroupsOnly(groupTree) — persist any group structure changes
+//     WITHOUT rewriting the instances table. Rewriting (SaveWithGroups)
+//     is the load-modify-write pattern that lets a concurrent rm
+//     resurrect this row via INSERT OR REPLACE; skipping it eliminates
+//     the structural race for our own write.
+//  3. Verify InstanceExists(id) is false. If still present (because some
+//     other process did a SaveInstances rewrite that included the row),
+//     re-issue the targeted DELETE and loop with linear backoff.
+//  4. After exhausting attempts, return ErrRemovalNotPersistent so the
+//     caller can fail loudly instead of printing "✓ Removed" on a row
+//     that's still there.
+//
+// remainingInstances is the post-removal session list, used only to
+// compute group sort_order / membership for SaveGroupsOnly. groupTree may
+// be nil if the caller doesn't care to persist groups.
+func (s *Storage) RemoveSessionAndVerify(id string, remainingInstances []*Instance, groupTree *GroupTree) error {
+	if err := s.DeleteInstance(id); err != nil {
+		return err
+	}
+	if groupTree != nil {
+		if err := s.SaveGroupsOnly(groupTree); err != nil {
+			return fmt.Errorf("failed to save groups during rm: %w", err)
+		}
+	}
+
+	for attempt := 0; attempt < rmVerifyAttempts; attempt++ {
+		exists, err := s.InstanceExists(id)
+		if err != nil {
+			return fmt.Errorf("verify rm of %s: %w", id, err)
+		}
+		if !exists {
+			return nil
+		}
+		if attempt < len(rmVerifyBackoff) {
+			time.Sleep(rmVerifyBackoff[attempt])
+		}
+		// Re-issue the targeted DELETE; this races against the resurrecting
+		// writer but eventually wins because every retry shrinks the window.
+		if err := s.DeleteInstance(id); err != nil {
+			return err
+		}
+	}
+
+	exists, err := s.InstanceExists(id)
+	if err != nil {
+		return fmt.Errorf("verify rm of %s: %w", id, err)
+	}
+	if exists {
+		return fmt.Errorf("%w: %s", ErrRemovalNotPersistent, id)
+	}
+	return nil
+}
+
+// ErrInsertNotPersistent is returned by InsertSessionAndVerify when, after
+// retries, the row is still missing from the database. The most likely cause
+// is a concurrent SaveInstances rewrite from another agent-deck process
+// that loaded the instances slice before this INSERT landed and then
+// DELETE'd the row via the `DELETE FROM instances WHERE id NOT IN (...)`
+// step inside SaveInstances.
+//
+// Surfacing this as a real error (rather than silently returning success)
+// is the user-facing half of the issue #1031 fix.
+var ErrInsertNotPersistent = errors.New("insert not persistent: row dropped by concurrent writer")
+
+// insertVerifyAttempts and insertVerifyBackoff control the post-commit
+// verify loop inside InsertSessionAndVerify. The defaults absorb the
+// bounded window in which a competing rewriter can DELETE this row
+// before its own SaveInstances commits (parallel xargs -P N launches).
+// Tests override via the package-private setters so they don't sit
+// through the production backoff schedule.
+var (
+	insertVerifyAttempts = 6
+	insertVerifyBackoff  = []time.Duration{
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		80 * time.Millisecond,
+		160 * time.Millisecond,
+		320 * time.Millisecond,
+	}
+)
+
+// InsertSessionAndVerify performs a durable single-row session insert.
+//
+// Flow (v1.9.x issue #1031 fix, parallel to #909's RemoveSessionAndVerify):
+//
+//  1. SaveInstance(row) — targeted INSERT OR REPLACE on the single new
+//     row only, NOT a full-table rewrite. This sidesteps the
+//     load-modify-write race where a sibling launch's
+//     `DELETE FROM instances WHERE id NOT IN (...)` inside
+//     SaveInstances would silently delete this row.
+//  2. SaveGroupsOnly(groupTree) — persist any group structure changes
+//     WITHOUT rewriting the instances table. Rewriting (SaveWithGroups)
+//     is the load-modify-write pattern that lets a concurrent launch
+//     drop this row; skipping it eliminates the structural race for
+//     our own write.
+//  3. Verify InstanceExists(id) is true. If not (some other process
+//     issued a SaveInstances rewrite that excluded this row because it
+//     loaded the instances slice pre-INSERT), re-issue the targeted
+//     INSERT and loop with linear backoff.
+//  4. After exhausting attempts, return ErrInsertNotPersistent so the
+//     caller can fail loudly instead of returning success on a row
+//     that's not actually there.
+//
+// instances is the post-insert session list, used only to compute group
+// sort_order / membership for SaveGroupsOnly. groupTree may be nil if
+// the caller doesn't care to persist groups.
+func (s *Storage) InsertSessionAndVerify(newInstance *Instance, groupTree *GroupTree) error {
+	if newInstance == nil {
+		return fmt.Errorf("nil instance")
+	}
+	row, err := instanceToRow(newInstance)
+	if err != nil {
+		return err
+	}
+
+	if err := s.saveSingleInstance(row); err != nil {
+		return err
+	}
+
+	if groupTree != nil {
+		if err := s.SaveGroupsOnly(groupTree); err != nil {
+			return fmt.Errorf("failed to save groups during insert: %w", err)
+		}
+	}
+
+	for attempt := 0; attempt < insertVerifyAttempts; attempt++ {
+		exists, err := s.InstanceExists(newInstance.ID)
+		if err != nil {
+			return fmt.Errorf("verify insert of %s: %w", newInstance.ID, err)
+		}
+		if exists {
+			return nil
+		}
+		if attempt < len(insertVerifyBackoff) {
+			time.Sleep(insertVerifyBackoff[attempt])
+		}
+		// Re-issue the targeted INSERT; races against the concurrent
+		// rewriter but eventually wins because every retry shrinks the
+		// window.
+		if err := s.saveSingleInstance(row); err != nil {
+			return err
+		}
+	}
+
+	exists, err := s.InstanceExists(newInstance.ID)
+	if err != nil {
+		return fmt.Errorf("verify insert of %s: %w", newInstance.ID, err)
+	}
+	if exists {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ErrInsertNotPersistent, newInstance.ID)
+}
+
+// saveSingleInstance writes one row via the targeted SaveInstance path
+// (single-row INSERT OR REPLACE — no DELETE-NOT-IN sweep). Wraps the
+// statedb call in the storage mutex and the nil-db guard so callers
+// stay symmetric with DeleteInstance.
+func (s *Storage) saveSingleInstance(row *statedb.InstanceRow) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return fmt.Errorf("storage database not initialized")
+	}
+	if err := s.db.SaveInstance(row); err != nil {
+		return fmt.Errorf("failed to save instance %s: %w", row.ID, err)
+	}
+	_ = s.db.Touch()
+	return nil
+}
+
+// PersistRevivedInstances durably persists the status heal from a revive sweep
+// WITHOUT the full-table rewrite that SaveWithGroups performs and WITHOUT a
+// full-row INSERT OR REPLACE.
+//
+// Why this exists (two races, two guarantees):
+//
+//  1. Lost-update vs. concurrent `add`. `session revive` is a read-process-write
+//     cycle: it loads the full instances snapshot, classifies/heals each one
+//     (flipping StatusError → StatusRunning), then persists. If it persisted via
+//     SaveWithGroups → SaveInstances, that path's `DELETE FROM instances WHERE
+//     id NOT IN (<snapshot ids>)` sweep would delete any session a concurrent
+//     process (TUI/CLI `add`) inserted AFTER revive loaded its snapshot — the
+//     row is silently lost because it was never in revive's stale id set. The
+//     targeted path below issues NO sweep, so rows revive never saw are never
+//     touched.
+//
+//  2. Clobber vs. concurrent edit of a row being revived. A full-row write
+//     (INSERT OR REPLACE / saveSingleInstance) would push EVERY column from
+//     revive's stale in-memory snapshot, overwriting any field (title, group,
+//     tool_data, last_accessed, claude_session_id, …) a concurrent process
+//     edited between revive's load and its save. Revive owns exactly ONE field:
+//     Instance.Status (see reviver.go defaultReviveAction — it mutates nothing
+//     else). So this method persists ONLY status, via the targeted
+//     `UPDATE instances SET status = ? WHERE id = ?` batch
+//     (PersistInstanceStatusesTx), inside a single transaction for atomicity.
+//
+// Callers should pass only the instances they actually revived; rows whose id
+// is absent are simply not in the batch and stay untouched.
+func (s *Storage) PersistRevivedInstances(instances []*Instance) error {
+	updates := make([]statedb.InstanceStatusUpdate, 0, len(instances))
+	for _, inst := range instances {
+		if inst == nil {
+			continue
+		}
+		updates = append(updates, statedb.InstanceStatusUpdate{
+			ID:     inst.ID,
+			Status: string(inst.Status),
+		})
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return fmt.Errorf("storage database not initialized")
+	}
+	return s.db.PersistInstanceStatusesTx(updates)
+}
+
+// instanceToRow converts a session.Instance into the statedb row shape.
+// Shared by SaveWithGroups (bulk path) and InsertSessionAndVerify
+// (targeted single-row path) so the marshal/normalize logic stays in
+// one place.
+func instanceToRow(inst *Instance) (*statedb.InstanceRow, error) {
+	// Issue #666: belt-and-braces guard. Empty GroupPath should never
+	// reach SQLite — the load-time fallback at convertToInstances already
+	// covers legacy rows, but a regression in a write path (fork, move,
+	// direct mutation) could still slip through. Normalize here so the
+	// next load doesn't need to defend.
+	if inst.GroupPath == "" {
+		storageLog.Warn(
+			"empty_group_path_normalized_on_save",
+			slog.String("instance_id", inst.ID),
+			slog.String("title", inst.Title),
+			slog.String("project_path", inst.ProjectPath),
+			slog.String("normalized_to", DefaultGroupPath),
+		)
+		inst.GroupPath = DefaultGroupPath
+	}
+	tmuxName := ""
+	if inst.tmuxSession != nil {
+		tmuxName = inst.tmuxSession.Name
+	}
+	var sandboxJSON json.RawMessage
+	if inst.Sandbox != nil {
+		data, err := json.Marshal(inst.Sandbox)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal sandbox for %s: %w", inst.ID, err)
+		}
+		sandboxJSON = data
+	}
+
+	var mrWorktrees []statedb.MultiRepoWorktreeData
+	for _, wt := range inst.MultiRepoWorktrees {
+		mrWorktrees = append(mrWorktrees, statedb.MultiRepoWorktreeData{
+			OriginalPath: wt.OriginalPath,
+			WorktreePath: wt.WorktreePath,
+			RepoRoot:     wt.RepoRoot,
+			Branch:       wt.Branch,
+		})
+	}
+	toolData := statedb.MarshalToolData(
+		inst.ClaudeSessionID, inst.ClaudeDetectedAt,
+		inst.GeminiSessionID, inst.GeminiDetectedAt,
+		inst.GeminiYoloMode, inst.GeminiModel,
+		inst.OpenCodeSessionID, inst.OpenCodeDetectedAt,
+		inst.CodexSessionID, inst.CodexDetectedAt,
+		inst.LatestPrompt, inst.Notes, inst.LoadedMCPNames,
+		inst.ToolOptionsJSON,
+		sandboxJSON, inst.SandboxContainer,
+		inst.SSHHost, inst.SSHRemotePath,
+		inst.MultiRepoEnabled, inst.AdditionalPaths,
+		inst.MultiRepoTempDir, mrWorktrees,
+		inst.Channels,
+		inst.ExtraArgs,
+		inst.Plugins,                   // RFC docs/rfc/PLUGIN_ATTACH.md
+		inst.PluginChannelLinkDisabled, // RFC §4.7
+		inst.AutoLinkedChannels,        // RFC §4.7 (G4/C2 fix)
+		inst.Color,                     // issue #391
+	)
+	// #1143: idle_timeout_secs lives in the tool_data extras zone — outside
+	// the positional MarshalToolData signature so legacy binaries that don't
+	// know the key preserve it via MergeToolDataExtras.
+	toolData = WriteIdleTimeoutSecsToToolData(toolData, inst.IdleTimeoutSecs)
+
+	return &statedb.InstanceRow{
+		ID:                  inst.ID,
+		Title:               inst.Title,
+		ProjectPath:         inst.ProjectPath,
+		GroupPath:           inst.GroupPath,
+		Order:               inst.Order,
+		Command:             inst.Command,
+		Wrapper:             inst.Wrapper,
+		Tool:                inst.Tool,
+		Status:              string(inst.Status),
+		TmuxSession:         tmuxName,
+		TmuxSocketName:      inst.TmuxSocketName,
+		CreatedAt:           inst.CreatedAt,
+		LastAccessed:        inst.LastAccessedAt,
+		ParentSessionID:     inst.ParentSessionID,
+		IsConductor:         inst.IsConductor,
+		NoTransitionNotify:  inst.NoTransitionNotify,
+		TitleLocked:         inst.TitleLocked,
+		AutoName:            inst.GetAutoName(),
+		AutoNameDescription: inst.GetAutoNameDescription(),
+		WorktreePath:        inst.WorktreePath,
+		WorktreeRepo:        inst.WorktreeRepoRoot,
+		WorktreeBranch:      inst.WorktreeBranch,
+		Account:             inst.Account,
+		ArchivedAt:          inst.ArchivedAt,
+		Pin:                 string(inst.Pin),
+		ToolData:            toolData,
+	}, nil
+}
+
+// SaveGroupsOnly persists only the groups table to SQLite.
+// This is a lightweight save for visual state like group expanded/collapsed.
+// It does NOT call Touch() to avoid triggering StorageWatcher reloads on other instances.
+func (s *Storage) SaveGroupsOnly(groupTree *GroupTree) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.db == nil {
+		return fmt.Errorf("storage database not initialized")
+	}
+
+	if groupTree == nil {
+		return nil
+	}
+
+	groupRows := make([]*statedb.GroupRow, 0, len(groupTree.GroupList))
+	for _, g := range groupTree.GroupList {
+		groupRows = append(groupRows, &statedb.GroupRow{
+			Path:          g.Path,
+			Name:          g.Name,
+			Expanded:      g.Expanded,
+			Order:         g.Order,
+			DefaultPath:   g.DefaultPath,
+			MaxConcurrent: g.MaxConcurrent,
+		})
+	}
+
+	if err := s.db.SaveGroups(groupRows); err != nil {
+		return fmt.Errorf("failed to save groups: %w", err)
+	}
+
+	return nil
+}
+
+// Load reads instances from SQLite
+func (s *Storage) Load() ([]*Instance, error) {
+	instances, _, err := s.LoadWithGroups()
+	return instances, err
+}
+
+// LoadLite reads session data from SQLite without tmux reconnection.
+// This is a fast path for operations that only need to read session metadata
+// (e.g., finding current session by tmux name) without initializing full Instance objects.
+// Returns raw InstanceData and GroupData without any subprocess calls.
+func (s *Storage) LoadLite() ([]*InstanceData, []*GroupData, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.db == nil {
+		return []*InstanceData{}, nil, nil
+	}
+
+	// Load from SQLite
+	dbRows, err := s.db.LoadInstances()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load instances: %w", err)
+	}
+
+	dbGroups, err := s.db.LoadGroups()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load groups: %w", err)
+	}
+
+	// Convert to InstanceData format (for backward compat with CLI commands)
+	instances := make([]*InstanceData, len(dbRows))
+	for i, r := range dbRows {
+		claudeSID, claudeAt,
+			geminiSID, geminiAt,
+			geminiYolo, geminiModel,
+			opencodeSID, opencodeAt,
+			codexSID, codexAt,
+			latestPrompt, notes, loadedMCPs,
+			toolOpts,
+			sandboxJSON, sandboxContainer,
+			sshHost2, sshRemotePath2,
+			mrEnabled2, addPaths2,
+			mrTempDir2, mrWorktrees2,
+			channels2,
+			extraArgs2,
+			plugins2,
+			pluginChannelLinkDisabled2,
+			autoLinkedChannels2,
+			color2 := statedb.UnmarshalToolData(r.ToolData)
+		sandboxCfg := decodeSandboxConfig(sandboxJSON)
+
+		instances[i] = &InstanceData{
+			ID:                        r.ID,
+			Title:                     r.Title,
+			ProjectPath:               r.ProjectPath,
+			GroupPath:                 r.GroupPath,
+			Order:                     r.Order,
+			ParentSessionID:           r.ParentSessionID,
+			IsConductor:               r.IsConductor,
+			NoTransitionNotify:        r.NoTransitionNotify,
+			TitleLocked:               r.TitleLocked,
+			AutoName:                  r.AutoName,
+			AutoNameDescription:       r.AutoNameDescription,
+			Command:                   r.Command,
+			Wrapper:                   r.Wrapper,
+			Tool:                      r.Tool,
+			Status:                    Status(r.Status),
+			CreatedAt:                 r.CreatedAt,
+			LastAccessedAt:            r.LastAccessed,
+			ArchivedAt:                r.ArchivedAt,
+			TmuxSession:               r.TmuxSession,
+			TmuxSocketName:            r.TmuxSocketName,
+			WorktreePath:              r.WorktreePath,
+			WorktreeRepoRoot:          r.WorktreeRepo,
+			WorktreeBranch:            r.WorktreeBranch,
+			Account:                   r.Account,
+			Pin:                       PinMode(r.Pin),
+			ClaudeSessionID:           claudeSID,
+			ClaudeDetectedAt:          claudeAt,
+			GeminiSessionID:           geminiSID,
+			GeminiDetectedAt:          geminiAt,
+			GeminiYoloMode:            geminiYolo,
+			GeminiModel:               geminiModel,
+			OpenCodeSessionID:         opencodeSID,
+			OpenCodeDetectedAt:        opencodeAt,
+			CodexSessionID:            codexSID,
+			CodexDetectedAt:           codexAt,
+			LatestPrompt:              latestPrompt,
+			Notes:                     notes,
+			ToolOptionsJSON:           toolOpts,
+			LoadedMCPNames:            loadedMCPs,
+			Sandbox:                   sandboxCfg,
+			SandboxContainer:          sandboxContainer,
+			SSHHost:                   sshHost2,
+			SSHRemotePath:             sshRemotePath2,
+			MultiRepoEnabled:          mrEnabled2,
+			AdditionalPaths:           addPaths2,
+			MultiRepoTempDir:          mrTempDir2,
+			MultiRepoWorktrees:        mrWorktrees2,
+			Channels:                  channels2,
+			ExtraArgs:                 extraArgs2,
+			Plugins:                   plugins2,
+			PluginChannelLinkDisabled: pluginChannelLinkDisabled2,
+			AutoLinkedChannels:        autoLinkedChannels2,
+			Color:                     color2,
+			IdleTimeoutSecs:           ReadIdleTimeoutSecsFromToolData(r.ToolData),
+		}
+	}
+
+	// Convert groups
+	groups := make([]*GroupData, len(dbGroups))
+	for i, g := range dbGroups {
+		groups[i] = &GroupData{
+			Path:          g.Path,
+			Name:          g.Name,
+			Expanded:      g.Expanded,
+			Order:         g.Order,
+			DefaultPath:   g.DefaultPath,
+			MaxConcurrent: g.MaxConcurrent,
+		}
+	}
+
+	return instances, groups, nil
+}
+
+// LoadWithGroups reads instances and groups from SQLite, reconnects tmux sessions.
+func (s *Storage) LoadWithGroups() ([]*Instance, []*GroupData, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.db == nil {
+		storageLog.Debug("load_db_not_initialized", slog.String("profile", s.profile))
+		return []*Instance{}, nil, nil
+	}
+
+	// Load from SQLite
+	dbRows, err := s.db.LoadInstances()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load instances: %w", err)
+	}
+
+	dbGroups, err := s.db.LoadGroups()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load groups: %w", err)
+	}
+
+	// Convert to InstanceData for the existing convertToInstances pipeline
+	data := &StorageData{
+		Instances: make([]*InstanceData, len(dbRows)),
+	}
+	for i, r := range dbRows {
+		claudeSID, claudeAt,
+			geminiSID, geminiAt,
+			geminiYolo, geminiModel,
+			opencodeSID, opencodeAt,
+			codexSID, codexAt,
+			latestPrompt, notes, loadedMCPs,
+			toolOpts,
+			sandboxJSON, sandboxContainer,
+			sshHost, sshRemotePath,
+			mrEnabled, addPaths,
+			mrTempDir, mrWorktrees,
+			channels,
+			extraArgs,
+			plugins,
+			pluginChannelLinkDisabled,
+			autoLinkedChannels,
+			color := statedb.UnmarshalToolData(r.ToolData)
+		sandboxCfg := decodeSandboxConfig(sandboxJSON)
+
+		data.Instances[i] = &InstanceData{
+			ID:                        r.ID,
+			Title:                     r.Title,
+			ProjectPath:               r.ProjectPath,
+			GroupPath:                 r.GroupPath,
+			Order:                     r.Order,
+			ParentSessionID:           r.ParentSessionID,
+			IsConductor:               r.IsConductor,
+			NoTransitionNotify:        r.NoTransitionNotify,
+			TitleLocked:               r.TitleLocked,
+			AutoName:                  r.AutoName,
+			AutoNameDescription:       r.AutoNameDescription,
+			Command:                   r.Command,
+			Wrapper:                   r.Wrapper,
+			Tool:                      r.Tool,
+			Status:                    Status(r.Status),
+			CreatedAt:                 r.CreatedAt,
+			LastAccessedAt:            r.LastAccessed,
+			ArchivedAt:                r.ArchivedAt,
+			TmuxSession:               r.TmuxSession,
+			TmuxSocketName:            r.TmuxSocketName,
+			WorktreePath:              r.WorktreePath,
+			WorktreeRepoRoot:          r.WorktreeRepo,
+			WorktreeBranch:            r.WorktreeBranch,
+			Account:                   r.Account,
+			Pin:                       PinMode(r.Pin),
+			ClaudeSessionID:           claudeSID,
+			ClaudeDetectedAt:          claudeAt,
+			GeminiSessionID:           geminiSID,
+			GeminiDetectedAt:          geminiAt,
+			GeminiYoloMode:            geminiYolo,
+			GeminiModel:               geminiModel,
+			OpenCodeSessionID:         opencodeSID,
+			OpenCodeDetectedAt:        opencodeAt,
+			CodexSessionID:            codexSID,
+			CodexDetectedAt:           codexAt,
+			LatestPrompt:              latestPrompt,
+			Notes:                     notes,
+			ToolOptionsJSON:           toolOpts,
+			LoadedMCPNames:            loadedMCPs,
+			Sandbox:                   sandboxCfg,
+			SandboxContainer:          sandboxContainer,
+			SSHHost:                   sshHost,
+			SSHRemotePath:             sshRemotePath,
+			MultiRepoEnabled:          mrEnabled,
+			AdditionalPaths:           addPaths,
+			MultiRepoTempDir:          mrTempDir,
+			MultiRepoWorktrees:        mrWorktrees,
+			Channels:                  channels,
+			ExtraArgs:                 extraArgs,
+			Plugins:                   plugins,
+			PluginChannelLinkDisabled: pluginChannelLinkDisabled,
+			AutoLinkedChannels:        autoLinkedChannels,
+			Color:                     color,
+			IdleTimeoutSecs:           ReadIdleTimeoutSecsFromToolData(r.ToolData),
+		}
+	}
+
+	// Convert groups
+	data.Groups = make([]*GroupData, len(dbGroups))
+	for i, g := range dbGroups {
+		data.Groups[i] = &GroupData{
+			Path:          g.Path,
+			Name:          g.Name,
+			Expanded:      g.Expanded,
+			Order:         g.Order,
+			DefaultPath:   g.DefaultPath,
+			MaxConcurrent: g.MaxConcurrent,
+		}
+	}
+
+	return s.convertToInstances(data)
+}
+
+// SaveRecentSession captures a deleted session's config for quick re-creation.
+func (s *Storage) SaveRecentSession(inst *Instance) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.db == nil {
+		return fmt.Errorf("storage database not initialized")
+	}
+
+	row := &statedb.RecentSessionRow{
+		Title:          inst.Title,
+		ProjectPath:    inst.ProjectPath,
+		GroupPath:      inst.GroupPath,
+		Command:        inst.Command,
+		Wrapper:        inst.Wrapper,
+		Tool:           inst.Tool,
+		ToolOptions:    inst.ToolOptionsJSON,
+		SandboxEnabled: inst.Sandbox != nil,
+		GeminiYoloMode: inst.GeminiYoloMode,
+	}
+
+	return s.db.SaveRecentSession(row)
+}
+
+// LoadRecentSessions returns recently deleted session configs for the picker.
+func (s *Storage) LoadRecentSessions() ([]*statedb.RecentSessionRow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.db == nil {
+		return nil, fmt.Errorf("storage database not initialized")
+	}
+
+	return s.db.LoadRecentSessions()
+}
+
+// GetDBPathForProfile returns the path to the state.db file for a specific profile.
+func GetDBPathForProfile(profile string) (string, error) {
+	if profile == "" {
+		profile = DefaultProfile
+	}
+
+	profileDir, err := GetProfileDir(profile)
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(profileDir, "state.db"), nil
+}
+
+// GetUpdatedAt returns the last modification timestamp from SQLite metadata.
+func (s *Storage) GetUpdatedAt() (time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.db == nil {
+		return time.Time{}, fmt.Errorf("database not initialized")
+	}
+
+	ts, err := s.db.LastModified()
+	if err != nil {
+		return time.Time{}, err
+	}
+	if ts == 0 {
+		return time.Time{}, nil
+	}
+	return time.Unix(0, ts), nil
+}
+
+// GetFileMtime returns the filesystem modification time of the database file.
+// This is useful for detecting external changes when polling.
+func (s *Storage) GetFileMtime() (time.Time, error) {
+	info, err := os.Stat(s.dbPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return time.Time{}, nil
+		}
+		return time.Time{}, err
+	}
+	return info.ModTime(), nil
+}
+
+// convertToInstances converts StorageData to Instance slice
+func (s *Storage) convertToInstances(data *StorageData) ([]*Instance, []*GroupData, error) {
+
+	// ═══════════════════════════════════════════════════════════════════
+	// MIGRATION: Convert old "My Sessions" paths to normalized "my-sessions"
+	// Old versions used DefaultGroupName ("My Sessions") as both name AND path.
+	// This caused the group to be undeletable since path matched the protection check.
+	// Now we use DefaultGroupPath ("my-sessions") for paths, keeping name as display.
+	// ═══════════════════════════════════════════════════════════════════
+	migratedGroups := false
+	for i, g := range data.Groups {
+		if g.Path == DefaultGroupName {
+			data.Groups[i].Path = DefaultGroupPath
+			migratedGroups = true
+			storageLog.Info("group_path_migrated", slog.String("old_path", DefaultGroupName), slog.String("new_path", DefaultGroupPath))
+		}
+	}
+	for i, inst := range data.Instances {
+		if inst.GroupPath == DefaultGroupName {
+			data.Instances[i].GroupPath = DefaultGroupPath
+			migratedGroups = true
+		}
+	}
+	if migratedGroups {
+		storageLog.Info("default_group_paths_migrated", slog.String("old_name", DefaultGroupName), slog.String("new_path", DefaultGroupPath))
+	}
+
+	// Convert to instances
+	instances := make([]*Instance, len(data.Instances))
+	for i, instData := range data.Instances {
+		// PERFORMANCE: Use lazy reconnect to defer tmux configuration until first attach
+		// This reduces TUI startup from ~6s to ~2s by avoiding subprocess overhead.
+		// Configuration (EnableMouseMode, ConfigureStatusBar) runs
+		// on-demand via EnsureConfigured() when user interacts with the session.
+		var tmuxSess *tmux.Session
+		if instData.TmuxSession != "" {
+			// Convert Status enum to string for tmux package
+			// This restores the exact status across app restarts
+			previousStatus := statusToString(instData.Status)
+			tmuxSess = tmux.ReconnectSessionLazy(
+				instData.TmuxSession,
+				instData.Title,
+				instData.ProjectPath,
+				instData.Command,
+				previousStatus,
+			)
+			// Seed the stored socket so every method call on this Session
+			// (Exists, SendKeys, Kill, CapturePane, ConfigureStatusBar, etc.)
+			// targets the same tmux server the session was originally created
+			// on. Without this the reviver / TUI would probe the default
+			// server for a session that lives on an isolated socket and
+			// report it as dead (issue #687, v1.7.50).
+			tmuxSess.SocketName = instData.TmuxSocketName
+			// Issue #663: for multi-repo sessions ProjectPath is a symlink
+			// inside MultiRepoTempDir (see home.go:7255-7364), so the
+			// restart pane must cwd into the parent dir — not the symlink
+			// target (an individual source repo). Matches the creation-
+			// time assignment at home.go:7364. Without this, Claude's
+			// JSONL is written under a different encoded-path key and the
+			// next Start() silently mints a fresh session instead of
+			// resuming the prior conversation.
+			if instData.MultiRepoEnabled && instData.MultiRepoTempDir != "" {
+				tmuxSess.WorkDir = instData.MultiRepoTempDir
+			}
+			// Pass instance ID for activity hooks (enables real-time status updates)
+			tmuxSess.InstanceID = instData.ID
+			tmuxSess.SetInjectStatusLine(GetTmuxSettings().GetInjectStatusLine())
+			tmuxSess.SetMouse(GetTmuxSettings().GetMouse())
+			tmuxSess.SetClearOnRestart(GetTmuxSettings().ClearOnRestart)
+			tmuxSess.SetTerminalChromeEnabled(GetTerminalSettings().GetITermBadge())
+			// Note: EnableMouseMode and ConfigureStatusBar are deferred to EnsureConfigured()
+			// Called automatically when user attaches to session
+		}
+
+		// Issue #666: a row with an empty group_path is the symptom of either
+		// (a) a legacy row from pre-GroupPath code or (b) a future regression
+		// in a write path. The old behavior re-derived via
+		// extractGroupPath(ProjectPath), which silently re-parented sessions
+		// to path-derived groups like "tmp" or "home" — the exact user-visible
+		// symptom of #666 ("session disappeared from its assigned group").
+		// The safe contract: route survivors to DefaultGroupPath and log, so
+		// the user sees the group in a known, recoverable place.
+		groupPath := instData.GroupPath
+		if groupPath == "" {
+			storageLog.Warn(
+				"empty_group_path_fallback",
+				slog.String("instance_id", instData.ID),
+				slog.String("title", instData.Title),
+				slog.String("project_path", instData.ProjectPath),
+				slog.String("fallback_group", DefaultGroupPath),
+			)
+			groupPath = DefaultGroupPath
+		}
+
+		// Expand tilde in project path (handles paths like ~/project saved from UI)
+		// fixMalformedTildePath handles the case where the textinput suggestion
+		// appended instead of replacing, producing "/some/path~/actual/path".
+		projectPath := ExpandPath(fixMalformedTildePath(instData.ProjectPath))
+
+		inst := &Instance{
+			ID:                        instData.ID,
+			Title:                     instData.Title,
+			ProjectPath:               projectPath,
+			GroupPath:                 groupPath,
+			Order:                     instData.Order,
+			ParentSessionID:           instData.ParentSessionID,
+			IsConductor:               instData.IsConductor,
+			NoTransitionNotify:        instData.NoTransitionNotify,
+			TitleLocked:               instData.TitleLocked,
+			AutoName:                  instData.AutoName,
+			autoNameDescription:       instData.AutoNameDescription,
+			Command:                   instData.Command,
+			Wrapper:                   instData.Wrapper,
+			Tool:                      instData.Tool,
+			Status:                    instData.Status,
+			CreatedAt:                 instData.CreatedAt,
+			LastAccessedAt:            instData.LastAccessedAt,
+			ArchivedAt:                instData.ArchivedAt,
+			WorktreePath:              instData.WorktreePath,
+			WorktreeRepoRoot:          instData.WorktreeRepoRoot,
+			WorktreeBranch:            instData.WorktreeBranch,
+			Account:                   instData.Account,
+			Pin:                       instData.Pin,
+			TmuxSocketName:            instData.TmuxSocketName,
+			ClaudeSessionID:           instData.ClaudeSessionID,
+			ClaudeDetectedAt:          instData.ClaudeDetectedAt,
+			GeminiSessionID:           instData.GeminiSessionID,
+			GeminiDetectedAt:          instData.GeminiDetectedAt,
+			GeminiYoloMode:            instData.GeminiYoloMode,
+			GeminiModel:               instData.GeminiModel,
+			OpenCodeSessionID:         instData.OpenCodeSessionID,
+			OpenCodeDetectedAt:        instData.OpenCodeDetectedAt,
+			CodexSessionID:            instData.CodexSessionID,
+			CodexDetectedAt:           instData.CodexDetectedAt,
+			ToolOptionsJSON:           instData.ToolOptionsJSON,
+			LatestPrompt:              instData.LatestPrompt,
+			Notes:                     instData.Notes,
+			LoadedMCPNames:            instData.LoadedMCPNames,
+			Channels:                  instData.Channels,
+			ExtraArgs:                 instData.ExtraArgs,
+			Plugins:                   instData.Plugins,
+			PluginChannelLinkDisabled: instData.PluginChannelLinkDisabled,
+			AutoLinkedChannels:        instData.AutoLinkedChannels,
+			Color:                     instData.Color,
+			IdleTimeoutSecs:           instData.IdleTimeoutSecs,
+			Sandbox:                   instData.Sandbox,
+			SandboxContainer:          instData.SandboxContainer,
+			SSHHost:                   instData.SSHHost,
+			SSHRemotePath:             instData.SSHRemotePath,
+			MultiRepoEnabled:          instData.MultiRepoEnabled,
+			AdditionalPaths:           instData.AdditionalPaths,
+			MultiRepoTempDir:          instData.MultiRepoTempDir,
+			tmuxSession:               tmuxSess,
+		}
+		// Convert multi-repo worktree data
+		for _, wt := range instData.MultiRepoWorktrees {
+			inst.MultiRepoWorktrees = append(inst.MultiRepoWorktrees, MultiRepoWorktree{
+				OriginalPath: wt.OriginalPath,
+				WorktreePath: wt.WorktreePath,
+				RepoRoot:     wt.RepoRoot,
+				Branch:       wt.Branch,
+			})
+		}
+
+		// Set tmux option overrides so EnsureConfigured/ConfigureStatusBar
+		// respects user-defined keys (e.g. status = "2" for multi-line bar).
+		if tmuxSess != nil {
+			tmuxSess.OptionOverrides = inst.buildTmuxOptionOverrides()
+		}
+
+		// PERFORMANCE: Skip UpdateStatus at load time - use cached status from SQLite
+		// The background worker will update status on first tick.
+		// This saves one subprocess call per session at startup.
+
+		// PERFORMANCE: Skip session ID sync at load time
+		// Session ID syncing (SetEnvironment calls) will happen on EnsureConfigured()
+		// or when the session is restarted. This saves 0-4 subprocess calls per session.
+
+		instances[i] = inst
+	}
+
+	return instances, data.Groups, nil
+}
+
+// statusToString converts a Status enum to the string expected by tmux.ReconnectSessionWithStatus
+func statusToString(s Status) string {
+	switch s {
+	case StatusRunning:
+		return "active"
+	case StatusWaiting:
+		return "waiting"
+	case StatusIdle:
+		return "idle"
+	case StatusError:
+		return "waiting" // Treat errors as needing attention
+	case StatusStopped:
+		return "inactive" // Stopped sessions are intentionally inactive
+	default:
+		return "waiting"
+	}
+}
+
+func decodeSandboxConfig(data json.RawMessage) *SandboxConfig {
+	if len(data) == 0 {
+		return nil
+	}
+
+	var cfg SandboxConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil
+	}
+	return &cfg
+}
