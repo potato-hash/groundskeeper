@@ -3102,7 +3102,7 @@ func printHelp() {
 	fmt.Println("  gk-job             Manage jobs (create/list/show)")
 	fmt.Println("  gk-approvals       Manage approvals (list/approve/reject)")
 	fmt.Println("  gk-status         Show durable substrate status counts")
-	fmt.Println("  gk-daemon          Run the worker daemon (--fake/--model/--slots/--sidecar)")
+	fmt.Println("  gk-daemon          Run the worker daemon (--fake/--model/--slots/--sidecar/--ssh)")
 	fmt.Println("  gk-sidecar         Launch a credential-holding sidecar (--kind email|calendar|contact)")
 	fmt.Println("  gk-fleet-tui       Standalone fleet view TUI (refreshes every second)")
 	fmt.Println("  threads            Alias for gk-thread list")

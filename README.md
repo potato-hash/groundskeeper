@@ -54,6 +54,8 @@ go build ./cmd/groundskeeper
 ./groundskeeper loop start <thread-id>
 ./groundskeeper gk-daemon --model ollama-cloud/glm-5.2 --slots 2
 
+# Run workers on a remote machine over SSH
+./groundskeeper gk-daemon --ssh user@remote-host --ssh-omp-bin /usr/local/bin/omp --slots 2
 # Check fleet status
 ./groundskeeper fleet
 

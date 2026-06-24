@@ -62,6 +62,16 @@ type OmpAdapterConfig struct {
 	// launcher (internal/process.ProcessOmpRpc) which validates the launch
 	// is authorized and audits it. The pool sets this per-run.
 	LaunchContext *LaunchCtx
+	// SSHTarget, if set, makes StartThread spawn omp over SSH on a remote host
+	// instead of as a local subprocess. The format is "user@host" or just "host".
+	// The adapter runs `ssh <SSHTarget> omp --mode rpc ...` and pipes JSONL over
+	// the SSH connection's stdin/stdout. The protocol is identical to local —
+	// only the transport changes from local pipes to SSH pipes.
+	SSHTarget string
+	// SSHOmpBin is the path to omp on the remote host. Defaults to "omp".
+	SSHOmpBin string
+	// SSHOptions are extra ssh options (e.g. ["-p", "2222", "-i", "~/.ssh/key"]).
+	SSHOptions []string
 }
 
 // LaunchCtx carries the authorization fields the process launcher requires.
@@ -124,19 +134,13 @@ func NewOmpAdapter(cfg OmpAdapterConfig) *OmpAdapter {
 }
 
 func (a *OmpAdapter) StartThread(ctx context.Context, workspacePath, sessionDir string) (*RuntimeThreadRef, error) {
-	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
-		return nil, fmt.Errorf("omp: mkdir session dir: %w", err)
-	}
 	args := []string{"--mode", "rpc", "--session-dir", sessionDir}
 	if a.cfg.Model != "" {
 		args = append(args, "--model", a.cfg.Model)
 	}
-	// Run in the workspace; omp uses cwd as the project root unless overridden.
 	args = append(args, a.cfg.ExtraArgs...)
 
 	// Route through the managed process launcher when a LaunchContext is set.
-	// This ensures all OMP RPC spawns are authorized and audited. Without a
-	// LaunchContext (tests/fake), the adapter spawns directly.
 	if a.cfg.LaunchContext != nil {
 		lc := a.cfg.LaunchContext
 		if lc.Authorize != nil {
@@ -147,11 +151,38 @@ func (a *OmpAdapter) StartThread(ctx context.Context, workspacePath, sessionDir 
 			return nil, fmt.Errorf("omp: launch refused — thread_id, job_id, worker_id required")
 		}
 	}
-	cmd := exec.CommandContext(ctx, a.cfg.OmpBin, args...)
-	cmd.Dir = workspacePath
-	// Scrub the environment: the agent subprocess must not see raw provider
-	// credentials from the daemon's env. omp stores its own credentials in
-	// agent.db; env vars like *_API_KEY would leak the daemon's secrets in.
+
+	// Build the exec command. When SSHTarget is set, spawn omp over SSH on a
+	// remote host: `ssh <target> omp --mode rpc ...`. The JSONL protocol is
+	// identical over SSH pipes — only the transport changes.
+	var cmd *exec.Cmd
+	if a.cfg.SSHTarget != "" {
+		remoteOmp := a.cfg.SSHOmpBin
+		if remoteOmp == "" {
+			remoteOmp = "omp"
+		}
+		sshArgs := make([]string, 0, len(a.cfg.SSHOptions)+2+len(args))
+		sshArgs = append(sshArgs, a.cfg.SSHOptions...)
+		sshArgs = append(sshArgs, a.cfg.SSHTarget, remoteOmp)
+		sshArgs = append(sshArgs, args...)
+		cmd = exec.CommandContext(ctx, "ssh", sshArgs...)
+		// Don't set cmd.Dir — the workspace is on the remote host, not local.
+		// omp on the remote will use its cwd as the project root; pass the
+		// workspace via --cwd if needed in ExtraArgs.
+	} else {
+		// Local spawn.
+		if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+			return nil, fmt.Errorf("omp: mkdir session dir: %w", err)
+		}
+		ompBin := a.cfg.OmpBin
+		if ompBin == "" {
+			ompBin = "omp"
+		}
+		cmd = exec.CommandContext(ctx, ompBin, args...)
+		cmd.Dir = workspacePath
+	}
+	// Scrub the environment (both local and SSH: the agent subprocess must not
+	// see raw provider credentials from the daemon's env).
 	cmd.Env = scrubEnv(os.Environ())
 
 	stdin, err := cmd.StdinPipe()
@@ -163,7 +194,7 @@ func (a *OmpAdapter) StartThread(ctx context.Context, workspacePath, sessionDir 
 		stdin.Close()
 		return nil, fmt.Errorf("omp: stdout pipe: %w", err)
 	}
-	cmd.Stderr = os.Stderr // surface omp diagnostics
+	cmd.Stderr = os.Stderr // surface omp/ssh diagnostics
 
 	if err := cmd.Start(); err != nil {
 		stdin.Close()

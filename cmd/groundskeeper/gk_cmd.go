@@ -279,6 +279,8 @@ func handleGkDaemon(args []string) {
 	sidecarURL := fs.String("sidecar", "", "sidecar URL for notifications (HMAC-signed)")
 	hmacKey := fs.String("hmac-key", "", "HMAC signing key shared with the sidecar (env GK_HMAC_KEY if empty)")
 	espalierPath := fs.String("espalier-path", "", "path to Espalier Core extension (loads it into OMP workers)")
+	sshTarget := fs.String("ssh", "", "remote SSH target (user@host) to spawn omp on a remote machine")
+	sshOmpBin := fs.String("ssh-omp-bin", "omp", "path to omp on the remote host")
 	fs.Parse(args)
 	if *hmacKey == "" {
 		*hmacKey = os.Getenv("GK_HMAC_KEY")
@@ -297,14 +299,15 @@ func handleGkDaemon(args []string) {
 			HostHandler: bridge,
 			HostTools:   hostToolDefinitions(bridge),
 			ExtraArgs:   esplalierArgs(*espalierPath),
+			SSHTarget:   *sshTarget,
+			SSHOmpBin:   *sshOmpBin,
 		})
 	}
 
 	pool := worker.New(db, adapter, worker.Config{MaxSlots: *slots})
 	pool.SetLogger(nil) // use default slog
 
-	// Wire the notification gateway if a sidecar URL is given. The daemon
-	// holds only the HMAC signing key; the sidecar holds the platform creds.
+	// Wire the notification gateway if a sidecar URL is given.
 	if *sidecarURL != "" {
 		gw := channel.NewGateway(channel.DefaultPolicy(),
 			&channel.SidecarClient{BaseURL: *sidecarURL, Key: []byte(*hmacKey)})
@@ -315,7 +318,6 @@ func handleGkDaemon(args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Handle SIGINT/SIGTERM for clean shutdown.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -324,10 +326,13 @@ func handleGkDaemon(args []string) {
 		cancel()
 	}()
 
-	fmt.Printf("gk-daemon: running (%d slots, model=%q, adapter=%s)\n",
-		*slots, *model, adapterType(adapter))
+	sshInfo := ""
+	if *sshTarget != "" {
+		sshInfo = " ssh=" + *sshTarget
+	}
+	fmt.Printf("gk-daemon: running (%d slots, model=%q, adapter=%s%s)\n",
+		*slots, *model, adapterType(adapter), sshInfo)
 	pool.Start(ctx)
-	// Block until the signal handler cancels ctx.
 	<-ctx.Done()
 	pool.Stop()
 	fmt.Println("gk-daemon: stopped")
