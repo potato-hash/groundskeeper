@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# Agent Deck Installer
-# https://github.com/asheshgoplani/agent-deck
+# Groundskeeper Installer
+# https://github.com/potato-hash/groundskeeper
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/asheshgoplani/agent-deck/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh | bash
 #
 # Options:
-#   --name <name>       Custom binary name (default: agent-deck)
+#   --name <name>       Custom binary name (default: groundskeeper)
 #   --dir <path>        Installation directory (default: ~/.local/bin)
 #   --version <ver>     Specific version (default: latest)
 #   --skip-tmux-config  Skip tmux configuration prompt
@@ -15,7 +15,7 @@
 #   --pkg-manager <mgr> macOS package manager: 'brew' or 'port' (default: auto-detect)
 #
 # The installer will:
-#   1. Download and install the agent-deck binary
+#   1. Download and install the groundskeeper binary
 #   2. Check for tmux (offer to install if missing) - REQUIRED
 #   3. Check for jq (offer to install if missing) - Optional, for session forking
 #   4. Configure ~/.tmux.conf for mouse scrolling & clipboard - Optional
@@ -85,10 +85,10 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Defaults
-BINARY_NAME="agent-deck"
+BINARY_NAME="groundskeeper"
 INSTALL_DIR="${HOME}/.local/bin"
 VERSION="latest"
-REPO="asheshgoplani/agent-deck"
+REPO="potato-hash/groundskeeper"
 SKIP_TMUX_CONFIG=false
 SKIP_OPTIONAL_DEPS=false
 
@@ -146,7 +146,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: install.sh [options]"
             echo ""
             echo "Options:"
-            echo "  --name <name>       Custom binary name (default: agent-deck)"
+            echo "  --name <name>       Custom binary name (default: groundskeeper)"
             echo "  --dir <path>        Installation directory (default: ~/.local/bin)"
             echo "  --version <ver>     Specific version (default: latest)"
             echo "  --skip-tmux-config  Skip tmux configuration prompt"
@@ -505,7 +505,7 @@ VERSION_NUM="${VERSION#v}"
 echo -e "Installing version: ${GREEN}${VERSION}${NC}"
 
 # Download URL
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/agent-deck_${VERSION_NUM}_${OS}_${ARCH}.tar.gz"
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/groundskeeper_${VERSION_NUM}_${OS}_${ARCH}.tar.gz"
 echo -e "Downloading from: ${BLUE}${DOWNLOAD_URL}${NC}"
 
 # Create temp directory
@@ -514,7 +514,7 @@ trap "rm -rf $TMP_DIR" EXIT
 
 # Download and extract
 echo -e "Downloading..."
-if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/agent-deck.tar.gz"; then
+if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/groundskeeper.tar.gz"; then
     echo -e "${RED}Error: Download failed${NC}"
     echo "URL: $DOWNLOAD_URL"
     echo ""
@@ -555,13 +555,13 @@ if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/agent-deck.tar.gz"; then
     # Suggest Homebrew first if available (most reliable)
     if [[ "$OS" == "darwin" ]] && command -v brew &> /dev/null; then
         echo "Install via Homebrew instead (recommended):"
-        echo "  brew install asheshgoplani/tap/agent-deck"
+        echo "  brew install potato-hash/tap/groundskeeper"
         echo ""
     fi
 
     echo "Or build from source:"
     echo "  git clone https://github.com/${REPO}.git"
-    echo "  cd agent-deck && make install"
+    echo "  cd groundskeeper && make install"
     exit 1
 fi
 
@@ -571,14 +571,14 @@ fi
 # asset is absent from it, or the hash mismatches, abort WITHOUT extracting.
 echo -e "Verifying checksum..."
 CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
-ASSET_NAME="agent-deck_${VERSION_NUM}_${OS}_${ARCH}.tar.gz"
+ASSET_NAME="groundskeeper_${VERSION_NUM}_${OS}_${ARCH}.tar.gz"
 CHECKSUMS=$(curl -fsSL "$CHECKSUMS_URL" 2>/dev/null || true)
 if [[ -z "$CHECKSUMS" ]]; then
     echo -e "${RED}Error: could not fetch checksums.txt for ${VERSION}${NC}"
     echo "Refusing to install an unverified binary. URL: $CHECKSUMS_URL"
     exit 1
 fi
-if verify_download_checksum "$TMP_DIR/agent-deck.tar.gz" "$ASSET_NAME" "$CHECKSUMS"; then
+if verify_download_checksum "$TMP_DIR/groundskeeper.tar.gz" "$ASSET_NAME" "$CHECKSUMS"; then
     echo -e "${GREEN}Checksum verified.${NC}"
 else
     rc=$?
@@ -592,7 +592,7 @@ else
 fi
 
 echo -e "Extracting..."
-tar -xzf "$TMP_DIR/agent-deck.tar.gz" -C "$TMP_DIR"
+tar -xzf "$TMP_DIR/groundskeeper.tar.gz" -C "$TMP_DIR"
 
 # Create install directory
 mkdir -p "$INSTALL_DIR"
@@ -624,8 +624,8 @@ fi
 # Configure tmux for optimal agent-deck experience
 configure_tmux() {
     local TMUX_CONF="$HOME/.tmux.conf"
-    local MARKER="# agent-deck configuration"
-    local VERSION_MARKER="# agent-deck-tmux-config-version:"
+    local MARKER="# Groundskeeper configuration"
+    local VERSION_MARKER="# groundskeeper-tmux-config-version:"
     local CURRENT_VERSION="4"  # Bump this when config changes
     local NEEDS_UPDATE=false
     local HAS_CONFIG=false
@@ -663,11 +663,11 @@ configure_tmux() {
             echo "Removing old configuration..."
             # Use temp file for compatibility (BSD sed vs GNU sed)
             local TEMP_CONF=$(mktemp)
-            sed "/$MARKER/,/# End agent-deck configuration/d" "$TMUX_CONF" > "$TEMP_CONF"
+            sed "/$MARKER/,/# End Groundskeeper configuration/d" "$TMUX_CONF" > "$TEMP_CONF"
             mv "$TEMP_CONF" "$TMUX_CONF"
             echo -e "${GREEN}Old config removed${NC}"
         else
-            echo -e "${GREEN}tmux already configured for agent-deck (v$INSTALLED_VERSION)${NC}"
+            echo -e "${GREEN}tmux already configured for Groundskeeper (v$INSTALLED_VERSION)${NC}"
             return 0
         fi
     fi
@@ -696,11 +696,11 @@ configure_tmux() {
 
     # Skip prompt if we're updating (user already confirmed)
     if [[ "$NEEDS_UPDATE" != "true" ]]; then
-        prompt_read -p "Configure tmux for agent-deck? [Y/n] " -n 1 -r
+        prompt_read -p "Configure tmux for Groundskeeper? [Y/n] " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Nn]$ ]]; then
             echo "Skipping tmux configuration."
-            echo "You can manually add the config later (see: agent-deck docs)"
+            echo "You can manually add the config later (see: Groundskeeper docs)"
             return 0
         fi
     fi
@@ -733,8 +733,8 @@ configure_tmux() {
     local CONFIG_BLOCK="
 $MARKER
 $VERSION_MARKER $CURRENT_VERSION
-# Added by agent-deck installer - $(date +%Y-%m-%d)
-# https://github.com/asheshgoplani/agent-deck
+# Added by Groundskeeper installer - $(date +%Y-%m-%d)
+# https://github.com/potato-hash/groundskeeper
 
 # Terminal with true color support
 set -g default-terminal \"tmux-256color\"
@@ -768,7 +768,7 @@ bind-key -T copy-mode WheelDownPane send-keys -X scroll-down
 # Clipboard integration (drag-to-copy)
 bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel \"$CLIPBOARD_CMD\"
 bind-key -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel \"$CLIPBOARD_CMD\"
-# End agent-deck configuration
+# End Groundskeeper configuration
 "
 
     # Append to config file
@@ -831,7 +831,7 @@ if "$INSTALL_DIR/$BINARY_NAME" version &> /dev/null; then
     echo ""
 
     # Show tmux config status
-    if [[ -f "$HOME/.tmux.conf" ]] && grep -q "# agent-deck configuration" "$HOME/.tmux.conf" 2>/dev/null; then
+    if [[ -f "$HOME/.tmux.conf" ]] && grep -q "# Groundskeeper configuration" "$HOME/.tmux.conf" 2>/dev/null; then
         echo -e "tmux config: ${GREEN}Configured for mouse scroll + clipboard${NC}"
     else
         echo -e "tmux config: ${YELLOW}Not configured (run installer again or see docs)${NC}"

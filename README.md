@@ -33,7 +33,35 @@ Phases 0–8 are implemented:
 - **Phase 7:** Channel gateway (`internal/channel`) — notification policy, HMAC-signed delivery, approval routing.
 - **Phase 8:** Sidecars (`internal/sidecar`) — email/calendar/contact handlers behind an HMAC-verified HTTP server; the daemon never holds platform credentials.
 
-This is a development build, not a release. The bubbletea TUI panel is embeddable but not yet auto-rendered in Agent Deck's home view.
+This is a development build, not a release. The bubbletea TUI shows Groundskeeper threads alongside Agent Deck sessions via the Home projection model (`internal/ui/gk_home.go`).
+
+## Quick Start
+
+```sh
+# Build
+go build ./cmd/groundskeeper
+
+# First-run onboarding (checks omp, creates gk.db, checks Espalier)
+./groundskeeper setup
+
+# Create an agent thread
+./groundskeeper gk-thread create --title "Fix the test" --runtime omp --workspace .
+
+# Set up a loop (until_done, max 5 turns)
+./groundskeeper loop set <thread-id> --mode until_done --prompt "Fix the test" --max-turns 5
+
+# Start the loop + daemon
+./groundskeeper loop start <thread-id>
+./groundskeeper gk-daemon --model ollama-cloud/glm-5.2 --slots 2
+
+# Check fleet status
+./groundskeeper fleet
+
+# Start the TUI (Agent Deck sessions + Groundskeeper threads)
+# In the TUI, press tab to switch between Agent Deck and Groundskeeper sections.
+# p = prompt, f = fork, a = archive (when Groundskeeper section is focused)
+./groundskeeper
+```
 
 ## Forked from
 

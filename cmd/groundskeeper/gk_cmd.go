@@ -686,3 +686,95 @@ func esplalierArgs(path string) []string {
 	}
 	return []string{"--extension", path}
 }
+
+// handleSetup is the first-run onboarding command. It checks for omp, creates
+// the gk.db at the XDG data dir, checks Espalier readiness, and prints a
+// getting-started guide. Safe to re-run (idempotent).
+func handleSetup(args []string) {
+	fmt.Println("Groundskeeper Setup")
+	fmt.Println("==================")
+	fmt.Println()
+
+	// 1. Check omp on PATH.
+	fmt.Println("1. OMP runtime")
+	ompPath, err := exec.LookPath("omp")
+	if err != nil {
+		fmt.Println("   [MISSING] omp is not on PATH.")
+		fmt.Println("   Install OMP: https://github.com/can1357/oh-my-pi")
+		fmt.Println("   Groundskeeper workers require omp to run agent turns.")
+	} else {
+		fmt.Printf("   [OK] omp found at %s\n", ompPath)
+	}
+	fmt.Println()
+
+	// 2. Create the durable DB.
+	fmt.Println("2. Durable substrate (gk.db)")
+	path, err := gkDBPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "   [ERROR] %v\n", err)
+		os.Exit(1)
+	}
+	db, err := gkdb.Open(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "   [ERROR] %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	fmt.Printf("   [OK] gk.db at %s\n", path)
+	fmt.Println("   Tables: agent_threads, jobs, approvals, audit_events, loop_specs, loop_runs, dead_letters")
+	fmt.Println()
+
+	// 3. Check OMP provider auth.
+	fmt.Println("3. Provider authentication (managed by OMP)")
+	if ompPath != "" {
+		credPath := filepath.Join(os.Getenv("HOME"), ".omp", "agent", "agent.db")
+		if _, err := os.Stat(credPath); err == nil {
+			fmt.Println("   [OK] OMP credential store found")
+		} else {
+			fmt.Println("   [NOT FOUND] No OMP credential store — run 'omp /login <provider>' to configure")
+		}
+	} else {
+		fmt.Println("   [SKIP] omp not on PATH")
+	}
+	fmt.Println("   Groundskeeper does not store provider tokens. Auth is managed by OMP.")
+	fmt.Println()
+
+	// 4. Check Espalier Core readiness.
+	fmt.Println("4. Espalier Core")
+	espalierPath := os.Getenv("GK_ESPALIER_PATH")
+	if espalierPath == "" {
+		espalierPath = filepath.Join(os.Getenv("HOME"), "espalier")
+	}
+	if _, err := os.Stat(espalierPath); err == nil {
+		fmt.Printf("   [OK] Espalier found at %s\n", espalierPath)
+	} else {
+		fmt.Printf("   [NOT FOUND] %s (degraded — workers run without Espalier)\n", espalierPath)
+	}
+	fmt.Println("   Launch workers with Espalier: gk-daemon --espalier-path <path>")
+	fmt.Println()
+
+	// 5. Print getting-started guide.
+	fmt.Println("Getting Started")
+	fmt.Println("---------------")
+	fmt.Println()
+	fmt.Println("  # Create an agent thread")
+	fmt.Println("  groundskeeper gk-thread create --title \"Fix the test\" --runtime omp --workspace .")
+	fmt.Println()
+	fmt.Println("  # Set up a loop (until_done mode, max 5 turns)")
+	fmt.Println("  groundskeeper loop set <thread-id> --mode until_done --prompt \"Fix the test\" --max-turns 5")
+	fmt.Println()
+	fmt.Println("  # Start the loop + daemon")
+	fmt.Println("  groundskeeper loop start <thread-id>")
+	fmt.Println("  groundskeeper gk-daemon --model ollama-cloud/glm-5.2 --slots 2")
+	fmt.Println()
+	fmt.Println("  # Check fleet status")
+	fmt.Println("  groundskeeper fleet")
+	fmt.Println()
+	fmt.Println("  # Start the TUI (Agent Deck sessions + Groundskeeper threads)")
+	fmt.Println("  groundskeeper")
+	fmt.Println()
+	fmt.Println("  # In the TUI, press tab to switch between Agent Deck sessions and Groundskeeper threads.")
+	fmt.Println("  # p = prompt, f = fork, a = archive (when Groundskeeper section is focused)")
+	fmt.Println()
+	fmt.Println("Setup complete.")
+}
