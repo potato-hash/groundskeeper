@@ -141,7 +141,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Agent Deck Installer"
+            echo "Groundskeeper Stack Installer"
             echo ""
             echo "Usage: install.sh [options]"
             echo ""
@@ -163,7 +163,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║        Agent Deck Installer            ║${NC}"
+echo -e "${BLUE}║     Groundskeeper Stack Installer      ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
 echo ""
 

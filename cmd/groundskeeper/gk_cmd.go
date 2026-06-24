@@ -5,6 +5,7 @@ package main
 // collision until the TUI-integration phase decides whether to unify.
 
 import (
+	"bufio"
 	"context"
 	"os/exec"
 	"flag"
@@ -687,94 +688,224 @@ func esplalierArgs(path string) []string {
 	return []string{"--extension", path}
 }
 
-// handleSetup is the first-run onboarding command. It checks for omp, creates
-// the gk.db at the XDG data dir, checks Espalier readiness, and prints a
-// getting-started guide. Safe to re-run (idempotent).
+// handleSetup is the full-stack installer and first-run onboarding. It installs
+// or verifies the whole stack — Groundskeeper (this binary), OMP (the agent
+// runtime), and Espalier Core (the learning extension) — prompts for model
+// configuration, creates the gk.db, and prints a getting-started guide.
+//
+// The flow is interactive (prompts via stdin) unless --non-interactive is passed.
+// Safe to re-run: each step is idempotent (checks before installing).
 func handleSetup(args []string) {
-	fmt.Println("Groundskeeper Setup")
-	fmt.Println("==================")
+	fs := flag.NewFlagSet("setup", flag.ExitOnError)
+	nonInteractive := fs.Bool("non-interactive", false, "skip all prompts (for CI)")
+	fs.Parse(args)
+	reader := bufio.NewReader(os.Stdin)
+	prompt := func(question string) string {
+		if *nonInteractive {
+			return ""
+		}
+		fmt.Printf("%s ", question)
+		line, _ := reader.ReadString('\n')
+		return strings.TrimSpace(line)
+	}
+	confirm := func(question string) bool {
+		if *nonInteractive {
+			return false
+		}
+		return prompt(question+" [y/N]") == "y"
+	}
+
+	fmt.Println()
+	fmt.Println("  ╔════════════════════════════════════════╗")
+	fmt.Println("  ║     Groundskeeper Stack Installer      ║")
+	fmt.Println("  ╚════════════════════════════════════════╝")
+	fmt.Println()
+	fmt.Println("  This installs the full Groundskeeper stack:")
+	fmt.Println("    1. OMP — the agent runtime (omp --mode rpc)")
+	fmt.Println("    2. Espalier Core — the learning/gating extension")
+	fmt.Println("    3. Groundskeeper — the durable substrate + TUI")
 	fmt.Println()
 
-	// 1. Check omp on PATH.
-	fmt.Println("1. OMP runtime")
+	// ── Step 1: OMP ──
+	fmt.Println("── 1/5 · OMP runtime ──────────────────────")
+	fmt.Println()
 	ompPath, err := exec.LookPath("omp")
-	if err != nil {
-		fmt.Println("   [MISSING] omp is not on PATH.")
-		fmt.Println("   Install OMP: https://github.com/can1357/oh-my-pi")
-		fmt.Println("   Groundskeeper workers require omp to run agent turns.")
-	} else {
-		fmt.Printf("   [OK] omp found at %s\n", ompPath)
-	}
-	fmt.Println()
-
-	// 2. Create the durable DB.
-	fmt.Println("2. Durable substrate (gk.db)")
-	path, err := gkDBPath()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "   [ERROR] %v\n", err)
-		os.Exit(1)
-	}
-	db, err := gkdb.Open(path)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "   [ERROR] %v\n", err)
-		os.Exit(1)
-	}
-	defer db.Close()
-	fmt.Printf("   [OK] gk.db at %s\n", path)
-	fmt.Println("   Tables: agent_threads, jobs, approvals, audit_events, loop_specs, loop_runs, dead_letters")
-	fmt.Println()
-
-	// 3. Check OMP provider auth.
-	fmt.Println("3. Provider authentication (managed by OMP)")
-	if ompPath != "" {
-		credPath := filepath.Join(os.Getenv("HOME"), ".omp", "agent", "agent.db")
-		if _, err := os.Stat(credPath); err == nil {
-			fmt.Println("   [OK] OMP credential store found")
-		} else {
-			fmt.Println("   [NOT FOUND] No OMP credential store — run 'omp /login <provider>' to configure")
+	if err == nil {
+		fmt.Printf("  [OK] omp found at %s\n", ompPath)
+		out, vErr := exec.Command(ompPath, "--version").Output()
+		if vErr == nil {
+			fmt.Printf("  [OK] version: %s", string(out))
 		}
 	} else {
-		fmt.Println("   [SKIP] omp not on PATH")
+		fmt.Println("  [MISSING] omp is not on PATH.")
+		if confirm("  Install OMP now?") {
+			if err := installOMP(); err != nil {
+				fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
+			} else {
+				fmt.Println("  [OK] OMP installed to ~/.local/bin/omp")
+				ompPath = filepath.Join(os.Getenv("HOME"), ".local", "bin", "omp")
+			}
+		} else {
+			fmt.Println("  [SKIP] Install OMP manually: https://github.com/can1357/oh-my-pi")
+		}
 	}
-	fmt.Println("   Groundskeeper does not store provider tokens. Auth is managed by OMP.")
 	fmt.Println()
 
-	// 4. Check Espalier Core readiness.
-	fmt.Println("4. Espalier Core")
+	// ── Step 2: Espalier Core ──
+	fmt.Println("── 2/5 · Espalier Core ───────────────────")
+	fmt.Println()
 	espalierPath := os.Getenv("GK_ESPALIER_PATH")
 	if espalierPath == "" {
 		espalierPath = filepath.Join(os.Getenv("HOME"), "espalier")
 	}
-	if _, err := os.Stat(espalierPath); err == nil {
-		fmt.Printf("   [OK] Espalier found at %s\n", espalierPath)
+	if _, err := os.Stat(filepath.Join(espalierPath, "dist", "extensions", "index.js")); err == nil {
+		fmt.Printf("  [OK] Espalier found at %s (dist built)\n", espalierPath)
+	} else if _, err := os.Stat(espalierPath); err == nil {
+		fmt.Printf("  [PARTIAL] %s exists but dist/ is not built\n", espalierPath)
+		if confirm("  Build Espalier now? (requires bun)") {
+			if err := buildEspalier(espalierPath); err != nil {
+				fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
+			} else {
+				fmt.Println("  [OK] Espalier built")
+			}
+		}
 	} else {
-		fmt.Printf("   [NOT FOUND] %s (degraded — workers run without Espalier)\n", espalierPath)
+		fmt.Printf("  [MISSING] Espalier not found at %s\n", espalierPath)
+		if confirm("  Clone and build Espalier now?") {
+			if err := installEspalier(espalierPath); err != nil {
+				fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
+			} else {
+				fmt.Println("  [OK] Espalier installed and built")
+			}
+		} else {
+			fmt.Println("  [SKIP] Workers will run without Espalier (degraded)")
+		}
 	}
-	fmt.Println("   Launch workers with Espalier: gk-daemon --espalier-path <path>")
 	fmt.Println()
 
-	// 5. Print getting-started guide.
-	fmt.Println("Getting Started")
-	fmt.Println("---------------")
+	// ── Step 3: Groundskeeper durable DB ──
+	fmt.Println("── 3/5 · Groundskeeper durable substrate ──")
 	fmt.Println()
-	fmt.Println("  # Create an agent thread")
-	fmt.Println("  groundskeeper gk-thread create --title \"Fix the test\" --runtime omp --workspace .")
+	dbPath, err := gkDBPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
+		os.Exit(1)
+	}
+	db, err := gkdb.Open(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	fmt.Printf("  [OK] gk.db at %s\n", dbPath)
+	fmt.Println("  Tables: agent_threads, jobs, approvals, audit_events, loop_specs, loop_runs, dead_letters")
 	fmt.Println()
-	fmt.Println("  # Set up a loop (until_done mode, max 5 turns)")
-	fmt.Println("  groundskeeper loop set <thread-id> --mode until_done --prompt \"Fix the test\" --max-turns 5")
+
+	// ── Step 4: Model configuration ──
+	fmt.Println("── 4/5 · Model configuration ─────────────")
 	fmt.Println()
-	fmt.Println("  # Start the loop + daemon")
-	fmt.Println("  groundskeeper loop start <thread-id>")
-	fmt.Println("  groundskeeper gk-daemon --model ollama-cloud/glm-5.2 --slots 2")
+	model := os.Getenv("GK_OMP_MODEL")
+	if model == "" {
+		model = "ollama-cloud/glm-5.2"
+	}
+	if ompPath != "" {
+		credPath := filepath.Join(os.Getenv("HOME"), ".omp", "agent", "agent.db")
+		if _, err := os.Stat(credPath); err == nil {
+			fmt.Println("  [OK] OMP credential store found")
+		} else {
+			fmt.Println("  [NOT FOUND] No OMP credential store")
+			fmt.Println("  Run 'omp /login <provider>' to configure a provider.")
+		}
+	}
+	inputModel := prompt(fmt.Sprintf("  Default model for workers (press Enter for %s):", model))
+	if inputModel != "" {
+		model = inputModel
+	}
+	fmt.Printf("  [SET] model = %s\n", model)
+	fmt.Println("  Override per-run: gk-daemon --model <model>")
 	fmt.Println()
-	fmt.Println("  # Check fleet status")
-	fmt.Println("  groundskeeper fleet")
+
+	// ── Step 5: Tmux (dependency check, not install) ──
+	fmt.Println("── 5/5 · Dependencies ────────────────────")
 	fmt.Println()
-	fmt.Println("  # Start the TUI (Agent Deck sessions + Groundskeeper threads)")
-	fmt.Println("  groundskeeper")
+	if _, err := exec.LookPath("tmux"); err != nil {
+		fmt.Println("  [MISSING] tmux (required for Agent Deck session management)")
+		fmt.Println("  Install: brew install tmux  (macOS)  or  apt install tmux  (Linux)")
+	} else {
+		fmt.Println("  [OK] tmux found")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		fmt.Println("  [MISSING] git (required for worktree creation)")
+	} else {
+		fmt.Println("  [OK] git found")
+	}
+	if _, err := exec.LookPath("bun"); err != nil {
+		fmt.Println("  [OPTIONAL] bun not found (needed to build Espalier)")
+	} else {
+		fmt.Println("  [OK] bun found")
+	}
 	fmt.Println()
-	fmt.Println("  # In the TUI, press tab to switch between Agent Deck sessions and Groundskeeper threads.")
-	fmt.Println("  # p = prompt, f = fork, a = archive (when Groundskeeper section is focused)")
+
+	// ── Summary + getting started ──
+	fmt.Println("══════════════════════════════════════════")
 	fmt.Println()
-	fmt.Println("Setup complete.")
+	fmt.Println("  Setup complete!")
+	fmt.Println()
+	fmt.Println("  Quick start:")
+	fmt.Println("    groundskeeper gk-thread create --title \"Fix tests\" --runtime omp --workspace .")
+	fmt.Printf("    groundskeeper loop set <thread-id> --mode until_done --prompt \"Fix the test\" --max-turns 5\n")
+	fmt.Printf("    groundskeeper loop start <thread-id>\n")
+	fmt.Printf("    groundskeeper gk-daemon --model %s --slots 2\n", model)
+	fmt.Println("    groundskeeper fleet")
+	fmt.Println("    groundskeeper")
+	fmt.Println()
+	fmt.Println("  In the TUI, press tab to switch to Groundskeeper threads.")
+	fmt.Println("  p = prompt, f = fork, a = archive")
+	fmt.Println()
+}
+
+// installOMP downloads and installs the omp binary from GitHub releases.
+func installOMP() error {
+	// OMP is installed via its own installer script (can1357/oh-my-pi).
+	// We delegate to OMP's install method rather than reimplementing it.
+	fmt.Println("  Downloading OMP installer...")
+	cmd := exec.Command("bash", "-c",
+		"curl -fsSL https://raw.githubusercontent.com/can1357/oh-my-pi/main/install.sh | bash")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	return cmd.Run()
+}
+
+// installEspalier clones and builds the Espalier Core extension.
+func installEspalier(path string) error {
+	fmt.Printf("  Cloning Espalier to %s...\n", path)
+	cmd := exec.Command("git", "clone", "https://github.com/potato-hash/espalier.git", path)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("clone espalier: %w", err)
+	}
+	return buildEspalier(path)
+}
+
+// buildEspalier runs bun install + bun build in the espalier directory.
+func buildEspalier(path string) error {
+	if _, err := exec.LookPath("bun"); err != nil {
+		return fmt.Errorf("bun is required to build Espalier: install from https://bun.sh")
+	}
+	fmt.Println("  Installing Espalier dependencies (bun install)...")
+	cmd := exec.Command("bun", "install")
+	cmd.Dir = path
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("bun install: %w", err)
+	}
+	fmt.Println("  Building Espalier (bun build)...")
+	cmd = exec.Command("bun", "run", "build")
+	cmd.Dir = path
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
