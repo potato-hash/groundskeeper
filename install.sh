@@ -233,7 +233,7 @@ case "$OS" in
         ;;
     *)
         echo -e "${RED}Error: Unsupported operating system: $OS${NC}"
-        echo "Agent Deck only supports macOS and Linux."
+        echo "Groundskeeper only supports macOS and Linux."
         exit 1
         ;;
 esac
@@ -436,7 +436,7 @@ preflight_source_build_prereq
 # Check for tmux and offer to install
 if ! command -v tmux &> /dev/null; then
     echo -e "${YELLOW}tmux is not installed.${NC}"
-    echo "Agent Deck requires tmux to function."
+    echo "Groundskeeper requires tmux to function."
     echo ""
 
     # Try to auto-install tmux
@@ -787,7 +787,7 @@ configure_tmux() {
 
     echo ""
     echo -e "${BLUE}tmux Configuration${NC}"
-    echo "Agent Deck works best with mouse scroll and clipboard support."
+    echo "Groundskeeper works best with mouse scroll and clipboard support."
     echo ""
 
     if [[ -f "$TMUX_CONF" ]] && [[ "$NEEDS_UPDATE" != "true" ]]; then

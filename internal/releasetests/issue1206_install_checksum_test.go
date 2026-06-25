@@ -104,6 +104,29 @@ func TestInstallScript_FallsBackToPublicModuleWhenLatestMissing(t *testing.T) {
 	}
 }
 
+func TestInstallScript_UsesGroundskeeperInstallerCopy(t *testing.T) {
+	body := installScriptBody(t)
+
+	for _, want := range []string{
+		"Groundskeeper only supports macOS and Linux.",
+		"Groundskeeper requires tmux to function.",
+		"Groundskeeper works best with mouse scroll and clipboard support.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install.sh missing Groundskeeper copy %q", want)
+		}
+	}
+	for _, stale := range []string{
+		"Agent Deck only supports macOS and Linux.",
+		"Agent Deck requires tmux to function.",
+		"Agent Deck works best with mouse scroll and clipboard support.",
+	} {
+		if strings.Contains(body, stale) {
+			t.Fatalf("install.sh still contains stale installer copy %q", stale)
+		}
+	}
+}
+
 // sourceAndVerify sources install.sh in isolation (without running main) and
 // invokes verify_download_checksum with the given args, returning its exit code.
 func sourceAndVerify(t *testing.T, file, asset, checksums string) int {
