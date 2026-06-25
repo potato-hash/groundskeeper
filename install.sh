@@ -106,6 +106,8 @@ RUN_SETUP_REQUESTED=false
 SKIP_SETUP_REQUESTED=false
 SETUP_MODEL=""
 VERIFY_MODEL=false
+LATEST_RELEASE_CHECKED=false
+LATEST_RELEASE_TAG=""
 # macOS package manager configuration
 MACOS_SUPPORTED_PKG_MGRS=("brew" "port")  # Order matters for preference
 MACOS_PKG_MANAGER=""  # Will be auto-detected or set by user
@@ -395,6 +397,42 @@ print_macos_manual_install_help() {
     done
 }
 
+fetch_latest_release_tag() {
+    if [[ "$LATEST_RELEASE_CHECKED" != "true" ]]; then
+        LATEST_RELEASE_TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+        LATEST_RELEASE_CHECKED=true
+    fi
+}
+
+print_source_build_go_help() {
+    echo "Pre-release installs fall back to building github.com/${REPO}/cmd/groundskeeper@main."
+    echo "Install Go, then re-run the same install command."
+    if [[ "$OS" == "darwin" ]]; then
+        if [[ -n "$MACOS_PKG_MANAGER" ]]; then
+            echo "  $(macos_pkg_mgr_install_cmd "$MACOS_PKG_MANAGER") go"
+        else
+            print_macos_manual_install_help "go"
+        fi
+    else
+        echo "  https://go.dev/dl/"
+        echo "  or your distro package, e.g. sudo apt install golang-go"
+    fi
+}
+
+preflight_source_build_prereq() {
+    [[ "$VERSION" == "latest" ]] || return 0
+
+    fetch_latest_release_tag
+    [[ -n "$LATEST_RELEASE_TAG" ]] && return 0
+    command -v go >/dev/null 2>&1 && return 0
+
+    echo -e "${RED}Error: No Groundskeeper release binary is published yet, and Go is not installed.${NC}"
+    print_source_build_go_help
+    exit 1
+}
+
+preflight_source_build_prereq
+
 # Check for tmux and offer to install
 if ! command -v tmux &> /dev/null; then
     echo -e "${YELLOW}tmux is not installed.${NC}"
@@ -543,7 +581,8 @@ fi
 INSTALLED_FROM_SOURCE=false
 if [[ "$VERSION" == "latest" ]]; then
     echo -e "Fetching latest version..."
-    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    fetch_latest_release_tag
+    VERSION="$LATEST_RELEASE_TAG"
     if [[ -z "$VERSION" ]]; then
         if [[ -f "go.mod" && -d "cmd/groundskeeper" ]] && command -v go &> /dev/null; then
             echo -e "${YELLOW}No latest release found; building from local source checkout.${NC}"

@@ -346,10 +346,53 @@ func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 		"--non-interactive --install-missing",
 		`if [[ "$SETUP_MODE" == "run" ]]; then`,
 		"GOPROXY=direct",
+		"preflight_source_build_prereq",
+		"No Groundskeeper release binary is published yet",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("install.sh missing %q", want)
 		}
+	}
+}
+
+func TestInstallScriptPreflightsGoWhenNoRelease(t *testing.T) {
+	bashPath := "/bin/bash"
+	if _, err := os.Stat(bashPath); err != nil {
+		var lookupErr error
+		bashPath, lookupErr = exec.LookPath("bash")
+		if lookupErr != nil {
+			t.Skip("bash not available")
+		}
+	}
+
+	home := t.TempDir()
+	bin := t.TempDir()
+	curlStub := filepath.Join(bin, "curl")
+	if err := os.WriteFile(curlStub, []byte("#!/usr/bin/env sh\nexit 22\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bashPath, "../../install.sh", "--non-interactive")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"PATH="+bin+":/usr/bin:/bin:/usr/sbin:/sbin",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("install.sh unexpectedly succeeded without release or Go\n%s", out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"No Groundskeeper release binary is published yet",
+		"Pre-release installs fall back to building github.com/potato-hash/groundskeeper/cmd/groundskeeper@main",
+		"Install Go, then re-run the same install command.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install preflight output missing %q\n--- output ---\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "tmux is not installed") {
+		t.Fatalf("install.sh checked tmux before source-build Go preflight\n--- output ---\n%s", body)
 	}
 }
 
