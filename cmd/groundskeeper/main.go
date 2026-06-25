@@ -37,7 +37,7 @@ import (
 	"github.com/potato-hash/groundskeeper/internal/web"
 )
 
-var Version = "0.1.0-gk" // overridden at build time via -ldflags "-X main.Version=..."
+var Version = "0.1.0" // overridden at build time via -ldflags "-X main.Version=..."
 
 // Table column widths for list command output
 const (

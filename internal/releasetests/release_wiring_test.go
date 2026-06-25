@@ -3,6 +3,7 @@ package releasetests
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -40,6 +41,18 @@ func TestReleaseSnapshotWatchesGroundskeeperEntryPoint(t *testing.T) {
 	}
 	if strings.Contains(body, "cmd/agent-deck") {
 		t.Fatal("release snapshot workflow still watches stale cmd/agent-deck path")
+	}
+}
+
+func TestReleaseVersionIsStableForGitHubLatest(t *testing.T) {
+	body := readRepoFile(t, "cmd/groundskeeper/main.go")
+	m := regexp.MustCompile(`var Version = "([^"]+)"`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatal("cmd/groundskeeper/main.go must define var Version")
+	}
+	version := m[1]
+	if !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(version) {
+		t.Fatalf("release Version %q must be stable semver so GitHub releases/latest can serve install binaries", version)
 	}
 }
 
