@@ -466,6 +466,73 @@ func TestInstallStateVerifierScansWithoutPrintingSecretValues(t *testing.T) {
 	}
 }
 
+func TestPublicInstallSmokeScriptRejectsLeakedSecretOutput(t *testing.T) {
+	cmd := exec.Command("bash", "-n", "../../scripts/smoke-public-install.sh")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("smoke-public-install.sh has invalid syntax: %v\n%s", err, out)
+	}
+
+	home := t.TempDir()
+	installStub := filepath.Join(home, "install.sh")
+	if err := os.WriteFile(installStub, []byte("#!/usr/bin/env sh\nprintf '%s\\n' \"$OLLAMA_CLOUD_API_KEY\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd = exec.Command("bash", "../../scripts/smoke-public-install.sh")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"OLLAMA_CLOUD_API_KEY=smoke-fixture-value",
+		"GK_SMOKE_INSTALL_URL=file://"+installStub,
+		"GK_SMOKE_VERIFY_URL=file://"+filepath.Join(home, "verify-unused.sh"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("smoke-public-install.sh unexpectedly succeeded when installer output leaked a secret\n%s", out)
+	}
+	body := string(out)
+	if strings.Contains(body, "smoke-fixture-value") {
+		t.Fatalf("smoke-public-install.sh printed leaked secret\n--- output ---\n%s", body)
+	}
+	if !strings.Contains(body, "sensitive value from OLLAMA_CLOUD_API_KEY appeared in install output") {
+		t.Fatalf("smoke-public-install.sh missing leak failure detail\n--- output ---\n%s", body)
+	}
+}
+
+func TestPublicInstallSmokeScriptRunsVerifierAfterCleanInstall(t *testing.T) {
+	home := t.TempDir()
+	installStub := filepath.Join(home, "install.sh")
+	verifyStub := filepath.Join(home, "verify.sh")
+	if err := os.WriteFile(installStub, []byte("#!/usr/bin/env sh\nprintf 'install clean\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify clean\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"GK_SMOKE_VERIFY_MODEL=0",
+		"GK_SMOKE_INSTALL_URL=file://"+installStub,
+		"GK_SMOKE_VERIFY_URL=file://"+verifyStub,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("smoke-public-install.sh failed on clean stubs: %v\n%s", err, out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"install clean",
+		"verify clean",
+		"installer output did not contain sensitive environment values",
+		"public install smoke completed",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("smoke output missing %q\n--- output ---\n%s", want, body)
+		}
+	}
+}
+
 func TestSetupCommandEnvAliasesOllamaAPIKeyForOllamaCloud(t *testing.T) {
 	t.Setenv("OLLAMA_API_KEY", "temporary-test-key")
 	t.Setenv("OLLAMA_CLOUD_API_KEY", "")

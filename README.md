@@ -68,6 +68,13 @@ Post-install state and secret-persistence check:
 curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/scripts/verify-install-state.sh | bash
 ```
 
+Clean-VM install smoke with output redaction and state verification:
+
+```sh
+export OLLAMA_CLOUD_API_KEY='<your ollama cloud key>'
+curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/scripts/smoke-public-install.sh | bash
+```
+
 Local development:
 
 ```sh
