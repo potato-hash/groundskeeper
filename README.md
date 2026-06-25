@@ -57,10 +57,11 @@ curl -fsSL -H 'Accept: application/vnd.github.raw' \
 
 Pre-release installs prefer release binaries when available. Until the first
 Groundskeeper release exists, the installer falls back to building
-`github.com/potato-hash/groundskeeper/cmd/groundskeeper@main`, so Go must be
-available on a fresh machine. First-run setup installs or discovers OMP,
-builds Espalier with Bun, creates `~/.local/share/groundskeeper/gk.db`, and
-delegates provider authentication to OMP/environment variables.
+`github.com/potato-hash/groundskeeper/cmd/groundskeeper@main`, so Go 1.25.11
+or newer must be available on a fresh machine. First-run setup installs or
+discovers OMP, builds Espalier with Bun, creates
+`~/.local/share/groundskeeper/gk.db`, and delegates provider authentication to
+OMP/environment variables.
 
 Post-install state and secret-persistence check:
 

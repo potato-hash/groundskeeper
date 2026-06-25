@@ -108,6 +108,7 @@ SETUP_MODEL=""
 VERIFY_MODEL=false
 LATEST_RELEASE_CHECKED=false
 LATEST_RELEASE_TAG=""
+SOURCE_BUILD_MIN_GO_VERSION="1.25.11"
 # macOS package manager configuration
 MACOS_SUPPORTED_PKG_MGRS=("brew" "port")  # Order matters for preference
 MACOS_PKG_MANAGER=""  # Will be auto-detected or set by user
@@ -406,7 +407,7 @@ fetch_latest_release_tag() {
 
 print_source_build_go_help() {
     echo "Pre-release installs fall back to building github.com/${REPO}/cmd/groundskeeper@main."
-    echo "Install Go, then re-run the same install command."
+    echo "Install Go ${SOURCE_BUILD_MIN_GO_VERSION} or newer, then re-run the same install command."
     if [[ "$OS" == "darwin" ]]; then
         if [[ -n "$MACOS_PKG_MANAGER" ]]; then
             echo "  $(macos_pkg_mgr_install_cmd "$MACOS_PKG_MANAGER") go"
@@ -419,14 +420,73 @@ print_source_build_go_help() {
     fi
 }
 
+installed_go_version() {
+    command -v go >/dev/null 2>&1 || return 1
+
+    local version
+    version=$(go env GOVERSION 2>/dev/null || true)
+    if [[ -z "$version" ]]; then
+        version=$(go version 2>/dev/null || true)
+        version="${version#go version }"
+        version="${version%% *}"
+    fi
+    version="${version#go}"
+    version="${version%%[!0-9.]*}"
+    [[ -n "$version" ]] || return 1
+    echo "$version"
+}
+
+go_version_at_least() {
+    local have="$1"
+    local want="$2"
+    local h_major h_minor h_patch w_major w_minor w_patch
+    IFS=. read -r h_major h_minor h_patch <<< "$have"
+    IFS=. read -r w_major w_minor w_patch <<< "$want"
+    h_minor="${h_minor:-0}"
+    h_patch="${h_patch:-0}"
+    w_minor="${w_minor:-0}"
+    w_patch="${w_patch:-0}"
+
+    for part in "$h_major" "$h_minor" "$h_patch" "$w_major" "$w_minor" "$w_patch"; do
+        [[ "$part" =~ ^[0-9]+$ ]] || return 1
+    done
+
+    h_major=$((10#$h_major))
+    h_minor=$((10#$h_minor))
+    h_patch=$((10#$h_patch))
+    w_major=$((10#$w_major))
+    w_minor=$((10#$w_minor))
+    w_patch=$((10#$w_patch))
+
+    (( h_major > w_major )) && return 0
+    (( h_major < w_major )) && return 1
+    (( h_minor > w_minor )) && return 0
+    (( h_minor < w_minor )) && return 1
+    (( h_patch >= w_patch ))
+}
+
+source_build_go_ok() {
+    local version
+    version=$(installed_go_version) || return 1
+    go_version_at_least "$version" "$SOURCE_BUILD_MIN_GO_VERSION"
+}
+
 preflight_source_build_prereq() {
     [[ "$VERSION" == "latest" ]] || return 0
 
     fetch_latest_release_tag
     [[ -n "$LATEST_RELEASE_TAG" ]] && return 0
-    command -v go >/dev/null 2>&1 && return 0
 
-    echo -e "${RED}Error: No Groundskeeper release binary is published yet, and Go is not installed.${NC}"
+    local go_version
+    if go_version=$(installed_go_version); then
+        if go_version_at_least "$go_version" "$SOURCE_BUILD_MIN_GO_VERSION"; then
+            return 0
+        fi
+        echo -e "${RED}Error: No Groundskeeper release binary is published yet, and Go ${go_version} is too old.${NC}"
+        echo "Groundskeeper source builds require Go ${SOURCE_BUILD_MIN_GO_VERSION} or newer."
+    else
+        echo -e "${RED}Error: No Groundskeeper release binary is published yet, and Go is not installed.${NC}"
+    fi
     print_source_build_go_help
     exit 1
 }
@@ -586,14 +646,14 @@ if [[ "$VERSION" == "latest" ]]; then
     fetch_latest_release_tag
     VERSION="$LATEST_RELEASE_TAG"
     if [[ -z "$VERSION" ]]; then
-        if [[ -f "go.mod" && -d "cmd/groundskeeper" ]] && command -v go &> /dev/null; then
+        if [[ -f "go.mod" && -d "cmd/groundskeeper" ]] && source_build_go_ok; then
             echo -e "${YELLOW}No latest release found; building from local source checkout.${NC}"
             mkdir -p "$INSTALL_DIR"
             echo -e "Installing to ${GREEN}${INSTALL_DIR}/${BINARY_NAME}${NC}"
             go build -o "$INSTALL_DIR/$BINARY_NAME" ./cmd/groundskeeper
             chmod +x "$INSTALL_DIR/$BINARY_NAME"
             INSTALLED_FROM_SOURCE=true
-        elif command -v go &> /dev/null; then
+        elif source_build_go_ok; then
             echo -e "${YELLOW}No latest release found; building from public source module.${NC}"
             mkdir -p "$INSTALL_DIR"
             echo -e "Installing to ${GREEN}${INSTALL_DIR}/${BINARY_NAME}${NC}"

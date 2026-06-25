@@ -104,6 +104,24 @@ func TestInstallScript_FallsBackToPublicModuleWhenLatestMissing(t *testing.T) {
 	}
 }
 
+func TestInstallScript_PreflightsSupportedGoForSourceFallback(t *testing.T) {
+	body := installScriptBody(t)
+
+	for _, want := range []string{
+		`SOURCE_BUILD_MIN_GO_VERSION="1.25.11"`,
+		"installed_go_version()",
+		"go_version_at_least()",
+		"source_build_go_ok()",
+		"Groundskeeper source builds require Go ${SOURCE_BUILD_MIN_GO_VERSION} or newer.",
+		`[[ -f "go.mod" && -d "cmd/groundskeeper" ]] && source_build_go_ok`,
+		"elif source_build_go_ok; then",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install.sh should preflight a supported Go version before source fallback; missing %q", want)
+		}
+	}
+}
+
 func TestInstallScript_UsesGroundskeeperInstallerCopy(t *testing.T) {
 	body := installScriptBody(t)
 

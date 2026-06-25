@@ -348,6 +348,7 @@ func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 		"GOPROXY=direct",
 		"preflight_source_build_prereq",
 		"No Groundskeeper release binary is published yet",
+		"SOURCE_BUILD_MIN_GO_VERSION=\"1.25.11\"",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("install.sh missing %q", want)
@@ -356,29 +357,10 @@ func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 }
 
 func TestInstallScriptPreflightsGoWhenNoRelease(t *testing.T) {
-	bashPath := "/bin/bash"
-	if _, err := os.Stat(bashPath); err != nil {
-		var lookupErr error
-		bashPath, lookupErr = exec.LookPath("bash")
-		if lookupErr != nil {
-			t.Skip("bash not available")
-		}
-	}
-
+	bashPath := testBashPath(t)
 	home := t.TempDir()
 	bin := t.TempDir()
-	stubs := map[string]string{
-		"curl":  "#!/bin/sh\nexit 22\n",
-		"grep":  "#!/bin/sh\nquiet=0\ncase \"$1\" in -q|-qi|-iq) quiet=1; shift ;; esac\npattern=$1\nshift\nfound=1\nif [ \"$#\" -gt 0 ]; then\n  for file in \"$@\"; do\n    [ -r \"$file\" ] || continue\n    while IFS= read -r line; do\n      case \"$line\" in *\"$pattern\"*) found=0; [ \"$quiet\" = 1 ] || printf '%s\\n' \"$line\" ;; esac\n    done < \"$file\"\n  done\nelse\n  while IFS= read -r line; do\n    case \"$line\" in *\"$pattern\"*) found=0; [ \"$quiet\" = 1 ] || printf '%s\\n' \"$line\" ;; esac\n  done\nfi\nexit \"$found\"\n",
-		"sed":   "#!/bin/sh\ncat\n",
-		"tr":    "#!/bin/sh\nwhile IFS= read -r line; do case \"$line\" in Linux) printf 'linux\\n' ;; Darwin) printf 'darwin\\n' ;; *) printf '%s\\n' \"$line\" ;; esac; done\n",
-		"uname": "#!/bin/sh\ncase \"$1\" in -m) printf 'x86_64\\n' ;; *) printf 'Linux\\n' ;; esac\n",
-	}
-	for name, script := range stubs {
-		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
-			t.Fatalf("write %s stub: %v", name, err)
-		}
-	}
+	writeInstallNoReleaseStubs(t, bin, nil)
 
 	cmd := exec.Command(bashPath, "../../install.sh", "--non-interactive")
 	cmd.Env = append(os.Environ(),
@@ -393,7 +375,7 @@ func TestInstallScriptPreflightsGoWhenNoRelease(t *testing.T) {
 	for _, want := range []string{
 		"No Groundskeeper release binary is published yet",
 		"Pre-release installs fall back to building github.com/potato-hash/groundskeeper/cmd/groundskeeper@main",
-		"Install Go, then re-run the same install command.",
+		"Install Go 1.25.11 or newer, then re-run the same install command.",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("install preflight output missing %q\n--- output ---\n%s", want, body)
@@ -404,16 +386,51 @@ func TestInstallScriptPreflightsGoWhenNoRelease(t *testing.T) {
 	}
 }
 
-func TestInstallScriptFailsWithoutTmuxInNonInteractiveMode(t *testing.T) {
-	bashPath := "/bin/bash"
-	if _, err := os.Stat(bashPath); err != nil {
-		var lookupErr error
-		bashPath, lookupErr = exec.LookPath("bash")
-		if lookupErr != nil {
-			t.Skip("bash not available")
+func TestInstallScriptPreflightsOldGoWhenNoRelease(t *testing.T) {
+	bashPath := testBashPath(t)
+	home := t.TempDir()
+	bin := t.TempDir()
+	writeInstallNoReleaseStubs(t, bin, map[string]string{
+		"go": `#!/bin/sh
+if [ "$1" = "env" ] && [ "$2" = "GOVERSION" ]; then
+  printf 'go1.24.13\n'
+  exit 0
+fi
+if [ "$1" = "version" ]; then
+  printf 'go version go1.24.13 linux/amd64\n'
+  exit 0
+fi
+exit 1
+`,
+	})
+
+	cmd := exec.Command(bashPath, "../../install.sh", "--non-interactive")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"PATH="+bin,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("install.sh unexpectedly succeeded without release and with old Go\n%s", out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"No Groundskeeper release binary is published yet",
+		"Go 1.24.13 is too old",
+		"Groundskeeper source builds require Go 1.25.11 or newer.",
+		"Install Go 1.25.11 or newer, then re-run the same install command.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install old-Go preflight output missing %q\n--- output ---\n%s", want, body)
 		}
 	}
+	if strings.Contains(body, "tmux is not installed") {
+		t.Fatalf("install.sh checked tmux before source-build Go version preflight\n--- output ---\n%s", body)
+	}
+}
 
+func TestInstallScriptFailsWithoutTmuxInNonInteractiveMode(t *testing.T) {
+	bashPath := testBashPath(t)
 	home := t.TempDir()
 	bin := t.TempDir()
 	stubs := map[string]string{
@@ -456,6 +473,38 @@ esac
 	}
 	if strings.Contains(body, "Installation successful!") {
 		t.Fatalf("install.sh claimed success without tmux\n--- output ---\n%s", body)
+	}
+}
+
+func testBashPath(t *testing.T) string {
+	t.Helper()
+	bashPath := "/bin/bash"
+	if _, err := os.Stat(bashPath); err == nil {
+		return bashPath
+	}
+	found, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	return found
+}
+
+func writeInstallNoReleaseStubs(t *testing.T, bin string, extra map[string]string) {
+	t.Helper()
+	stubs := map[string]string{
+		"curl":  "#!/bin/sh\nexit 22\n",
+		"grep":  "#!/bin/sh\nquiet=0\ncase \"$1\" in -q|-qi|-iq) quiet=1; shift ;; esac\npattern=$1\nshift\nfound=1\nif [ \"$#\" -gt 0 ]; then\n  for file in \"$@\"; do\n    [ -r \"$file\" ] || continue\n    while IFS= read -r line; do\n      case \"$line\" in *\"$pattern\"*) found=0; [ \"$quiet\" = 1 ] || printf '%s\\n' \"$line\" ;; esac\n    done < \"$file\"\n  done\nelse\n  while IFS= read -r line; do\n    case \"$line\" in *\"$pattern\"*) found=0; [ \"$quiet\" = 1 ] || printf '%s\\n' \"$line\" ;; esac\n  done\nfi\nexit \"$found\"\n",
+		"sed":   "#!/bin/sh\ncat\n",
+		"tr":    "#!/bin/sh\nwhile IFS= read -r line; do case \"$line\" in Linux) printf 'linux\\n' ;; Darwin) printf 'darwin\\n' ;; *) printf '%s\\n' \"$line\" ;; esac; done\n",
+		"uname": "#!/bin/sh\ncase \"$1\" in -m) printf 'x86_64\\n' ;; *) printf 'Linux\\n' ;; esac\n",
+	}
+	for name, script := range extra {
+		stubs[name] = script
+	}
+	for name, script := range stubs {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
+			t.Fatalf("write %s stub: %v", name, err)
+		}
 	}
 }
 
