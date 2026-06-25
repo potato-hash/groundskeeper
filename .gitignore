@@ -56,6 +56,14 @@ Thumbs.db
 .worktree/
 groundskeeper-test
 # Tailwind brute-force diff gate scratch file (make css temp artifact)
+# Large demo assets (from Agent Deck upstream, too large for jj snapshot)
+demos/*.mp4
+demos/*.webm
+demos/*.gif
+docs/images/*.png
+documentation/assets/*.png
+# Stale local build binary
+/groundskeeper
 internal/web/static/.brute-tw.src.css
 /dist
 
