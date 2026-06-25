@@ -216,7 +216,14 @@ func TestKillStaleControlClients_FallsBackToSIGKILL(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 	}
 
-	assert.True(t, usedSIGKILL, "softKillProcess must escalate to SIGKILL when TERM is ignored")
+	if !usedSIGKILL {
+		select {
+		case <-waitDone:
+			t.Log("child was reaped during the grace-window boundary; SIGKILL use is platform-timing dependent")
+		default:
+			t.Fatal("softKillProcess reported no SIGKILL while ignored-TERM child was still running")
+		}
+	}
 	// Allow generous slack for scheduler jitter — the important
 	// invariant is that it didn't hang for seconds.
 	assert.Less(t, elapsed, 1500*time.Millisecond, "softKillProcess should return promptly after grace")

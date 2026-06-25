@@ -367,15 +367,23 @@ func TestInstallScriptPreflightsGoWhenNoRelease(t *testing.T) {
 
 	home := t.TempDir()
 	bin := t.TempDir()
-	curlStub := filepath.Join(bin, "curl")
-	if err := os.WriteFile(curlStub, []byte("#!/usr/bin/env sh\nexit 22\n"), 0o755); err != nil {
-		t.Fatal(err)
+	stubs := map[string]string{
+		"curl":  "#!/bin/sh\nexit 22\n",
+		"grep":  "#!/bin/sh\nquiet=0\ncase \"$1\" in -q|-qi|-iq) quiet=1; shift ;; esac\npattern=$1\nshift\nfound=1\nif [ \"$#\" -gt 0 ]; then\n  for file in \"$@\"; do\n    [ -r \"$file\" ] || continue\n    while IFS= read -r line; do\n      case \"$line\" in *\"$pattern\"*) found=0; [ \"$quiet\" = 1 ] || printf '%s\\n' \"$line\" ;; esac\n    done < \"$file\"\n  done\nelse\n  while IFS= read -r line; do\n    case \"$line\" in *\"$pattern\"*) found=0; [ \"$quiet\" = 1 ] || printf '%s\\n' \"$line\" ;; esac\n  done\nfi\nexit \"$found\"\n",
+		"sed":   "#!/bin/sh\ncat\n",
+		"tr":    "#!/bin/sh\nwhile IFS= read -r line; do case \"$line\" in Linux) printf 'linux\\n' ;; Darwin) printf 'darwin\\n' ;; *) printf '%s\\n' \"$line\" ;; esac; done\n",
+		"uname": "#!/bin/sh\ncase \"$1\" in -m) printf 'x86_64\\n' ;; *) printf 'Linux\\n' ;; esac\n",
+	}
+	for name, script := range stubs {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
+			t.Fatalf("write %s stub: %v", name, err)
+		}
 	}
 
 	cmd := exec.Command(bashPath, "../../install.sh", "--non-interactive")
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
-		"PATH="+bin+":/usr/bin:/bin:/usr/sbin:/sbin",
+		"PATH="+bin,
 	)
 	out, err := cmd.CombinedOutput()
 	if err == nil {

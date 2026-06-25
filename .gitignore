@@ -16,6 +16,8 @@ build/
 
 # Dependency directories
 vendor/
+!internal/web/static/vendor/
+!internal/web/static/vendor/**
 node_modules/
 
 # Playwright
