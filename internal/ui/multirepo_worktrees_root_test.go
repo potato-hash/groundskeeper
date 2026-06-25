@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 )
 
 // TestMultiRepoWorktreesRoot_UnderDataDirNotTemp is the regression test for the
@@ -25,7 +27,7 @@ func TestMultiRepoWorktreesRoot_UnderDataDirNotTemp(t *testing.T) {
 	}
 
 	// Root must resolve under the persistent XDG data dir.
-	wantPrefix := filepath.Join(home, ".local", "share", "agent-deck")
+	wantPrefix := filepath.Join(home, ".local", "share", agentpaths.AppDirName)
 	if !strings.HasPrefix(filepath.Clean(root), filepath.Clean(wantPrefix)) {
 		t.Errorf("worktrees root %q is not under the data dir %q", root, wantPrefix)
 	}
@@ -41,7 +43,7 @@ func TestMultiRepoWorktreesRoot_UnderDataDirNotTemp(t *testing.T) {
 		t.Errorf("worktrees root %q is the ephemeral temp fallback; persistent worktree state would be wiped on reboot/tmp-cleanup", root)
 	}
 
-	if !strings.HasSuffix(filepath.Clean(root), filepath.Join("agent-deck", "multi-repo-worktrees")) {
-		t.Errorf("worktrees root %q does not end with agent-deck/multi-repo-worktrees", root)
+	if !strings.HasSuffix(filepath.Clean(root), filepath.Join(agentpaths.AppDirName, "multi-repo-worktrees")) {
+		t.Errorf("worktrees root %q does not end with %s/multi-repo-worktrees", root, agentpaths.AppDirName)
 	}
 }

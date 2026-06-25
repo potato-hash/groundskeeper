@@ -66,16 +66,16 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 # --- issue #1350: XDG path resolution (mirror of internal/agentpaths) ---
-# The Go side (internal/agentpaths) resolves agent-deck paths XDG-first with a
+# The Go side (internal/agentpaths) resolves groundskeeper paths XDG-first with a
 # legacy ~/.agent-deck fallback. bridge.py must mirror that exactly, or on a
 # fresh XDG install the Go side writes conductors/config under XDG while the
 # bridge reads ~/.agent-deck -> routing dies (issue #1350). Keep this region
 # byte-identical with the embedded copy in conductor_templates.go.
-APP_DIR_NAME = "agent-deck"
+APP_DIR_NAME = "groundskeeper"
 
 
 def _xdg_dir(env_name: str, *fallback_parts: str) -> Path:
-    """Mirror agentpaths.xdgDir: $XDG_*/agent-deck if absolute, else ~/<fallback>/agent-deck."""
+    """Mirror agentpaths.xdgDir: $XDG_*/groundskeeper if absolute, else ~/<fallback>/groundskeeper."""
     value = os.environ.get(env_name, "").strip()
     if value and os.path.isabs(value):
         return Path(value) / APP_DIR_NAME
@@ -103,7 +103,7 @@ def resolve_config_path(name: str) -> Path:
 def resolve_data_dir(*markers: str) -> Path:
     """Mirror agentpaths.EffectiveDataDir: return the XDG data dir if any marker
     exists there, else legacy if any marker exists there, else default XDG.
-    The returned path is the agent-deck data root; callers join the marker."""
+    The returned path is the groundskeeper data root; callers join the marker."""
     data_dir = _xdg_dir("XDG_DATA_HOME", ".local", "share")
     clean = [m for m in markers if m]
     if not clean:

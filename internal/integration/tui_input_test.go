@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// TestTUIInput_ArrowKeysNavigate launches the real agent-deck binary in a tmux
+// TestTUIInput_ArrowKeysNavigate launches the real groundskeeper binary in a tmux
 // session and verifies that arrow key escape sequences are interpreted (cursor
 // moves) rather than displayed as raw text.
 //
@@ -19,12 +19,12 @@ func TestTUIInput_ArrowKeysNavigate(t *testing.T) {
 	skipIfNoTmuxServer(t)
 
 	// Build the binary from current source so we test the working tree.
-	binPath := t.TempDir() + "/agent-deck-test"
-	build := exec.Command("go", "build", "-o", binPath, "./cmd/agent-deck/")
+	binPath := t.TempDir() + "/groundskeeper-test"
+	build := exec.Command("go", "build", "-o", binPath, "./cmd/groundskeeper/")
 	build.Dir = findRepoRoot(t)
 	build.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build agent-deck: %v\n%s", err, out)
+		t.Fatalf("failed to build groundskeeper: %v\n%s", err, out)
 	}
 
 	sess := "inttest-tui-input-" + sanitizeName(t.Name())
@@ -32,7 +32,7 @@ func TestTUIInput_ArrowKeysNavigate(t *testing.T) {
 		_ = exec.Command("tmux", "kill-session", "-t", sess).Run()
 	})
 
-	// Launch agent-deck in a tmux session with test profile (no real sessions).
+	// Launch groundskeeper in a tmux session with test profile (no real sessions).
 	err := exec.Command("tmux", "new-session", "-d", "-s", sess, "-x", "120", "-y", "40",
 		binPath, "-p", "_test_tui_input").Run()
 	if err != nil {
@@ -71,12 +71,12 @@ func TestTUIInput_ArrowKeysNavigate(t *testing.T) {
 func TestTUIInput_JKNavigation(t *testing.T) {
 	skipIfNoTmuxServer(t)
 
-	binPath := t.TempDir() + "/agent-deck-test"
-	build := exec.Command("go", "build", "-o", binPath, "./cmd/agent-deck/")
+	binPath := t.TempDir() + "/groundskeeper-test"
+	build := exec.Command("go", "build", "-o", binPath, "./cmd/groundskeeper/")
 	build.Dir = findRepoRoot(t)
 	build.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build agent-deck: %v\n%s", err, out)
+		t.Fatalf("failed to build groundskeeper: %v\n%s", err, out)
 	}
 
 	sess := "inttest-tui-jk-" + sanitizeName(t.Name())

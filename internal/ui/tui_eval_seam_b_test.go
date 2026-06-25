@@ -28,9 +28,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 // seamBTestWrapper is a tea.Model that delegates to Home but has a

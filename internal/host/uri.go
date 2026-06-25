@@ -12,8 +12,8 @@ import (
 // resources are read-only by default; writes require explicit registration and
 // approval. The scheme never exposes secrets — all output is redacted.
 type URIScheme struct {
-	db        *gkdb.DB
-	writable  map[string]bool // registered writable paths
+	db       *gkdb.DB
+	writable map[string]bool // registered writable paths
 }
 
 // NewURIScheme creates a pa:// scheme backed by the durable DB.

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 )
 
 const (
@@ -284,7 +286,7 @@ func WithHooksDir(hostDir string) ContainerConfigOption {
 		}
 		cfg.volumes = append(cfg.volumes, VolumeMount{
 			hostPath:      hostDir,
-			containerPath: cfg.containerHome + "/.local/share/agent-deck/hooks",
+			containerPath: filepath.Join(cfg.containerHome, ".local", "share", agentpaths.AppDirName, "hooks"),
 		})
 	}
 }

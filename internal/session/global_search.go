@@ -16,8 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/potato-hash/groundskeeper/internal/logging"
 	"github.com/fsnotify/fsnotify"
+	"github.com/potato-hash/groundskeeper/internal/logging"
 	"github.com/sahilm/fuzzy"
 	"golang.org/x/time/rate"
 )

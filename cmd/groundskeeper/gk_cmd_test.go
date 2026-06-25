@@ -710,7 +710,11 @@ func TestRedactedCommandOutputHidesProviderKeys(t *testing.T) {
 	t.Setenv("OLLAMA_CLOUD_API_KEY", "temporary-test-key")
 	t.Setenv("GITHUB_TOKEN", "github-token-value")
 
-	got := redactedCommandOutput([]byte("failed with temporary-test-key and github-token-value"))
+	env := []string{
+		"OLLAMA_CLOUD_API_KEY=temporary-test-key",
+		"GITHUB_TOKEN=github-token-value",
+	}
+	got := redactedCommandOutput([]byte("failed with temporary-test-key and github-token-value"), env)
 	if strings.Contains(got, "temporary-test-key") || strings.Contains(got, "github-token-value") {
 		t.Fatalf("redactedCommandOutput leaked provider key: %q", got)
 	}

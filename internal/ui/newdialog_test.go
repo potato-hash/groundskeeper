@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/potato-hash/groundskeeper/internal/session"
 	"github.com/potato-hash/groundskeeper/internal/statedb"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestNewNewDialog(t *testing.T) {

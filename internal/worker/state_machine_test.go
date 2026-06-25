@@ -33,9 +33,6 @@ func TestPromptAckDoesNotCompleteJob(t *testing.T) {
 	if got != nil && got.Status == gkdb.JobDone {
 		t.Error("job is done after prompt ack — prompt ack is NOT completion")
 	}
-	if got != nil && got.Status == gkdb.JobWaitingRuntime {
-		// Good — the state machine set it to waiting_runtime.
-	}
 
 	// Wait for completion.
 	deadline := time.After(5 * time.Second)

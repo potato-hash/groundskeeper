@@ -97,14 +97,14 @@ func runColdStart(t *testing.T, bin string, env []string, arg string) {
 	if err != nil {
 		t.Fatalf("%s %s failed: %v\n%s", bin, arg, err, string(out))
 	}
-	// Sanity: --version must mention "Agent Deck" and --help must mention
+	// Sanity: --version must mention "Groundskeeper" and --help must mention
 	// a top-level subcommand. Cheap correctness check that catches a
 	// regression that swallows output (the bug class the perf budget
 	// alone wouldn't notice).
 	switch arg {
 	case "--version":
-		if !strings.Contains(string(out), "Agent Deck") {
-			t.Fatalf("--version output missing 'Agent Deck' marker:\n%s", string(out))
+		if !strings.Contains(string(out), "Groundskeeper") {
+			t.Fatalf("--version output missing 'Groundskeeper' marker:\n%s", string(out))
 		}
 	case "--help":
 		if len(strings.TrimSpace(string(out))) == 0 {

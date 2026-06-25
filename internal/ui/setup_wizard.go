@@ -3,10 +3,10 @@ package ui
 import (
 	"strings"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 // SetupWizard represents the first-time setup wizard dialog

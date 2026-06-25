@@ -130,8 +130,8 @@ func canonicalJSON(req *DeliveryRequest) ([]byte, error) {
 // SidecarClient delivers a signed request to a sidecar endpoint over HTTP.
 type SidecarClient struct {
 	BaseURL string
-	Key      []byte
-	HTTP     *http.Client
+	Key     []byte
+	HTTP    *http.Client
 }
 
 // Deliver posts a signed DeliveryRequest to the sidecar. The sidecar verifies

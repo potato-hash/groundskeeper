@@ -13,7 +13,6 @@ package host
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/potato-hash/groundskeeper/internal/gkdb"
@@ -21,18 +20,18 @@ import (
 
 // ToolCall is a parsed host_tool_call frame.
 type ToolCall struct {
-	ID         string                 // frame id (for result correlation)
-	ToolCallID string                 // OMP tool call id
-	ToolName   string                 // e.g. "request_approval", "record_audit"
+	ID         string // frame id (for result correlation)
+	ToolCallID string // OMP tool call id
+	ToolName   string // e.g. "request_approval", "record_audit"
 	Arguments  map[string]any
 }
 
 // ToolResult is the host_tool_result frame sent back to OMP.
 type ToolResult struct {
-	Type   string `json:"type"`         // always "host_tool_result"
-	ID     string `json:"id"`           // matches the ToolCall ID
-	Result any    `json:"result"`
-	IsError bool  `json:"isError,omitempty"`
+	Type    string `json:"type"` // always "host_tool_result"
+	ID      string `json:"id"`   // matches the ToolCall ID
+	Result  any    `json:"result"`
+	IsError bool   `json:"isError,omitempty"`
 }
 
 // URIRequest is a parsed host_uri_request frame.
@@ -67,8 +66,8 @@ type ToolHandler func(args map[string]any) (content string, isError bool)
 // NewBridge creates a bridge with the built-in host tools registered.
 func NewBridge(db *gkdb.DB) *Bridge {
 	b := &Bridge{
-		db:    db,
-		tools: make(map[string]ToolHandler),
+		db:     db,
+		tools:  make(map[string]ToolHandler),
 		scheme: NewURIScheme(db),
 	}
 	b.registerBuiltins()
@@ -86,7 +85,7 @@ func (b *Bridge) HandleToolCallInternal(call *ToolCall) *ToolResult {
 	handler, ok := b.tools[call.ToolName]
 	if !ok {
 		return &ToolResult{Type: "host_tool_result", ID: call.ID,
-			Result: map[string]any{"content": fmt.Sprintf("unknown host tool: %s", call.ToolName)},
+			Result:  map[string]any{"content": fmt.Sprintf("unknown host tool: %s", call.ToolName)},
 			IsError: true}
 	}
 	content, isErr := handler(call.Arguments)
@@ -230,6 +229,3 @@ func (b *Bridge) ToolNames() []string {
 	}
 	return out
 }
-
-// trimSpace helper
-func trimSpace(s string) string { return strings.TrimSpace(s) }

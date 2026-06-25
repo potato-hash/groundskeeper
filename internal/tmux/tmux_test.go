@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -2261,7 +2262,7 @@ func TestSessionLogFile(t *testing.T) {
 	sess := NewSession("test-log", t.TempDir())
 
 	logFile := sess.LogFile()
-	assert.Equal(t, filepath.Join(data, "agent-deck", "logs", sess.Name+".log"), logFile)
+	assert.Equal(t, filepath.Join(data, agentpaths.AppDirName, "logs", sess.Name+".log"), logFile)
 	assert.Contains(t, logFile, "agentdeck_test-log")
 	assert.True(t, strings.HasSuffix(logFile, ".log"))
 }

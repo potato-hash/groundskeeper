@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 func TestIssue1103_Header_ShowsLatencyMs_ForConnectedRemote(t *testing.T) {

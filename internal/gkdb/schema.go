@@ -206,7 +206,7 @@ func (g *DB) ClaimNextJob(now time.Time) (*JobRow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gkdb: claim begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	row := tx.QueryRow(`
 		SELECT id, thread_id, task_id, status, kind, attempts, max_attempts,
@@ -274,7 +274,7 @@ func (g *DB) DeadLetter(jobID, reason string) error {
 	if err != nil {
 		return fmt.Errorf("gkdb: deadletter begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var attempts, maxAttempts int64
 	var threadID string

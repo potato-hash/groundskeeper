@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -162,7 +163,7 @@ func TestUpdateBridgePy_NoConductorDir(t *testing.T) {
 	require.NoError(t, err)
 
 	legacyCondDir := filepath.Join(tmpHome, ".agent-deck", "conductor")
-	xdgCondDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "agent-deck", "conductor")
+	xdgCondDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), agentpaths.AppDirName, "conductor")
 	_, legacyErr := os.Stat(legacyCondDir)
 	_, xdgErr := os.Stat(xdgCondDir)
 	assert.True(t, os.IsNotExist(legacyErr), "legacy conductor dir should not be created when not installed")
@@ -303,7 +304,7 @@ func TestUpdateBridgePy_HonorsConductorDirOverride(t *testing.T) {
 	// The default conductor roots must be untouched — proving the guard used the
 	// override, not agentpaths' default resolution.
 	legacyCondDir := filepath.Join(tmpHome, ".agent-deck", "conductor")
-	xdgCondDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "agent-deck", "conductor")
+	xdgCondDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), agentpaths.AppDirName, "conductor")
 	_, legacyErr := os.Stat(legacyCondDir)
 	_, xdgErr := os.Stat(xdgCondDir)
 	assert.True(t, os.IsNotExist(legacyErr), "default legacy conductor dir must not be touched")

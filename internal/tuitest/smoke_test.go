@@ -20,14 +20,14 @@ func skipIfNoTmuxServer(t *testing.T) {
 	}
 }
 
-// buildBinary builds the agent-deck binary into a temp directory with GOTOOLCHAIN=go1.25.11.
+// buildBinary builds the groundskeeper binary into a temp directory with GOTOOLCHAIN=go1.25.11.
 // Returns the path to the built binary.
 func buildBinary(t *testing.T) string {
 	t.Helper()
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "agent-deck")
+	binPath := filepath.Join(binDir, "groundskeeper")
 
-	cmd := exec.Command("go", "build", "-o", binPath, "./cmd/agent-deck")
+	cmd := exec.Command("go", "build", "-o", binPath, "./cmd/groundskeeper")
 	cmd.Dir = repoRoot(t)
 	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=go1.25.11")
 

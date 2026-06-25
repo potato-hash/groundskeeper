@@ -2,7 +2,7 @@
 
 bridge.py used to hardcode ~/.agent-deck for CONFIG_PATH / CONDUCTOR_DIR. On a
 fresh XDG install the Go side writes the bridge + conductors under
-$XDG_DATA_HOME/agent-deck and the config under $XDG_CONFIG_HOME/agent-deck, so
+$XDG_DATA_HOME/groundskeeper and the config under $XDG_CONFIG_HOME/groundskeeper, so
 the hardcoded paths made load_config() exit and discover_conductors() find
 nothing -> conductor message routing died.
 
@@ -29,6 +29,7 @@ import pytest
 # Canonical bridge source lives at internal/session/conductor_bridge.py
 # (embedded into the binary); there is no conductor/bridge.py in the repo.
 BRIDGE_DIR = Path(__file__).resolve().parents[2] / "internal" / "session"
+APP_DIR_NAME = "groundskeeper"
 
 
 def _run_probe(env_overrides: dict[str, str]) -> dict:
@@ -85,9 +86,9 @@ def test_resolves_xdg_when_xdg_populated(tmp_path: Path) -> None:
     xdg_config = tmp_path / "xdgconfig"
     home.mkdir()
 
-    xdg_conductor = xdg_data / "agent-deck" / "conductor"
+    xdg_conductor = xdg_data / APP_DIR_NAME / "conductor"
     _write_conductor(xdg_conductor, "c1")
-    xdg_cfg_dir = xdg_config / "agent-deck"
+    xdg_cfg_dir = xdg_config / APP_DIR_NAME
     xdg_cfg_dir.mkdir(parents=True)
     (xdg_cfg_dir / "config.toml").write_text("[telegram]\n")
 
@@ -119,7 +120,7 @@ def test_resolves_legacy_when_only_legacy_populated(tmp_path: Path) -> None:
     _write_conductor(legacy_conductor, "legacyc")
     (legacy / "config.toml").write_text("[telegram]\n")
 
-    # XDG dirs exist but have no agent-deck markers.
+    # XDG dirs exist but have no app markers.
     xdg_data.mkdir()
     xdg_config.mkdir()
 
@@ -151,8 +152,8 @@ def test_defaults_to_xdg_when_nothing_populated(tmp_path: Path) -> None:
         }
     )
 
-    assert out["conductor_dir"] == str(xdg_data / "agent-deck" / "conductor"), out
-    assert out["config_path"] == str(xdg_config / "agent-deck" / "config.toml"), out
+    assert out["conductor_dir"] == str(xdg_data / APP_DIR_NAME / "conductor"), out
+    assert out["config_path"] == str(xdg_config / APP_DIR_NAME / "config.toml"), out
     assert out["conductors"] == [], out
 
 
@@ -166,9 +167,9 @@ def test_conductor_dir_override_wins_over_xdg(tmp_path: Path) -> None:
     home.mkdir()
 
     # A populated XDG conductor root that must be IGNORED in favor of the override.
-    xdg_conductor = xdg_data / "agent-deck" / "conductor"
+    xdg_conductor = xdg_data / APP_DIR_NAME / "conductor"
     _write_conductor(xdg_conductor, "xdgc")
-    xdg_cfg_dir = xdg_config / "agent-deck"
+    xdg_cfg_dir = xdg_config / APP_DIR_NAME
     xdg_cfg_dir.mkdir(parents=True)
     (xdg_cfg_dir / "config.toml").write_text("[telegram]\n")
 
@@ -217,7 +218,7 @@ def test_empty_conductor_dir_override_falls_through_to_xdg(tmp_path: Path) -> No
     xdg_config = tmp_path / "xdgconfig"
     home.mkdir()
 
-    xdg_conductor = xdg_data / "agent-deck" / "conductor"
+    xdg_conductor = xdg_data / APP_DIR_NAME / "conductor"
     _write_conductor(xdg_conductor, "xdgc")
 
     out = _run_probe(
@@ -238,9 +239,9 @@ def test_unset_xdg_defaults_to_local_share_and_config(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
 
-    xdg_conductor = home / ".local" / "share" / "agent-deck" / "conductor"
+    xdg_conductor = home / ".local" / "share" / APP_DIR_NAME / "conductor"
     _write_conductor(xdg_conductor, "defc")
-    cfg_dir = home / ".config" / "agent-deck"
+    cfg_dir = home / ".config" / APP_DIR_NAME
     cfg_dir.mkdir(parents=True)
     (cfg_dir / "config.toml").write_text("[telegram]\n")
 

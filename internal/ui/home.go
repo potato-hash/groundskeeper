@@ -12569,7 +12569,6 @@ func (h *Home) View() string {
 	// Route to appropriate layout based on terminal width
 	layoutMode := h.getLayoutMode()
 
-
 	// Reserve a slice of the content viewport for the optional Groundskeeper
 	// threads panel so the existing session list shrinks rather than
 	// overflowing when GK is enabled. Zero-cost when gkSource is nil.

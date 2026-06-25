@@ -18,16 +18,20 @@ import (
 // bound the Unix-socket dial. The sweep removes the dead socket so the next ssh
 // opens a fresh master instead of blocking.
 func TestIssue1421_CleanStaleSSHSockets(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("/tmp", "gk-ssh-sock-*")
+	if err != nil {
+		t.Fatalf("create short socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	// (a) Stale socket: a leftover socket inode with no listener — exactly the
 	// on-disk state a crashed/killed SSH master leaves behind. SetUnlinkOnClose
 	// (false) keeps the socket file after Close so it becomes a true orphan.
-	stalePath := filepath.Join(dir, "stale@host:22")
+	stalePath := filepath.Join(dir, "stale.sock")
 	recreateOrphanSocket(t, stalePath)
 
 	// (b) Live socket: a listener that stays open for the duration of the test.
-	livePath := filepath.Join(dir, "live@host:22")
+	livePath := filepath.Join(dir, "live.sock")
 	liveLn, err := net.Listen("unix", livePath)
 	if err != nil {
 		t.Fatalf("create live socket: %v", err)

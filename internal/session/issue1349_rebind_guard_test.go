@@ -123,7 +123,7 @@ func bootstrapDaemonProfile(t *testing.T, profile string) (*TransitionDaemon, *S
 func writeTranscript1349(t *testing.T, inst *Instance, sessionID string, n int) {
 	t.Helper()
 	configDir := GetClaudeConfigDirForInstance(inst)
-	projDir := filepath.Join(configDir, "projects", ConvertToClaudeDirName(inst.EffectiveWorkingDir()))
+	projDir := claudeProjectDirForTest(t, configDir, inst.EffectiveWorkingDir())
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatalf("mkdir transcript dir: %v", err)
 	}

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 )
 
 // writeConductorDirConfig writes a config.toml carrying [conductor].dir under
@@ -12,7 +14,7 @@ import (
 // LoadUserConfig reads it fresh.
 func writeConductorDirConfig(t *testing.T, xdgConfigHome, dir string) {
 	t.Helper()
-	cfgDir := filepath.Join(xdgConfigHome, "agent-deck")
+	cfgDir := filepath.Join(xdgConfigHome, agentpaths.AppDirName)
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", cfgDir, err)
 	}
@@ -84,7 +86,7 @@ func TestConductorDir_ConfigOverrideExpandsEnvVar(t *testing.T) {
 // resolution untouched.
 func TestConductorDir_EmptyOverrideFallsThroughToXDG(t *testing.T) {
 	_, xdgConfigHome, xdgDataHome := setupSessionXDGPathEnv(t)
-	want := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	want := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 
 	for _, dir := range []string{"", "   "} {
 		writeConductorDirConfig(t, xdgConfigHome, dir)
@@ -135,7 +137,7 @@ func TestSetupConductorWithAgent_PreAcceptsClaudeTrustForOverrideDir(t *testing.
 
 	// The default XDG-rooted dir must NOT carry a trust entry — the pre-accept
 	// targeted the configured dir, not the default.
-	defaultDir := filepath.Join(xdgDataHome, "agent-deck", "conductor", name)
+	defaultDir := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor", name)
 	if e := conductorTrustEntry(t, defaultDir); e != nil {
 		t.Fatalf("unexpected trust entry for default dir %q: %v (pre-accept did not follow the override)", defaultDir, e)
 	}

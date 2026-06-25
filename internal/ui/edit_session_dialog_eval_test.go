@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 // Empty-form regression: a refactor that reset textinputs after Show

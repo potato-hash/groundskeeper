@@ -14,9 +14,9 @@ type Runtime string
 // RuntimeThreadRef is the handle returned when a thread is started: enough to
 // resume it, interrupt it, or correlate it with a worker process.
 type RuntimeThreadRef struct {
-	Runtime      Runtime
-	ProcessID    int    // OS pid of the worker subprocess (0 for the fake)
-	SessionDir   string // persistent session directory (resume target)
+	Runtime       Runtime
+	ProcessID     int    // OS pid of the worker subprocess (0 for the fake)
+	SessionDir    string // persistent session directory (resume target)
 	WorkspacePath string
 }
 
@@ -41,14 +41,14 @@ type RuntimeEvent struct {
 type EventKind string
 
 const (
-	EventReady            EventKind = "ready"              // worker up, accepting prompts
-	EventAgentStart       EventKind = "agent_start"         // a turn began
-	EventMessageUpdate    EventKind = "message_update"      // assistant message delta
-	EventAgentEnd         EventKind = "agent_end"           // turn completed (completion signal)
-	EventHostToolCall     EventKind = "host_tool_call"      // privileged tool request from agent
-	EventHostURIRequest   EventKind = "host_uri_request"    // URI fetch request
+	EventReady              EventKind = "ready"                // worker up, accepting prompts
+	EventAgentStart         EventKind = "agent_start"          // a turn began
+	EventMessageUpdate      EventKind = "message_update"       // assistant message delta
+	EventAgentEnd           EventKind = "agent_end"            // turn completed (completion signal)
+	EventHostToolCall       EventKind = "host_tool_call"       // privileged tool request from agent
+	EventHostURIRequest     EventKind = "host_uri_request"     // URI fetch request
 	EventExtensionUIRequest EventKind = "extension_ui_request" // Espalier UI surface
-	EventError            EventKind = "error"              // worker error
+	EventError              EventKind = "error"                // worker error
 )
 
 // AgentRuntimeAdapter is the runtime-neutral interface. The fake implements it

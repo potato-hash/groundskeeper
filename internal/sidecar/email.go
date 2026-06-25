@@ -28,8 +28,8 @@ func (h *EmailHandler) Deliver(req *channel.DeliveryRequest) error {
 		return errNoHandler
 	}
 	var p struct {
-		Message  string `json:"message"`
-		ThreadID string `json:"thread_id"`
+		Message  string   `json:"message"`
+		ThreadID string   `json:"thread_id"`
 		To       []string `json:"to"`
 	}
 	if err := decodeRaw(req.Payload, &p); err != nil {
@@ -46,4 +46,3 @@ func (h *EmailHandler) Deliver(req *channel.DeliveryRequest) error {
 	msg := []byte("To: " + strings.Join(to, ", ") + "\r\n" + body)
 	return smtp.SendMail(h.Addr, h.Auth, h.From, to, msg)
 }
-

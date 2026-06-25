@@ -15,8 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/potato-hash/groundskeeper/internal/termreply"
 	"github.com/creack/pty"
+	"github.com/potato-hash/groundskeeper/internal/termreply"
 	"golang.org/x/term"
 )
 

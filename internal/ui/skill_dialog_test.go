@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 func setupSkillDialogEnv(t *testing.T) func() {

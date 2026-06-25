@@ -24,8 +24,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/potato-hash/groundskeeper/internal/termreply"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/potato-hash/groundskeeper/internal/termreply"
 )
 
 // shiftEnterMarker is the Unicode Private-Use-Area rune used to relay

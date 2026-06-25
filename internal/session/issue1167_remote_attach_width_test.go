@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/potato-hash/groundskeeper/internal/tmux"
 	"github.com/creack/pty"
+	"github.com/potato-hash/groundskeeper/internal/tmux"
 )
 
 // TestRemoteAttach_FullWidthFromFrameOne is the remote-surface (#1167) parity

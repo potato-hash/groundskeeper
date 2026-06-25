@@ -1,6 +1,6 @@
 //go:build eval_smoke
 
-// Behavioral eval for the `agent-deck --version` update-nudge annotation
+// Behavioral eval for the `groundskeeper --version` update-nudge annotation
 // shipped in v1.7.59 (conductor task #45). Motivated by 4 users on
 // 2026-04-22 posting feedback from versions 15-39 releases old — they
 // were hitting bugs we already fixed. The annotation tells a user they
@@ -29,7 +29,7 @@ import (
 
 // TestEval_VersionFlag_ShowsUpdateAnnotationFromCache seeds the scratch
 // HOME with an update-cache.json claiming the user is 30 releases behind,
-// then runs `agent-deck --version` and asserts the annotation appears on
+// then runs `groundskeeper --version` and asserts the annotation appears on
 // stdout. The spawn is offline — no network required.
 func TestEval_VersionFlag_ShowsUpdateAnnotationFromCache(t *testing.T) {
 	sb := harness.NewSandbox(t)
@@ -38,7 +38,7 @@ func TestEval_VersionFlag_ShowsUpdateAnnotationFromCache(t *testing.T) {
 	// shape mirrors internal/update.UpdateCache; hand-written here so the
 	// eval package doesn't depend on internal/update (which it could not
 	// import under Go's internal-package rule anyway).
-	cacheDir := filepath.Join(sb.Home, ".cache", "agent-deck")
+	cacheDir := filepath.Join(sb.Home, ".cache", "groundskeeper")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		t.Fatalf("mkdir update cache dir: %v", err)
 	}
@@ -69,18 +69,18 @@ func TestEval_VersionFlag_ShowsUpdateAnnotationFromCache(t *testing.T) {
 	cmd.Env = sb.Env()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("agent-deck --version failed: %v\noutput: %s", err, string(out))
+		t.Fatalf("groundskeeper --version failed: %v\noutput: %s", err, string(out))
 	}
 	got := string(out)
 
-	if !strings.Contains(got, "Agent Deck v") {
+	if !strings.Contains(got, "Groundskeeper v") {
 		t.Fatalf("missing version header; got: %q", got)
 	}
 	if !strings.Contains(got, "(update available: v9.9.99)") {
 		t.Fatalf("missing update annotation — did the flag dispatch bypass writeVersionOutput?\n"+
 			"got: %q\n"+
 			"wanted substring: %q\n"+
-			"Fix hint: check cmd/agent-deck/main.go line ~213 ('case \"version\", \"--version\", \"-v\":') "+
+			"Fix hint: check cmd/groundskeeper/main.go line ~213 ('case \"version\", \"--version\", \"-v\":') "+
 			"still calls writeVersionOutput(os.Stdout, Version).",
 			got, "(update available: v9.9.99)")
 	}
@@ -93,7 +93,7 @@ func TestEval_VersionFlag_ShowsUpdateAnnotationFromCache(t *testing.T) {
 func TestEval_VersionFlag_EnvSkipSuppressesAnnotation(t *testing.T) {
 	sb := harness.NewSandbox(t)
 
-	cacheDir := filepath.Join(sb.Home, ".cache", "agent-deck")
+	cacheDir := filepath.Join(sb.Home, ".cache", "groundskeeper")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		t.Fatalf("mkdir update cache dir: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestEval_VersionFlag_EnvSkipSuppressesAnnotation(t *testing.T) {
 	baseCmd.Env = sb.Env()
 	baseOut, baseErr := baseCmd.CombinedOutput()
 	if baseErr != nil {
-		t.Fatalf("baseline agent-deck --version failed: %v\noutput: %s", baseErr, string(baseOut))
+		t.Fatalf("baseline groundskeeper --version failed: %v\noutput: %s", baseErr, string(baseOut))
 	}
 	if !strings.Contains(string(baseOut), "update available") {
 		t.Fatalf("baseline failed: annotation absent without kill-switch — "+
@@ -126,7 +126,7 @@ func TestEval_VersionFlag_EnvSkipSuppressesAnnotation(t *testing.T) {
 	cmd.Env = append(sb.Env(), "AGENTDECK_SKIP_UPDATE_CHECK=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("agent-deck --version failed: %v\noutput: %s", err, string(out))
+		t.Fatalf("groundskeeper --version failed: %v\noutput: %s", err, string(out))
 	}
 	got := string(out)
 

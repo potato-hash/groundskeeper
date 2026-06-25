@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 )
 
 func testWatcherHome(t *testing.T) string {
@@ -208,7 +210,7 @@ func TestWatcherDirHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WatcherDir: %v", err)
 	}
-	expected := filepath.Join(tmpDir, ".local", "share", "agent-deck", "watcher")
+	expected := filepath.Join(tmpDir, ".local", "share", agentpaths.AppDirName, "watcher")
 	if dir != expected {
 		t.Errorf("WatcherDir() = %q, want %q", dir, expected)
 	}

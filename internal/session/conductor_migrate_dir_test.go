@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 )
 
 // writeConductorHome creates a conductor home dir under base populated with the
@@ -45,7 +47,7 @@ func assertNotExist(t *testing.T, path string) {
 
 func TestMigrateConductorDir_MovesHomesAndPreservesUserState(t *testing.T) {
 	_, _, xdgDataHome := setupSessionXDGPathEnv(t)
-	defaultBase := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	defaultBase := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 	meta := `{"name":"alpha","agent":"claude","profile":"default","heartbeat_enabled":true,` +
 		`"description":"keep me","created_at":"2020-01-01T00:00:00Z","env":{"K":"V"},` +
 		`"env_file":"my.env","heartbeat_idle_minutes":9}`
@@ -113,7 +115,7 @@ func TestMigrateConductorDir_MovesHomesAndPreservesUserState(t *testing.T) {
 
 func TestMigrateConductorDir_DryRunChangesNothing(t *testing.T) {
 	_, _, xdgDataHome := setupSessionXDGPathEnv(t)
-	defaultBase := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	defaultBase := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 	writeConductorHome(t, defaultBase, "alpha", map[string]string{
 		"meta.json": `{"name":"alpha","profile":"default"}`,
 		"CLAUDE.md": "x",
@@ -142,7 +144,7 @@ func TestMigrateConductorDir_DryRunChangesNothing(t *testing.T) {
 
 func TestMigrateConductorDir_SkipsExistingWithoutForce(t *testing.T) {
 	_, _, xdgDataHome := setupSessionXDGPathEnv(t)
-	defaultBase := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	defaultBase := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 	writeConductorHome(t, defaultBase, "alpha", map[string]string{
 		"meta.json": `{"name":"alpha","profile":"default"}`,
 		"CLAUDE.md": "source version",
@@ -176,7 +178,7 @@ func TestMigrateConductorDir_SkipsExistingWithoutForce(t *testing.T) {
 
 func TestMigrateConductorDir_ForceMergesPreservingDest(t *testing.T) {
 	_, _, xdgDataHome := setupSessionXDGPathEnv(t)
-	defaultBase := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	defaultBase := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 	writeConductorHome(t, defaultBase, "alpha", map[string]string{
 		"meta.json":  `{"name":"alpha","profile":"default"}`,
 		"CLAUDE.md":  "source version",
@@ -219,7 +221,7 @@ func TestMigrateConductorDir_ForceMergesPreservingDest(t *testing.T) {
 // survive.
 func TestMigrateConductorDir_ForceRejectsDifferingMetaPreservesSource(t *testing.T) {
 	_, _, xdgDataHome := setupSessionXDGPathEnv(t)
-	defaultBase := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	defaultBase := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 	srcMeta := `{"name":"alpha","profile":"default","description":"SOURCE record"}`
 	dstMeta := `{"name":"alpha","profile":"default","description":"DEST record"}`
 	writeConductorHome(t, defaultBase, "alpha", map[string]string{"meta.json": srcMeta})
@@ -270,7 +272,7 @@ func TestMigrateConductorDir_ForceRejectsDifferingMetaPreservesSource(t *testing
 // refused and the resolver is left unchanged so no home is stranded invisibly.
 func TestMigrateConductorDir_SkippedHomeAbortsConfigFlip(t *testing.T) {
 	_, _, xdgDataHome := setupSessionXDGPathEnv(t)
-	defaultBase := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	defaultBase := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 	writeConductorHome(t, defaultBase, "alpha", map[string]string{"meta.json": `{"name":"alpha","profile":"default"}`})
 	writeConductorHome(t, defaultBase, "beta", map[string]string{"meta.json": `{"name":"beta","profile":"default"}`})
 	target := filepath.Join(t.TempDir(), "vault-conductors")
@@ -299,7 +301,7 @@ func TestMigrateConductorDir_SkippedHomeAbortsConfigFlip(t *testing.T) {
 // the config unchanged — fully recoverable, never a half-applied durable record.
 func TestMigrateConductorDir_CopyFailureLeavesSourcesIntact(t *testing.T) {
 	_, _, xdgDataHome := setupSessionXDGPathEnv(t)
-	defaultBase := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	defaultBase := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 	writeConductorHome(t, defaultBase, "alpha", map[string]string{
 		"meta.json": `{"name":"alpha","profile":"default","description":"durable"}`,
 		"CLAUDE.md": "edited",
@@ -357,7 +359,7 @@ func TestMigrateConductorDir_RejectsOverlap(t *testing.T) {
 // would-be rejection and mutates nothing.
 func TestMigrateConductorDir_DryRunReportsConflictsNoMutation(t *testing.T) {
 	_, _, xdgDataHome := setupSessionXDGPathEnv(t)
-	defaultBase := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	defaultBase := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 	writeConductorHome(t, defaultBase, "alpha", map[string]string{"meta.json": `{"name":"alpha","profile":"default","description":"src"}`})
 	target := filepath.Join(t.TempDir(), "vault-conductors")
 	writeConductorHome(t, target, "alpha", map[string]string{"meta.json": `{"name":"alpha","profile":"default","description":"dst"}`})
@@ -395,7 +397,7 @@ func TestMigrateConductorDir_DryRunReportsConflictsNoMutation(t *testing.T) {
 // written outside it.
 func TestMigrateConductorDir_DoesNotFollowSymlinksOutOfBase(t *testing.T) {
 	_, _, xdgDataHome := setupSessionXDGPathEnv(t)
-	defaultBase := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	defaultBase := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 
 	external := t.TempDir()
 	secret := filepath.Join(external, "secret.txt")
@@ -440,7 +442,7 @@ func TestMigrateConductorDir_DoesNotFollowSymlinksOutOfBase(t *testing.T) {
 // committed target. Run under -race to confirm no data race on the shared lock.
 func TestMigrateConductorDir_ConcurrentMetaWriteNotStranded(t *testing.T) {
 	_, _, xdgDataHome := setupSessionXDGPathEnv(t)
-	defaultBase := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	defaultBase := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 	writeConductorHome(t, defaultBase, "alpha", map[string]string{"meta.json": `{"name":"alpha","agent":"claude","profile":"default"}`})
 	target := filepath.Join(t.TempDir(), "vault-conductors")
 
@@ -479,7 +481,7 @@ func TestMigrateConductorDir_ConcurrentMetaWriteNotStranded(t *testing.T) {
 // not silently merged-then-deleted — which would delete the one shared meta.json.
 func TestMigrateConductorDir_RejectsSymlinkAliasedSameTree(t *testing.T) {
 	_, _, xdgDataHome := setupSessionXDGPathEnv(t)
-	defaultBase := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	defaultBase := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 	writeConductorHome(t, defaultBase, "alpha", map[string]string{
 		"meta.json": `{"name":"alpha","profile":"default","description":"SHARED"}`,
 	})
@@ -514,14 +516,14 @@ func TestMigrateConductorDir_RejectsSymlinkAliasedSameTree(t *testing.T) {
 // leave the source's record intact.
 func TestMigrateConductorDir_VerifyRejectsRelocatedMetaSymlink(t *testing.T) {
 	_, _, xdgDataHome := setupSessionXDGPathEnv(t)
-	defaultBase := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	defaultBase := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 
 	alphaDir := filepath.Join(defaultBase, "alpha")
 	if err := os.MkdirAll(alphaDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// "../../external-id" from <base>/alpha resolves to <xdgDataHome>/agent-deck/external-id.
-	srcID := filepath.Join(xdgDataHome, "agent-deck", "external-id")
+	srcID := filepath.Join(xdgDataHome, agentpaths.AppDirName, "external-id")
 	if err := os.WriteFile(srcID, []byte(`{"name":"alpha","profile":"default","id":"REAL-SOURCE"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -733,7 +735,7 @@ func TestMigrateConductorDir_ForceRejectsSourceEntryAliasingTarget(t *testing.T)
 
 func TestDetectConductorDirSplitBrain(t *testing.T) {
 	_, xdgConfigHome, xdgDataHome := setupSessionXDGPathEnv(t)
-	defaultBase := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	defaultBase := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 	writeConductorHome(t, defaultBase, "alpha", map[string]string{
 		"meta.json": `{"name":"alpha","profile":"default"}`,
 	})

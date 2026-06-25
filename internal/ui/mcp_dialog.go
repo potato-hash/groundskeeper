@@ -6,10 +6,10 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/potato-hash/groundskeeper/internal/logging"
-	"github.com/potato-hash/groundskeeper/internal/session"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/potato-hash/groundskeeper/internal/logging"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 var mcpDialogLog = logging.ForComponent(logging.CompMCP)

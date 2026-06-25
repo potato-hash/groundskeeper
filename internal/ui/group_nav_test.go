@@ -14,6 +14,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
@@ -413,7 +414,7 @@ func TestNavHint_ShownOnFirstLaunch_DismissedAfterKeypress(t *testing.T) {
 
 	// Sentinel should already be written (write-through on display, so the
 	// hint never repeats even if the TUI crashes before first keypress).
-	sentinel := filepath.Join(tmpHome, ".local", "share", "agent-deck", ".nav-hint-v1760-shown")
+	sentinel := filepath.Join(tmpHome, ".local", "share", agentpaths.AppDirName, ".nav-hint-v1760-shown")
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Fatalf("sentinel not written at %s: %v", sentinel, err)
 	}
@@ -446,7 +447,7 @@ func TestNavHint_SkippedWhenSentinelExists(t *testing.T) {
 	})
 
 	// Pre-seed sentinel.
-	sentinel := filepath.Join(tmpHome, ".local", "share", "agent-deck", ".nav-hint-v1760-shown")
+	sentinel := filepath.Join(tmpHome, ".local", "share", agentpaths.AppDirName, ".nav-hint-v1760-shown")
 	if err := os.MkdirAll(filepath.Dir(sentinel), 0o755); err != nil {
 		t.Fatal(err)
 	}

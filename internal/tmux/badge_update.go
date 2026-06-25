@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 	"github.com/fsnotify/fsnotify"
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 )
 
 // Issue #1114: Badge update signal channel from hook to attach.

@@ -3,9 +3,9 @@ package ui
 import (
 	"strings"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 // modelsFetchedMsg is sent when async model list fetch completes

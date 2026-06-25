@@ -79,9 +79,9 @@ jobs:
       - name: Enable user lingering (systemd user scope)
         run: loginctl enable-linger "$USER" || true
 
-      - name: Build agent-deck binary
+      - name: Build groundskeeper compatibility binary
         run: |
-          go build -o /tmp/agent-deck ./cmd/agent-deck
+          go build -o /tmp/agent-deck ./cmd/groundskeeper
           echo "/tmp" >> "$GITHUB_PATH"
 
       - name: Run verification harness (stub claude)

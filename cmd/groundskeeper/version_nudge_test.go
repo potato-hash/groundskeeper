@@ -57,7 +57,7 @@ func TestVersionOutput_AppendsUpdateAnnotationWhenBehind(t *testing.T) {
 	writeVersionOutput(&buf, "1.7.20")
 	got := buf.String()
 
-	want := "Agent Deck v1.7.20 (update available: v1.7.58)\n"
+	want := "Groundskeeper v1.7.20 (update available: v1.7.58)\n"
 	if got != want {
 		t.Fatalf("version output mismatch:\n got: %q\nwant: %q", got, want)
 	}
@@ -80,7 +80,7 @@ func TestVersionOutput_NoAnnotationWhenUpToDate(t *testing.T) {
 	writeVersionOutput(&buf, "1.7.58")
 	got := buf.String()
 
-	want := "Agent Deck v1.7.58\n"
+	want := "Groundskeeper v1.7.58\n"
 	if got != want {
 		t.Fatalf("version output mismatch:\n got: %q\nwant: %q", got, want)
 	}
@@ -95,7 +95,7 @@ func TestVersionOutput_NoAnnotationWhenNoCache(t *testing.T) {
 	writeVersionOutput(&buf, "1.7.20")
 	got := buf.String()
 
-	want := "Agent Deck v1.7.20\n"
+	want := "Groundskeeper v1.7.20\n"
 	if got != want {
 		t.Fatalf("version output mismatch:\n got: %q\nwant: %q", got, want)
 	}
@@ -121,7 +121,7 @@ func TestVersionOutput_NoAnnotationWhenEnvSkipped(t *testing.T) {
 	writeVersionOutput(&buf, "1.7.20")
 	got := buf.String()
 
-	want := "Agent Deck v1.7.20\n"
+	want := "Groundskeeper v1.7.20\n"
 	if got != want {
 		t.Fatalf("version output mismatch:\n got: %q\nwant: %q", got, want)
 	}

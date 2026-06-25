@@ -35,21 +35,22 @@ func withTempHome(t *testing.T) string {
 	return temp
 }
 
-// writeConfig drops a config.toml with the given content into the test XDG
-// config dir.
+// writeConfig drops a config.toml with the given content into the effective
+// config path used by production code.
 func writeConfig(t *testing.T, home, content string) {
 	t.Helper()
-	configHome := os.Getenv("XDG_CONFIG_HOME")
-	if configHome == "" {
-		configHome = filepath.Join(home, ".config")
+	configPath, err := GetUserConfigPath()
+	if err != nil {
+		t.Fatalf("resolve config path: %v", err)
 	}
-	dir := filepath.Join(configHome, "agent-deck")
+	dir := filepath.Dir(configPath)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("mkdir agent-deck: %v", err)
+		t.Fatalf("mkdir config dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(content), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("write config.toml: %v", err)
 	}
+	ClearUserConfigCache()
 }
 
 // TestPluginDef_TOMLRoundTrip asserts that `[plugins.<name>]` tables in

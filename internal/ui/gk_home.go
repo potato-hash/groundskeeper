@@ -32,7 +32,7 @@ type HomeItem interface {
 	ID() string
 	Title() string
 	Status() string
-	Source() string       // "agentdeck" or "groundskeeper".
+	Source() string        // "agentdeck" or "groundskeeper".
 	IsGroundskeeper() bool // true iff item came from gkdb.
 }
 
@@ -75,7 +75,7 @@ func (a AgentDeckSessionItem) Status() string {
 	return string(a.Inst.GetStatusThreadSafe())
 }
 
-func (AgentDeckSessionItem) Source() string       { return "agentdeck" }
+func (AgentDeckSessionItem) Source() string        { return "agentdeck" }
 func (AgentDeckSessionItem) IsGroundskeeper() bool { return false }
 
 // AgentDeckSessionSource wraps the Agent Deck instances slice as a HomeSource.
@@ -110,11 +110,11 @@ type GroundskeeperThreadItem struct {
 	Thread gkdb.ThreadRow
 }
 
-func (g GroundskeeperThreadItem) ID() string             { return g.Thread.ID }
-func (g GroundskeeperThreadItem) Title() string          { return g.Thread.Title }
-func (g GroundskeeperThreadItem) Status() string         { return g.Thread.Status }
-func (GroundskeeperThreadItem) Source() string          { return "groundskeeper" }
-func (GroundskeeperThreadItem) IsGroundskeeper() bool    { return true }
+func (g GroundskeeperThreadItem) ID() string          { return g.Thread.ID }
+func (g GroundskeeperThreadItem) Title() string       { return g.Thread.Title }
+func (g GroundskeeperThreadItem) Status() string      { return g.Thread.Status }
+func (GroundskeeperThreadItem) Source() string        { return "groundskeeper" }
+func (GroundskeeperThreadItem) IsGroundskeeper() bool { return true }
 
 // Workspace returns the thread's workspace_path (or "" if unset). Used by
 // the enter-details handler.
@@ -262,7 +262,7 @@ func (h *Home) gkFooterLine() string {
 // gkSource != nil. Title (1) + 1 row per thread (capped) + footer (1) —
 // keeps the math simple in View(). The renderer clamps to fit.
 const (
-	gkSectionTitleLines = 1
+	gkSectionTitleLines  = 1
 	gkSectionFooterLines = 1
 )
 
@@ -381,7 +381,6 @@ func shortID(id string) string {
 	}
 	return id[:8]
 }
-
 
 // ----- Keybinding dispatch -----
 

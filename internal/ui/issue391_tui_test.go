@@ -24,9 +24,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 // forceTrueColorProfileOnce guarantees the lipgloss global profile is

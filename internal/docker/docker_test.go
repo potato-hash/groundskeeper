@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 	"github.com/stretchr/testify/require"
 )
 
@@ -272,7 +273,7 @@ func TestNewContainerConfig_HooksDir(t *testing.T) {
 	t.Parallel()
 
 	// hostDir is the PER-INSTANCE scoped subdir, not the global hooks dir.
-	perInstance := "/home/user/.local/share/agent-deck/hooks/sandbox/inst-123"
+	perInstance := filepath.Join("/home/user", ".local", "share", agentpaths.AppDirName, "hooks", "sandbox", "inst-123")
 	cfg := NewContainerConfig("/project",
 		WithHooksDir(perInstance),
 	)
@@ -280,7 +281,7 @@ func TestNewContainerConfig_HooksDir(t *testing.T) {
 	// Project mount + hooks mount.
 	require.Len(t, cfg.volumes, 2)
 	require.Equal(t, perInstance, cfg.volumes[1].hostPath)
-	require.Equal(t, containerHome+"/.local/share/agent-deck/hooks", cfg.volumes[1].containerPath)
+	require.Equal(t, filepath.Join(containerHome, ".local", "share", agentpaths.AppDirName, "hooks"), cfg.volumes[1].containerPath)
 	// Must be read-write: the container writes its own status file. RW is safe
 	// because the mount is scoped to this instance's own subdir.
 	require.False(t, cfg.volumes[1].readOnly)

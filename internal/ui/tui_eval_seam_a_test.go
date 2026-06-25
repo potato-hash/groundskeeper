@@ -21,8 +21,8 @@ package ui
 import (
 	"testing"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 // TestSeamA_KeyDispatch_HelpOverlayToggle is the canonical Seam A example:

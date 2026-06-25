@@ -15,9 +15,9 @@ import (
 
 // View is a snapshot of the fleet's durable state, materialized for rendering.
 type View struct {
-	Threads    []gkdb.ThreadRow
+	Threads     []gkdb.ThreadRow
 	RunningJobs []gkdb.JobRow
-	Pending    []gkdb.ApprovalRow
+	Pending     []gkdb.ApprovalRow
 	DeadLetters []gkdb.JobRow
 }
 

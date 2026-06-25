@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/potato-hash/groundskeeper/internal/feedback"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/potato-hash/groundskeeper/internal/feedback"
 )
 
 // fakeGhSender captures calls to Sender.GhCmd / BrowserCmd / ClipboardCmd so tests can

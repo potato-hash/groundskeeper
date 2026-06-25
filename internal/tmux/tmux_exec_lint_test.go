@@ -81,10 +81,10 @@ func TestNoRawTmuxExec_OutsideAllowlist(t *testing.T) {
 		// is passed; adding -L based on DefaultSocketName would over-
 		// restrict and break users who run `agent-deck session current`
 		// from a non-agent-deck tmux pane. Documented at each call site.
-		"cmd/agent-deck/cli_utils.go": {
+		"cmd/groundskeeper/cli_utils.go": {
 			{"tmux", "display-message", "-p", "#S"},
 		},
-		"cmd/agent-deck/session_cmd.go": {
+		"cmd/groundskeeper/session_cmd.go": {
 			{"tmux", "display-message", "-p", "#{session_name}\t#{pane_current_path}"},
 			{"tmux", "display-message", "-p", ""}, // multi-field variant (empty sentinel; matched loosely below)
 			{"tmux", "display-message", "-p", "#{session_name}"},

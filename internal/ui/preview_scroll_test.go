@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 // previewScrollSessionWithLines returns a session instance whose preview cache

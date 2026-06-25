@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/potato-hash/groundskeeper/internal/testutil"
 	"github.com/creack/pty"
+	"github.com/potato-hash/groundskeeper/internal/testutil"
 )
 
 // Harness is the live test scaffold.

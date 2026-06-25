@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 )
 
 // --- Systemd template generation tests ---
@@ -668,7 +670,7 @@ func TestRenderConductorHeartbeatScript_UsesXDGConductorRoot(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", xdgData)
 
-	wantRoot := filepath.Join(xdgData, "agent-deck", "conductor")
+	wantRoot := filepath.Join(xdgData, agentpaths.AppDirName, "conductor")
 	script := renderConductorHeartbeatScript("alpha", "work")
 
 	if !strings.Contains(script, `CONDUCTOR_ROOT="`+wantRoot+`"`) {
@@ -2938,7 +2940,7 @@ func TestGenerateLaunchdPlist_InjectsXDGEnv(t *testing.T) {
 
 // TestBridgeXDGEnv_AgreesWithConductorDir verifies the XDG base injected into
 // the bridge daemon, combined with the bridge's resolver formula
-// (<XDG_DATA_HOME>/agent-deck/conductor), points at exactly the directory the Go
+// (<XDG_DATA_HOME>/<app>/conductor), points at exactly the directory the Go
 // side computes via ConductorDir() for the same env (issue #1350). This is the
 // path-agreement guarantee: the Go writer and the Python reader land together.
 func TestBridgeXDGEnv_AgreesWithConductorDir(t *testing.T) {
@@ -2951,7 +2953,7 @@ func TestBridgeXDGEnv_AgreesWithConductorDir(t *testing.T) {
 
 	// Create the conductor marker so EffectiveDataDir selects XDG (as it would
 	// on a fresh XDG install after conductor setup).
-	if err := os.MkdirAll(filepath.Join(xdgData, "agent-deck", "conductor"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(xdgData, agentpaths.AppDirName, "conductor"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2971,19 +2973,19 @@ func TestBridgeXDGEnv_AgreesWithConductorDir(t *testing.T) {
 		t.Fatalf("ConductorDir: %v", err)
 	}
 	// The bridge computes resolve_data_dir("conductor") / "conductor" where
-	// resolve_data_dir returns <XDG_DATA_HOME>/agent-deck. That must equal
+	// resolve_data_dir returns <XDG_DATA_HOME>/<app>. That must equal
 	// ConductorDir().
-	bridgeComputed := filepath.Join(dataBase, "agent-deck", "conductor")
+	bridgeComputed := filepath.Join(dataBase, agentpaths.AppDirName, "conductor")
 	if bridgeComputed != condDir {
 		t.Errorf("bridge-computed conductor dir %q != ConductorDir() %q", bridgeComputed, condDir)
 	}
 
 	// Config agreement. The bridge reads config.toml (the user config), which
 	// the Go side resolves via GetUserConfigPath -> EffectiveConfigPath.
-	bridgeCfg := filepath.Join(configBase, "agent-deck", "config.toml")
+	bridgeCfg := filepath.Join(configBase, agentpaths.AppDirName, "config.toml")
 	// EffectiveConfigPath returns the XDG path only if it exists; create it to
 	// match the fresh-XDG-install scenario.
-	if err := os.MkdirAll(filepath.Join(configBase, "agent-deck"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(configBase, agentpaths.AppDirName), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(bridgeCfg, []byte("[telegram]\n"), 0o644); err != nil {

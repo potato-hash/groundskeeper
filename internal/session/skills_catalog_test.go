@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 )
 
 // TestProjectSkillAttachment_JSONTags guards the web-API contract: the struct
@@ -120,7 +122,7 @@ func TestGetSkillPoolPath_UsesXDGConfigForNewInstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSkillPoolPath failed: %v", err)
 	}
-	want := filepath.Join(xdgConfigHome, "agent-deck", "skills", "pool")
+	want := filepath.Join(xdgConfigHome, agentpaths.AppDirName, "skills", "pool")
 	if got != want {
 		t.Fatalf("GetSkillPoolPath() = %q, want %q", got, want)
 	}
@@ -145,14 +147,14 @@ func TestGetSkillPoolPath_LegacySkillsFallback(t *testing.T) {
 		t.Fatalf("GetSkillPoolPath() = %q, want legacy %q", got, want)
 	}
 
-	if err := os.MkdirAll(filepath.Join(xdgConfigHome, "agent-deck", "skills"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(xdgConfigHome, agentpaths.AppDirName, "skills"), 0o700); err != nil {
 		t.Fatalf("mkdir XDG skills root: %v", err)
 	}
 	got, err = GetSkillPoolPath()
 	if err != nil {
 		t.Fatalf("GetSkillPoolPath with XDG marker failed: %v", err)
 	}
-	want = filepath.Join(xdgConfigHome, "agent-deck", "skills", "pool")
+	want = filepath.Join(xdgConfigHome, agentpaths.AppDirName, "skills", "pool")
 	if got != want {
 		t.Fatalf("XDG skills root should win once present: got %q want %q", got, want)
 	}

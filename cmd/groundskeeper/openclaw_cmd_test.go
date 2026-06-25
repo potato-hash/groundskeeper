@@ -11,17 +11,17 @@ func TestBuildOpenClawBridgeCommand(t *testing.T) {
 		{
 			name:    "simple id remains unquoted",
 			agentID: "agent-123",
-			want:    "agent-deck openclaw bridge --agent agent-123",
+			want:    "groundskeeper openclaw bridge --agent agent-123",
 		},
 		{
 			name:    "spaces are shell-quoted",
 			agentID: "agent with spaces",
-			want:    "agent-deck openclaw bridge --agent 'agent with spaces'",
+			want:    "groundskeeper openclaw bridge --agent 'agent with spaces'",
 		},
 		{
 			name:    "single quote is escaped safely",
 			agentID: "agent'$(whoami)",
-			want:    "agent-deck openclaw bridge --agent 'agent'\"'\"'$(whoami)'",
+			want:    "groundskeeper openclaw bridge --agent 'agent'\"'\"'$(whoami)'",
 		},
 	}
 

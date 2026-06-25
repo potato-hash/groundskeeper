@@ -9,6 +9,8 @@ func TestParseAgentDeckVersion(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
+		{"Groundskeeper v1.9.42\n", "1.9.42"},
+		{"Groundskeeper v1.9.42 (update available: v1.9.43)\n", "1.9.42"},
 		{"Agent Deck v1.9.42\n", "1.9.42"},
 		{"Agent Deck v1.9.42 (update available: v1.9.43)\n", "1.9.42"},
 		{"Agent Deck v1.9.42", "1.9.42"},

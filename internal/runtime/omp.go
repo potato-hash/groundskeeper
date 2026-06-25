@@ -37,9 +37,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/potato-hash/groundskeeper/internal/childenv"
 )
 
 // OmpAdapterConfig tunes an OmpAdapter.
@@ -184,7 +185,7 @@ func (a *OmpAdapter) StartThread(ctx context.Context, workspacePath, sessionDir 
 	}
 	// Scrub the environment (both local and SSH: the agent subprocess must not
 	// see raw provider credentials from the daemon's env).
-	cmd.Env = scrubEnv(os.Environ())
+	cmd.Env = scrubEnv(childenv.ForLaunch(""))
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -525,22 +526,4 @@ func min(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// formatHostTool is a small helper for callers building host-tool definitions.
-func formatHostTool(name, desc string) RpcHostToolDefinition {
-	return RpcHostToolDefinition{Name: name, Description: desc, Parameters: emptyObjectSchema()}
-}
-
-func emptyObjectSchema() map[string]any {
-	return map[string]any{
-		"type":       "object",
-		"properties": map[string]any{},
-	}
-}
-
-// sessionIDFromDir derives a stable runtime session id from the session dir
-// basename (omp stores transcripts named by session id).
-func sessionIDFromDir(sessionDir string) string {
-	return filepath.Base(sessionDir)
 }

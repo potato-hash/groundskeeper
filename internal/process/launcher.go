@@ -41,6 +41,9 @@ func ProcessOmpRpc(ctx context.Context, req *LaunchRequest) (*exec.Cmd, error) {
 		_ = req.Auditor.RecordAudit(req.ThreadID, req.JobID, "omp_launch", "process",
 			"worker="+req.WorkerID+" session="+req.SessionDir+" ws="+req.WorkspacePath)
 	}
+	// #nosec G204 -- validate() restricts req.Command to the fixed "omp"
+	// binary and requires "--mode rpc"; args are constructed internally by the
+	// runtime adapter and passed without a shell.
 	cmd := exec.CommandContext(ctx, req.Command, req.Args...)
 	cmd.Dir = req.WorkspacePath
 	return cmd, nil
@@ -89,7 +92,7 @@ func hasModeRpc(args []string) bool {
 // exec.Command("omp", "--mode", "rpc").
 var AllowedLaunchFiles = []string{
 	"internal/runtime/omp.go",      // the OMP adapter
-	"internal/process/launcher.go",  // the launcher itself
+	"internal/process/launcher.go", // the launcher itself
 }
 
 // IsAllowed reports whether a file path is in the allowlist.

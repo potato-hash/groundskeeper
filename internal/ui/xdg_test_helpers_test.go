@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
@@ -24,7 +25,7 @@ func setXDGTestHome(t *testing.T) string {
 func writeXDGTestConfig(t *testing.T, home string, content string) string {
 	t.Helper()
 
-	configDir := filepath.Join(home, ".config", "agent-deck")
+	configDir := filepath.Join(home, ".config", agentpaths.AppDirName)
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatalf("mkdir config dir: %v", err)
 	}

@@ -26,6 +26,7 @@ const (
 	JobFailed          = "failed"
 	JobDeadLetter      = "dead_letter"
 )
+
 // JobRow is a row in jobs.
 type JobRow struct {
 	ID          string
@@ -35,7 +36,7 @@ type JobRow struct {
 	Kind        string
 	Attempts    int64
 	MaxAttempts int64
-	NextRunAt   int64 // 0 = NULL (run immediately)
+	NextRunAt   int64  // 0 = NULL (run immediately)
 	LoopRunID   string // associated loop run (empty = standalone job)
 	TurnID      string // associated thread turn (empty = no turn)
 	CreatedAt   int64

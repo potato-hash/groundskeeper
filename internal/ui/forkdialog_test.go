@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 func TestForkDialog_WorktreeControlsVisibleForBareProjectRoot(t *testing.T) {

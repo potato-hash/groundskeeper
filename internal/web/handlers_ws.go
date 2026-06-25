@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/potato-hash/groundskeeper/internal/logging"
 	"github.com/gorilla/websocket"
+	"github.com/potato-hash/groundskeeper/internal/logging"
 )
 
 type wsClientMessage struct {

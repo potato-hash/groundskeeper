@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"al.essio.dev/pkg/shellescape"
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,7 +26,7 @@ func isolateTmuxXDGPaths(t *testing.T) (home string, data string) {
 
 func TestXDGPaths_NewUsersUseDataHome(t *testing.T) {
 	_, data := isolateTmuxXDGPaths(t)
-	base := filepath.Join(data, "agent-deck")
+	base := filepath.Join(data, agentpaths.AppDirName)
 
 	require.Equal(t, filepath.Join(base, "logs"), LogDir())
 
@@ -38,7 +39,7 @@ func TestXDGPaths_NewUsersUseDataHome(t *testing.T) {
 
 func TestXDGPaths_LegacyAckSignalFallbackIsCategorySpecific(t *testing.T) {
 	home, data := isolateTmuxXDGPaths(t)
-	base := filepath.Join(data, "agent-deck")
+	base := filepath.Join(data, agentpaths.AppDirName)
 
 	legacyAck := filepath.Join(home, ".agent-deck", "ack-signal")
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyAck), 0o700))
@@ -76,7 +77,7 @@ func TestXDGPaths_LegacyAckSignalFallbackSurvivesSignalConsumption(t *testing.T)
 // runs. This test fails on main (no mkdir) and passes with the fix.
 func TestQuickSwitchScript_EnsuresAckSignalDir(t *testing.T) {
 	_, data := isolateTmuxXDGPaths(t)
-	signalFile := filepath.Join(data, "agent-deck", "ack-signal")
+	signalFile := filepath.Join(data, agentpaths.AppDirName, "ack-signal")
 
 	script := buildAckSwitchScript(signalFile, "session-123", "agentdeck_demo")
 
@@ -101,7 +102,7 @@ func TestQuickSwitchScript_EnsuresAckSignalDir(t *testing.T) {
 func TestQuickSwitchScript_EscapesSingleQuotes(t *testing.T) {
 	_, data := isolateTmuxXDGPaths(t)
 	// A path segment and a session name that both contain a single quote.
-	signalFile := filepath.Join(data, "agent-deck", "it's-data", "ack-signal")
+	signalFile := filepath.Join(data, agentpaths.AppDirName, "it's-data", "ack-signal")
 	sessionID := "id's-123"
 	targetSession := "agentdeck_it's-a-test"
 
@@ -133,7 +134,7 @@ func TestQuickSwitchScript_EscapesSingleQuotes(t *testing.T) {
 
 func TestXDGPaths_UnrelatedLegacyMarkerDoesNotForceTmuxPaths(t *testing.T) {
 	home, data := isolateTmuxXDGPaths(t)
-	base := filepath.Join(data, "agent-deck")
+	base := filepath.Join(data, agentpaths.AppDirName)
 
 	unrelatedLegacy := filepath.Join(home, ".agent-deck", "feedback-state.json")
 	require.NoError(t, os.MkdirAll(filepath.Dir(unrelatedLegacy), 0o700))

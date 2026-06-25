@@ -33,14 +33,14 @@ type prefixSpec struct {
 }
 
 var providerPrefixes = []prefixSpec{
-	{"6768", "[pousr]_", 0},      // gh + [pousr]_  -> gh[pousr]_  (ghp_, gho_, ...)
+	{"6768", "[pousr]_", 0},           // gh + [pousr]_  -> gh[pousr]_  (ghp_, gho_, ...)
 	{"6769746875625f7061745f", "", 0}, // github_pat_  (assembled in code)
-	{"786f78", "[baprs]-", 0},   // xox + [baprs]-
-	{"676c7061742d", "", 0},     // glpat-
-	{"414b4941", "", 0},          // AKIA (AWS access key id)
-	{"736b2d", "", 0},            // sk- (OpenAI)
-	{"736b2d616e742d", "", 0},    // sk-ant- (Anthropic)
-	{"41497a61", "", 0},          // AIza (Google)
+	{"786f78", "[baprs]-", 0},         // xox + [baprs]-
+	{"676c7061742d", "", 0},           // glpat-
+	{"414b4941", "", 0},               // AKIA (AWS access key id)
+	{"736b2d", "", 0},                 // sk- (OpenAI)
+	{"736b2d616e742d", "", 0},         // sk-ant- (Anthropic)
+	{"41497a61", "", 0},               // AIza (Google)
 }
 
 var sensitivePatterns []struct {

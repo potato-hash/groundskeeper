@@ -19,8 +19,8 @@ import (
 
 // WebhookServer receives webhook events and routes them to threads.
 type WebhookServer struct {
-	db      *gkdb.DB
-	secret  []byte // HMAC secret for signature verification (empty = no verification)
+	db     *gkdb.DB
+	secret []byte // HMAC secret for signature verification (empty = no verification)
 }
 
 // NewWebhookServer creates a webhook server with an optional HMAC secret.
@@ -36,9 +36,9 @@ func (s *WebhookServer) Handler() http.Handler {
 // WebhookPayload is the expected event shape.
 type WebhookPayload struct {
 	ThreadID string `json:"thread_id"`
-	Action   string `json:"action"`    // "enqueue_turn" or "audit_only"
-	Prompt   string `json:"prompt"`    // for enqueue_turn
-	Detail   string `json:"detail"`    // for audit_only
+	Action   string `json:"action"` // "enqueue_turn" or "audit_only"
+	Prompt   string `json:"prompt"` // for enqueue_turn
+	Detail   string `json:"detail"` // for audit_only
 }
 
 func (s *WebhookServer) handleWebhook(w http.ResponseWriter, r *http.Request) {

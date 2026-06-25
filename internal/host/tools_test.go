@@ -126,10 +126,9 @@ func TestHandleToolCallHostHandlerInterface(t *testing.T) {
 	// Bridge implements runtime.HostHandler via the adapter methods.
 	result, isErr := b.HandleToolCall("id1", "tc1", "job_status", map[string]any{})
 	_ = result
-	_ = isErr
 	// job_status with no job_id should error (not crash).
 	if !isErr {
-		// job_status with empty job_id: returns error about job_id required
+		t.Error("job_status with empty job_id should return an error")
 	}
 }
 

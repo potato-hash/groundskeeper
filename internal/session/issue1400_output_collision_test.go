@@ -44,7 +44,7 @@ func isolateHome1400(t *testing.T) string {
 func writeAssistantTranscript1400(t *testing.T, projectPath, sessionID, reply string) {
 	t.Helper()
 	configDir := GetClaudeConfigDir()
-	projDir := filepath.Join(configDir, "projects", ConvertToClaudeDirName(projectPath))
+	projDir := claudeProjectDirForTest(t, configDir, projectPath)
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatalf("mkdir transcript dir: %v", err)
 	}

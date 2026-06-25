@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 func boolPtr(v bool) *bool { return &v }

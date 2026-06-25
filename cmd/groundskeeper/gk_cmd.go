@@ -21,6 +21,7 @@ import (
 
 	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 	"github.com/potato-hash/groundskeeper/internal/channel"
+	"github.com/potato-hash/groundskeeper/internal/childenv"
 	"github.com/potato-hash/groundskeeper/internal/fleet"
 	"github.com/potato-hash/groundskeeper/internal/gkdb"
 	"github.com/potato-hash/groundskeeper/internal/host"
@@ -101,7 +102,9 @@ func handleGkThread(args []string) {
 		title := fs.String("title", "", "thread title")
 		runtime := fs.String("runtime", "omp", "agent runtime (omp)")
 		workspace := fs.String("workspace", ".", "workspace path")
-		fs.Parse(args[1:])
+		if err := fs.Parse(args[1:]); err != nil {
+			os.Exit(2)
+		}
 		if *title == "" {
 			fmt.Fprintln(os.Stderr, "gk-thread create: --title is required")
 			os.Exit(1)
@@ -203,7 +206,9 @@ func handleGkThread(args []string) {
 		}
 		fs := flag.NewFlagSet("gk-thread fork", flag.ExitOnError)
 		title := fs.String("title", "", "child thread title")
-		fs.Parse(args[2:])
+		if err := fs.Parse(args[2:]); err != nil {
+			os.Exit(2)
+		}
 		parent, err := db.GetThread(args[1])
 		if err != nil || parent == nil {
 			fmt.Fprintf(os.Stderr, "gk-thread fork: parent not found: %s\n", args[1])
@@ -283,7 +288,9 @@ func handleGkDaemon(args []string) {
 	espalierPath := fs.String("espalier-path", "", "path to Espalier Core extension (loads it into OMP workers)")
 	sshTarget := fs.String("ssh", "", "remote SSH target (user@host) to spawn omp on a remote machine")
 	sshOmpBin := fs.String("ssh-omp-bin", "omp", "path to omp on the remote host")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
 	if *hmacKey == "" {
 		*hmacKey = os.Getenv("GK_HMAC_KEY")
 	}
@@ -375,7 +382,9 @@ func handleGkJob(args []string) {
 		fs := flag.NewFlagSet("gk-job create", flag.ExitOnError)
 		threadID := fs.String("thread", "", "thread id to enqueue a turn for")
 		kind := fs.String("kind", "turn", "job kind")
-		fs.Parse(args[1:])
+		if err := fs.Parse(args[1:]); err != nil {
+			os.Exit(2)
+		}
 		if *threadID == "" {
 			fmt.Fprintln(os.Stderr, "gk-job create: --thread is required")
 			os.Exit(1)
@@ -451,7 +460,9 @@ func handleGkSidecar(args []string) {
 	kind := fs.String("kind", "email", "sidecar kind: email|calendar|contact")
 	addr := fs.String("addr", "127.0.0.1:7780", "listen address")
 	hmacKey := fs.String("hmac-key", "", "HMAC shared key (env GK_HMAC_KEY if empty)")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
 	if *hmacKey == "" {
 		*hmacKey = os.Getenv("GK_HMAC_KEY")
 	}
@@ -542,7 +553,9 @@ func handleLoop(args []string) {
 		maxTools := fs.Int("max-tool-calls", 80, "max tool calls")
 		maxCost := fs.Float64("max-cost", 0, "max cost USD (0=unlimited)")
 		stopWhen := fs.String("stop-when", "agent_says_done", "stop condition")
-		fs.Parse(args[2:])
+		if err := fs.Parse(args[2:]); err != nil {
+			os.Exit(2)
+		}
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "Usage: loop set <thread-id> --mode ... --prompt ...")
 			os.Exit(1)
@@ -816,7 +829,9 @@ func handleSetup(args []string) {
 	espalierPathFlag := fs.String("espalier-path", "", "Espalier package directory or extension entrypoint")
 	verifyModelFlag := fs.Bool("verify-model", false, "run a small OMP model smoke test using configured credentials")
 	writeOmpConfigFlag := fs.Bool("write-omp-config", false, "write recommended global OMP config without prompting")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
 	reader := bufio.NewReader(os.Stdin)
 	prompt := func(question string) string {
 		if *nonInteractive {
@@ -951,7 +966,6 @@ func handleSetup(args []string) {
 						}
 					} else {
 						fmt.Println("  [OK] Espalier installed and built")
-						entrypoint = espalierExtensionPath(espalierPath)
 					}
 				}
 			} else {
@@ -972,7 +986,6 @@ func handleSetup(args []string) {
 					}
 				} else {
 					fmt.Println("  [OK] Espalier built")
-					entrypoint = espalierExtensionPath(espalierPath)
 				}
 			}
 		}
@@ -986,7 +999,6 @@ func handleSetup(args []string) {
 				}
 			} else {
 				fmt.Println("  [OK] Espalier installed and built")
-				entrypoint = espalierExtensionPath(espalierPath)
 			}
 		} else {
 			fmt.Println("  [SKIP] Workers will run without Espalier (degraded)")
@@ -1212,7 +1224,7 @@ func setupCommandEnv(model string) []string {
 }
 
 func setupBaseEnv() []string {
-	env := os.Environ()
+	env := childenv.ForLaunch("")
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
 		name, _, ok := strings.Cut(kv, "=")
@@ -1252,9 +1264,9 @@ func isSensitiveEnvName(name string) bool {
 		strings.Contains(upper, "ACCESS_KEY")
 }
 
-func redactedCommandOutput(out []byte) string {
+func redactedCommandOutput(out []byte, env []string) string {
 	s := string(out)
-	for _, kv := range os.Environ() {
+	for _, kv := range env {
 		name, value, ok := strings.Cut(kv, "=")
 		if !ok || !isSensitiveEnvName(name) || len(value) < 4 {
 			continue
@@ -1276,26 +1288,32 @@ func verifyOmpModel(ompPath, model string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+	// #nosec G204 -- ompPath is the operator-selected OMP binary path for this
+	// setup smoke; args are fixed and not shell-interpreted.
 	refresh := exec.CommandContext(ctx, ompPath, "models", "refresh")
 	refresh.Env = env
 	if out, err := refresh.CombinedOutput(); err != nil {
-		return fmt.Errorf("refresh OMP model catalog: %w: %s", err, redactedCommandOutput(out))
+		return fmt.Errorf("refresh OMP model catalog: %w: %s", err, redactedCommandOutput(out, env))
 	}
 
 	ctx, cancel = context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, ompPath,
+	// #nosec G204 -- ompPath is the operator-selected OMP binary path for this
+	// setup smoke; args are fixed and not shell-interpreted.
+	cmdArgs := []string{
 		"--model", model,
 		"--no-session",
 		"--max-time=60",
-		"-p", "Reply exactly: GK_OK")
+		"-p", "Reply exactly: GK_OK",
+	}
+	cmd := exec.CommandContext(ctx, ompPath, cmdArgs...) // #nosec G204,G702 -- ompPath is the operator-selected OMP binary for this fixed-args setup smoke.
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("run OMP smoke prompt: %w: %s", err, redactedCommandOutput(out))
+		return fmt.Errorf("run OMP smoke prompt: %w: %s", err, redactedCommandOutput(out, env))
 	}
 	if !strings.Contains(string(out), "GK_OK") {
-		return fmt.Errorf("unexpected OMP smoke response: %s", redactedCommandOutput(out))
+		return fmt.Errorf("unexpected OMP smoke response: %s", redactedCommandOutput(out, env))
 	}
 	return nil
 }

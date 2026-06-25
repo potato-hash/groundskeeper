@@ -12,8 +12,8 @@ on:
       - 'internal/session/telegram_validator.go'
       - 'internal/session/env.go'
       - 'internal/session/issue113*_*.go'
-      - 'cmd/agent-deck/cmd_telegram_doctor*.go'
-      - 'cmd/agent-deck/main.go'
+      - 'cmd/groundskeeper/cmd_telegram_doctor*.go'
+      - 'cmd/groundskeeper/main.go'
       - '.github/workflows/telegram-reliability.yml'
   push:
     branches: [ main ]
@@ -34,16 +34,16 @@ jobs:
         run: |
           go test -race -count=1 -timeout 5m \
             -run "TestIssue1138|TestIssue1134|TestDoctor|TestHasTelegramChannel|TestEnsureWorkerScratch_AllowAndDenyCoexist|TestEnsureWorkerScratchConfigDir_ChannelOwner|TestComputeChannelPluginAllowList|TestComputeDenyList_FiresOnlyWhenTelegramScratchNeeded" \
-            ./internal/session/ ./cmd/agent-deck/
+            ./internal/session/ ./cmd/groundskeeper/
 
       - name: Build binary
-        run: go build -o /tmp/agent-deck ./cmd/agent-deck
+        run: go build -o /tmp/groundskeeper ./cmd/groundskeeper
 
       - name: CLI smoke — empty profile must exit 0
         env:
           HOME: /tmp/td-home
         run: |
           mkdir -p "$HOME/.agent-deck"
-          /tmp/agent-deck telegram-doctor --json > /tmp/doctor.json
+          /tmp/groundskeeper telegram-doctor --json > /tmp/doctor.json
           cat /tmp/doctor.json
           test -s /tmp/doctor.json

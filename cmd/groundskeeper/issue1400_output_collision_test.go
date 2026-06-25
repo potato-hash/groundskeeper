@@ -25,7 +25,7 @@ func TestWaitForFreshOutput_RefusesCollidingTranscript(t *testing.T) {
 	if err := os.MkdirAll(projectPath, 0o755); err != nil {
 		t.Fatalf("mkdir project: %v", err)
 	}
-	encodedPath := session.ConvertToClaudeDirName(projectPath)
+	encodedPath := encodedClaudeProjectPath(projectPath)
 	projectsDir := filepath.Join(tmpDir, "projects", encodedPath)
 	if err := os.MkdirAll(projectsDir, 0o755); err != nil {
 		t.Fatalf("mkdir projects dir: %v", err)
@@ -81,7 +81,7 @@ func TestWaitForFreshOutput_UniquePeerStillReads(t *testing.T) {
 	if err := os.MkdirAll(projectPath, 0o755); err != nil {
 		t.Fatalf("mkdir project: %v", err)
 	}
-	encodedPath := session.ConvertToClaudeDirName(projectPath)
+	encodedPath := encodedClaudeProjectPath(projectPath)
 	projectsDir := filepath.Join(tmpDir, "projects", encodedPath)
 	if err := os.MkdirAll(projectsDir, 0o755); err != nil {
 		t.Fatalf("mkdir projects dir: %v", err)
@@ -117,4 +117,16 @@ func TestWaitForFreshOutput_UniquePeerStillReads(t *testing.T) {
 	if resp.Content != "fresh answer" {
 		t.Fatalf("expected own transcript content, got %q", resp.Content)
 	}
+}
+
+func encodedClaudeProjectPath(projectPath string) string {
+	resolvedPath := projectPath
+	if resolved, err := filepath.EvalSymlinks(projectPath); err == nil {
+		resolvedPath = resolved
+	}
+	encoded := session.ConvertToClaudeDirName(resolvedPath)
+	if encoded == "" {
+		return "-"
+	}
+	return encoded
 }

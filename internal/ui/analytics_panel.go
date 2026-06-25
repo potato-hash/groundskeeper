@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 // AnalyticsPanel displays session analytics in a formatted panel

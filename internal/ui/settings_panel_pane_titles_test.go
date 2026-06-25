@@ -3,8 +3,8 @@ package ui
 import (
 	"testing"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 // Settings panel wiring for [display] show_pane_titles. The toggle must load

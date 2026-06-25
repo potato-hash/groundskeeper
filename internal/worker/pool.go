@@ -201,7 +201,11 @@ func (p *Pool) runJob(ctx context.Context, job *gkdb.JobRow) {
 	wtPath, wtErr := EnsureWorktree(thread.WorkspacePath, "gk-job-"+shortID(job.ID))
 	if wtErr == nil && wtPath != thread.WorkspacePath {
 		workPath = wtPath
-		defer RemoveWorktree(thread.WorkspacePath, wtPath)
+		defer func() {
+			if err := RemoveWorktree(thread.WorkspacePath, wtPath); err != nil {
+				p.logger.Error("worker: remove worktree", "path", wtPath, "err", err)
+			}
+		}()
 	}
 
 	// Start (or resume) the worker in the (worktree) workspace + session dir.
@@ -213,6 +217,11 @@ func (p *Pool) runJob(ctx context.Context, job *gkdb.JobRow) {
 		WorkspacePath: workPath,
 		SessionDir:    thread.SessionDir,
 	})
+	if err != nil {
+		p.logger.Error("worker: start", "thread", thread.ID, "err", err)
+		_, _ = p.db.FailJob(job.ID, "worker start failed: "+err.Error())
+		return
+	}
 
 	// Drain ready before prompting.
 	events := p.adapter.StreamEvents(ref)

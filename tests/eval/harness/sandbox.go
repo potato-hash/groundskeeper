@@ -1,6 +1,6 @@
-// Package harness provides a behavioral evaluator sandbox for agent-deck.
+// Package harness provides a behavioral evaluator sandbox for groundskeeper.
 //
-// The harness builds the agent-deck binary once per test package, then spawns
+// The harness builds the groundskeeper binary once per test package, then spawns
 // it under a scratch HOME with an isolated tmux socket and stub shims on PATH
 // (gh, etc.). Tests drive the binary via PTY or CLI args and assert on what a
 // human would see — stdout timing, tmux display state, recorded shim calls.
@@ -23,10 +23,10 @@ type Sandbox struct {
 	t *testing.T
 
 	// Home is a scratch directory used for HOME, XDG_CONFIG_HOME, and
-	// agent-deck's state dir. Cleaned up on test exit.
+	// groundskeeper's state dir. Cleaned up on test exit.
 	Home string
 
-	// BinPath is the full path to the agent-deck binary built for this
+	// BinPath is the full path to the groundskeeper binary built for this
 	// package (shared across tests in the package via buildOnce).
 	BinPath string
 
@@ -48,7 +48,7 @@ func NewSandbox(t *testing.T) *Sandbox {
 	t.Helper()
 	bin, err := buildAgentDeck()
 	if err != nil {
-		t.Fatalf("build agent-deck: %v", err)
+		t.Fatalf("build groundskeeper: %v", err)
 	}
 
 	home := t.TempDir()
@@ -142,11 +142,11 @@ var (
 	buildErr  error
 )
 
-// buildAgentDeck compiles cmd/agent-deck once per test binary and returns
+// buildAgentDeck compiles cmd/groundskeeper once per test binary and returns
 // the path. Reused across tests in the same package.
 func buildAgentDeck() (string, error) {
 	buildOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "agent-deck-eval-bin-")
+		dir, err := os.MkdirTemp("", "groundskeeper-eval-bin-")
 		if err != nil {
 			buildErr = fmt.Errorf("tempdir: %w", err)
 			return

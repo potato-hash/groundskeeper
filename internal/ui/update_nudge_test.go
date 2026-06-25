@@ -13,8 +13,8 @@ package ui
 import (
 	"testing"
 
-	"github.com/potato-hash/groundskeeper/internal/update"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/potato-hash/groundskeeper/internal/update"
 )
 
 // TestUpdateNudge_ShowsOnlyWhenSixPlusBehind pins the threshold contract.

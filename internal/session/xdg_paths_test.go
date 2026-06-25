@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 )
 
 func setupSessionXDGPathEnv(t *testing.T) (home string, xdgConfigHome string, xdgDataHome string) {
@@ -48,7 +50,7 @@ func TestGetUserConfigPath_UsesXDGConfigHomeForNewUser(t *testing.T) {
 		t.Fatalf("GetUserConfigPath(): %v", err)
 	}
 
-	want := filepath.Join(xdgConfigHome, "agent-deck", UserConfigFileName)
+	want := filepath.Join(xdgConfigHome, agentpaths.AppDirName, UserConfigFileName)
 	if got != want {
 		t.Fatalf("GetUserConfigPath() = %q, want %q", got, want)
 	}
@@ -72,7 +74,7 @@ func TestGetUserConfigPath_LegacyFallbackWhenXDGMissing(t *testing.T) {
 func TestGetUserConfigPath_XDGWinsWhenBothExist(t *testing.T) {
 	home, xdgConfigHome, _ := setupSessionXDGPathEnv(t)
 	legacyPath := filepath.Join(home, ".agent-deck", UserConfigFileName)
-	xdgPath := filepath.Join(xdgConfigHome, "agent-deck", UserConfigFileName)
+	xdgPath := filepath.Join(xdgConfigHome, agentpaths.AppDirName, UserConfigFileName)
 	writeSessionPathFile(t, legacyPath)
 	writeSessionPathFile(t, xdgPath)
 
@@ -94,7 +96,7 @@ func TestGetConfigPath_UsesXDGConfigHomeForNewUser(t *testing.T) {
 		t.Fatalf("GetConfigPath(): %v", err)
 	}
 
-	want := filepath.Join(xdgConfigHome, "agent-deck", ConfigFileName)
+	want := filepath.Join(xdgConfigHome, agentpaths.AppDirName, ConfigFileName)
 	if got != want {
 		t.Fatalf("GetConfigPath() = %q, want %q", got, want)
 	}
@@ -103,7 +105,7 @@ func TestGetConfigPath_UsesXDGConfigHomeForNewUser(t *testing.T) {
 func TestGetConfigPath_XDGWinsWhenBothExist(t *testing.T) {
 	home, xdgConfigHome, _ := setupSessionXDGPathEnv(t)
 	legacyPath := filepath.Join(home, ".agent-deck", ConfigFileName)
-	xdgPath := filepath.Join(xdgConfigHome, "agent-deck", ConfigFileName)
+	xdgPath := filepath.Join(xdgConfigHome, agentpaths.AppDirName, ConfigFileName)
 	writeSessionPathFile(t, legacyPath)
 	writeSessionPathFile(t, xdgPath)
 
@@ -125,7 +127,7 @@ func TestGetProfilesDir_UsesXDGDataHomeForNewUser(t *testing.T) {
 		t.Fatalf("GetProfilesDir(): %v", err)
 	}
 
-	want := filepath.Join(xdgDataHome, "agent-deck", ProfilesDirName)
+	want := filepath.Join(xdgDataHome, agentpaths.AppDirName, ProfilesDirName)
 	if got != want {
 		t.Fatalf("GetProfilesDir() = %q, want %q", got, want)
 	}
@@ -167,7 +169,7 @@ func TestGetProfilesDir_LegacyFallbackWhenSessionsJSONExists(t *testing.T) {
 func TestGetProfilesDir_XDGWinsWhenProfileMarkerExists(t *testing.T) {
 	home, _, xdgDataHome := setupSessionXDGPathEnv(t)
 	legacyProfilesDir := filepath.Join(home, ".agent-deck", ProfilesDirName)
-	xdgProfilesDir := filepath.Join(xdgDataHome, "agent-deck", ProfilesDirName)
+	xdgProfilesDir := filepath.Join(xdgDataHome, agentpaths.AppDirName, ProfilesDirName)
 	if err := os.MkdirAll(legacyProfilesDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", legacyProfilesDir, err)
 	}
@@ -187,7 +189,7 @@ func TestGetProfilesDir_XDGWinsWhenProfileMarkerExists(t *testing.T) {
 
 func TestNeedsMigration_LegacySessionsJSONWinsOverBroadXDGDataMarker(t *testing.T) {
 	home, _, xdgDataHome := setupSessionXDGPathEnv(t)
-	xdgLogsDir := filepath.Join(xdgDataHome, "agent-deck", "logs")
+	xdgLogsDir := filepath.Join(xdgDataHome, agentpaths.AppDirName, "logs")
 	if err := os.MkdirAll(xdgLogsDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", xdgLogsDir, err)
 	}
@@ -211,7 +213,7 @@ func TestGetDBPathForProfile_UsesXDGDataHomeForNewUser(t *testing.T) {
 		t.Fatalf("GetDBPathForProfile(): %v", err)
 	}
 
-	want := filepath.Join(xdgDataHome, "agent-deck", ProfilesDirName, "work", "state.db")
+	want := filepath.Join(xdgDataHome, agentpaths.AppDirName, ProfilesDirName, "work", "state.db")
 	if got != want {
 		t.Fatalf("GetDBPathForProfile() = %q, want %q", got, want)
 	}
@@ -230,7 +232,7 @@ func TestNewStorageWithProfile_UsesXDGDataHome(t *testing.T) {
 		}
 	})
 
-	want := filepath.Join(xdgDataHome, "agent-deck", ProfilesDirName, "xdg-profile", "state.db")
+	want := filepath.Join(xdgDataHome, agentpaths.AppDirName, ProfilesDirName, "xdg-profile", "state.db")
 	if got := storage.dbPath; got != want {
 		t.Fatalf("NewStorageWithProfile db path = %q, want %q", got, want)
 	}
@@ -250,42 +252,42 @@ func TestXDGDataTask4_RuntimeStateDirsUseXDGDataHomeForNewUser(t *testing.T) {
 		{
 			name: "hooks",
 			got:  GetHooksDir(),
-			want: filepath.Join(xdgDataHome, "agent-deck", "hooks"),
+			want: filepath.Join(xdgDataHome, agentpaths.AppDirName, "hooks"),
 		},
 		{
 			name: "events",
 			got:  GetEventsDir(),
-			want: filepath.Join(xdgDataHome, "agent-deck", "events"),
+			want: filepath.Join(xdgDataHome, agentpaths.AppDirName, "events"),
 		},
 		{
 			name: "inboxes",
 			got:  InboxDir(),
-			want: filepath.Join(xdgDataHome, "agent-deck", "inboxes"),
+			want: filepath.Join(xdgDataHome, agentpaths.AppDirName, "inboxes"),
 		},
 		{
 			name: "transition state",
 			got:  transitionNotifyStatePath(),
-			want: filepath.Join(xdgDataHome, "agent-deck", "runtime", "transition-notify-state.json"),
+			want: filepath.Join(xdgDataHome, agentpaths.AppDirName, "runtime", "transition-notify-state.json"),
 		},
 		{
 			name: "transition log",
 			got:  transitionNotifyLogPath(),
-			want: filepath.Join(xdgDataHome, "agent-deck", "logs", "transition-notifier.log"),
+			want: filepath.Join(xdgDataHome, agentpaths.AppDirName, "logs", "transition-notifier.log"),
 		},
 		{
 			name: "session lifecycle log",
 			got:  GetSessionLifecycleLogPath(),
-			want: filepath.Join(xdgDataHome, "agent-deck", "logs", "session-lifecycle.jsonl"),
+			want: filepath.Join(xdgDataHome, agentpaths.AppDirName, "logs", "session-lifecycle.jsonl"),
 		},
 		{
 			name: "session id lifecycle log",
 			got:  GetSessionIDLifecycleLogPath(),
-			want: filepath.Join(xdgDataHome, "agent-deck", "logs", "session-id-lifecycle.jsonl"),
+			want: filepath.Join(xdgDataHome, agentpaths.AppDirName, "logs", "session-id-lifecycle.jsonl"),
 		},
 		{
 			name: "worker scratch",
 			got:  workerScratchDirRoot(),
-			want: filepath.Join(xdgDataHome, "agent-deck", "worker-scratch"),
+			want: filepath.Join(xdgDataHome, agentpaths.AppDirName, "worker-scratch"),
 		},
 	}
 
@@ -304,10 +306,10 @@ func TestXDGDataTask4_RuntimeStateDirsUseCategorySpecificLegacyFallback(t *testi
 		t.Fatalf("MkdirAll(%q): %v", legacyProfilesDir, err)
 	}
 
-	if got, want := GetHooksDir(), filepath.Join(xdgDataHome, "agent-deck", "hooks"); got != want {
+	if got, want := GetHooksDir(), filepath.Join(xdgDataHome, agentpaths.AppDirName, "hooks"); got != want {
 		t.Fatalf("legacy profiles marker must not move hooks to legacy: got %q want %q", got, want)
 	}
-	if got, want := InboxDir(), filepath.Join(xdgDataHome, "agent-deck", "inboxes"); got != want {
+	if got, want := InboxDir(), filepath.Join(xdgDataHome, agentpaths.AppDirName, "inboxes"); got != want {
 		t.Fatalf("legacy profiles marker must not move inboxes to legacy: got %q want %q", got, want)
 	}
 
@@ -318,7 +320,7 @@ func TestXDGDataTask4_RuntimeStateDirsUseCategorySpecificLegacyFallback(t *testi
 	if got := GetHooksDir(); got != legacyHooksDir {
 		t.Fatalf("legacy hooks marker should keep hooks legacy: got %q want %q", got, legacyHooksDir)
 	}
-	if got, want := InboxDir(), filepath.Join(xdgDataHome, "agent-deck", "inboxes"); got != want {
+	if got, want := InboxDir(), filepath.Join(xdgDataHome, agentpaths.AppDirName, "inboxes"); got != want {
 		t.Fatalf("legacy hooks marker must not move inboxes to legacy: got %q want %q", got, want)
 	}
 }
@@ -334,7 +336,7 @@ func TestXDGDataTask4_RuntimeAndLogsHaveSeparateFallbackMarkers(t *testing.T) {
 	if got, want := transitionNotifyLogPath(), filepath.Join(legacyLogsDir, "transition-notifier.log"); got != want {
 		t.Fatalf("legacy logs marker should keep log legacy: got %q want %q", got, want)
 	}
-	if got, want := transitionNotifyStatePath(), filepath.Join(xdgDataHome, "agent-deck", "runtime", "transition-notify-state.json"); got != want {
+	if got, want := transitionNotifyStatePath(), filepath.Join(xdgDataHome, agentpaths.AppDirName, "runtime", "transition-notify-state.json"); got != want {
 		t.Fatalf("legacy logs marker must not move runtime state to legacy: got %q want %q", got, want)
 	}
 
@@ -354,7 +356,7 @@ func TestXDGDataTask4_ConductorDirUsesXDGDataAndLegacyConductorFallback(t *testi
 	if err != nil {
 		t.Fatalf("ConductorDir(): %v", err)
 	}
-	want := filepath.Join(xdgDataHome, "agent-deck", "conductor")
+	want := filepath.Join(xdgDataHome, agentpaths.AppDirName, "conductor")
 	if got != want {
 		t.Fatalf("ConductorDir() = %q, want %q", got, want)
 	}
@@ -385,7 +387,7 @@ func TestXDGDataTask4_ProfileRootIgnoresUnrelatedRuntimeLegacyMarkers(t *testing
 	if err != nil {
 		t.Fatalf("profileDataRootDir(): %v", err)
 	}
-	want := filepath.Join(xdgDataHome, "agent-deck")
+	want := filepath.Join(xdgDataHome, agentpaths.AppDirName)
 	if got != want {
 		t.Fatalf("profileDataRootDir() = %q, want %q", got, want)
 	}

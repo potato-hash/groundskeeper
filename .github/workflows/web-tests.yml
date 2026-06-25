@@ -16,7 +16,7 @@ on:
   pull_request:
     paths:
       - 'internal/web/**'
-      - 'cmd/agent-deck/web_cmd.go'
+      - 'cmd/groundskeeper/web_cmd.go'
       - 'tests/web/**'
       - 'documentation/webui-overhaul-plan.md'
       - '.github/workflows/web-tests.yml'

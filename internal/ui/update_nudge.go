@@ -3,8 +3,8 @@ package ui
 import (
 	"fmt"
 
-	"github.com/potato-hash/groundskeeper/internal/update"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/potato-hash/groundskeeper/internal/update"
 )
 
 // shouldRenderUpdateNudge reports whether the >5-releases-behind nudge

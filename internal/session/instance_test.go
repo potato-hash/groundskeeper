@@ -1797,8 +1797,10 @@ func TestCanRestartCursor(t *testing.T) {
 		t.Fatal("CanRestart() should return true for a running Cursor session with live tmux pane")
 	}
 
-	// Simulate persisted command from a real Cursor session before restart.
-	inst.Command = "cursor agent"
+	// Use a shell command so the restart path is self-contained on machines
+	// without the Cursor CLI installed. buildCursorCommand appends --continue;
+	// sh accepts that as argv[0] for the command string and keeps the pane alive.
+	inst.Command = "sh -c 'sleep 60'"
 
 	if err := inst.Restart(); err != nil {
 		t.Fatalf("Restart failed: %v", err)

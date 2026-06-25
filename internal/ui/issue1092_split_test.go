@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
@@ -30,7 +31,7 @@ func setIsolatedAgentDeckDir(t *testing.T) string {
 	xdgConfigHome := filepath.Join(tmpHome, ".config")
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
-	dir := filepath.Join(xdgConfigHome, "agent-deck")
+	dir := filepath.Join(xdgConfigHome, agentpaths.AppDirName)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir XDG config dir: %v", err)
 	}

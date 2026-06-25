@@ -172,22 +172,24 @@ func readOnDiskVersion() string {
 }
 
 // parseAgentDeckVersion extracts the version token from a writeVersionOutput
-// line, e.g. "Agent Deck v1.9.42 (update available: v1.9.43)" -> "1.9.42".
+// line, e.g. "Groundskeeper v1.9.42 (update available: v1.9.43)" -> "1.9.42".
 func parseAgentDeckVersion(s string) string {
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		s = s[:i]
 	}
-	const marker = "Agent Deck v"
-	_, rest, ok := strings.Cut(s, marker)
-	if !ok {
-		return ""
-	}
-	end := len(rest)
-	for i, r := range rest {
-		if r == ' ' || r == '(' {
-			end = i
-			break
+	for _, marker := range []string{"Groundskeeper v", "Agent Deck v"} {
+		_, rest, ok := strings.Cut(s, marker)
+		if !ok {
+			continue
 		}
+		end := len(rest)
+		for i, r := range rest {
+			if r == ' ' || r == '(' {
+				end = i
+				break
+			}
+		}
+		return strings.TrimSpace(rest[:end])
 	}
-	return strings.TrimSpace(rest[:end])
+	return ""
 }

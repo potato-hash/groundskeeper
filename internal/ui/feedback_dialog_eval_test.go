@@ -19,8 +19,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/potato-hash/groundskeeper/internal/feedback"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/potato-hash/groundskeeper/internal/feedback"
 )
 
 // TestEval_FeedbackTUI_DisclosureStepExists drives the FeedbackDialog via

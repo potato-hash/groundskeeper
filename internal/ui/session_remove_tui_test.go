@@ -3,8 +3,8 @@ package ui
 import (
 	"testing"
 
-	"github.com/potato-hash/groundskeeper/internal/session"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/potato-hash/groundskeeper/internal/session"
 )
 
 // newRemoveTestItem builds a flatItems entry for Seam A tests with a given status.

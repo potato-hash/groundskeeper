@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 )
 
 // S4 data-loss safeguard tests.
@@ -54,7 +56,7 @@ func TestGetAgentDeckDir_SandboxedResolvesToXDGData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAgentDeckDir under sandbox returned error: %v", err)
 	}
-	want := filepath.Join(os.Getenv("XDG_DATA_HOME"), "agent-deck")
+	want := filepath.Join(os.Getenv("XDG_DATA_HOME"), agentpaths.AppDirName)
 	if filepath.Clean(dir) != filepath.Clean(want) {
 		t.Fatalf("GetAgentDeckDir = %s, want %s", dir, want)
 	}

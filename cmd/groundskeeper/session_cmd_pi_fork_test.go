@@ -18,7 +18,7 @@ func TestSessionFork_PiUsesNativeForkBeforeStart(t *testing.T) {
 
 	parent := session.NewInstanceWithGroupAndTool("pi-parent", home, "pi-group", "pi")
 	parent.Command = "pi"
-	parentSessionDir := filepath.Join(home, ".pi", "groundskeeper", parent.ID)
+	parentSessionDir := filepath.Join(home, ".pi", "agent-deck", parent.ID)
 	if err := os.MkdirAll(parentSessionDir, 0o755); err != nil {
 		t.Fatalf("mkdir parent Pi session dir: %v", err)
 	}

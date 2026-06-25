@@ -17,8 +17,8 @@ name: Performance smoke
 on:
   pull_request:
     paths:
-      - 'cmd/agent-deck/main.go'
-      - 'cmd/agent-deck/coldstart_perf_test.go'
+      - 'cmd/groundskeeper/main.go'
+      - 'cmd/groundskeeper/coldstart_perf_test.go'
       - 'internal/testutil/perfbudget.go'
       - 'internal/testutil/perfbudget_test.go'
       - '**/*_perf_test.go'
@@ -77,7 +77,7 @@ jobs:
       - name: Run benchmarks
         run: |
           go test -run '^$' -bench '^Benchmark' -benchmem -benchtime=1x -count=3 -timeout 5m \
-            ./cmd/agent-deck/... ./internal/tmux/... \
+            ./cmd/groundskeeper/... ./internal/tmux/... \
             | tee benchout.txt
 
       - name: Upload bench output

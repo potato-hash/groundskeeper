@@ -19,10 +19,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/potato-hash/groundskeeper/internal/costs"
 	"github.com/potato-hash/groundskeeper/internal/termreply"
 	"github.com/potato-hash/groundskeeper/internal/tmux"
-	"github.com/creack/pty"
 	"golang.org/x/term"
 )
 
