@@ -500,12 +500,28 @@ func TestPublicInstallSmokeScriptRejectsLeakedSecretOutput(t *testing.T) {
 
 func TestPublicInstallSmokeScriptRunsVerifierAfterCleanInstall(t *testing.T) {
 	home := t.TempDir()
+	installDir := filepath.Join(home, "bin")
+	argsPath := filepath.Join(home, "install-args.txt")
 	installStub := filepath.Join(home, "install.sh")
 	verifyStub := filepath.Join(home, "verify.sh")
-	if err := os.WriteFile(installStub, []byte("#!/usr/bin/env sh\nprintf 'install clean\\n'\n"), 0o755); err != nil {
+	installBody := `#!/usr/bin/env sh
+printf '%s\n' "$@" > "$HOME/install-args.txt"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--dir" ]; then
+    mkdir -p "$2"
+    printf '#!/usr/bin/env sh\nprintf groundskeeper\n' > "$2/groundskeeper"
+    chmod +x "$2/groundskeeper"
+    break
+  fi
+  shift
+done
+printf 'install clean\n'
+`
+	if err := os.WriteFile(installStub, []byte(installBody), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify clean\\n'\n"), 0o755); err != nil {
+	verifyBody := "#!/usr/bin/env sh\nfound=$(command -v groundskeeper) || exit 7\n[ \"$found\" = \"$GK_SMOKE_INSTALL_DIR/groundskeeper\" ] || exit 8\nprintf 'verify clean\\n'\n"
+	if err := os.WriteFile(verifyStub, []byte(verifyBody), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -513,6 +529,7 @@ func TestPublicInstallSmokeScriptRunsVerifierAfterCleanInstall(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
 		"GK_SMOKE_VERIFY_MODEL=0",
+		"GK_SMOKE_INSTALL_DIR="+installDir,
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
 		"GK_SMOKE_VERIFY_URL=file://"+verifyStub,
 	)
@@ -530,6 +547,13 @@ func TestPublicInstallSmokeScriptRunsVerifierAfterCleanInstall(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("smoke output missing %q\n--- output ---\n%s", want, body)
 		}
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "--dir\n"+installDir+"\n") {
+		t.Fatalf("smoke installer args missing custom --dir %q\n--- args ---\n%s", installDir, args)
 	}
 }
 

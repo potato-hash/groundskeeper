@@ -75,6 +75,10 @@ export OLLAMA_CLOUD_API_KEY='<your ollama cloud key>'
 curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/scripts/smoke-public-install.sh | bash
 ```
 
+Set `GK_SMOKE_INSTALL_DIR=/tmp/groundskeeper-smoke-bin` to keep a smoke run in
+an isolated install directory; the wrapper passes it through as `--dir` and
+adds it to `PATH` for verification.
+
 Local development:
 
 ```sh

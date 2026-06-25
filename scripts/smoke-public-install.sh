@@ -16,6 +16,7 @@ MODEL="${GK_SMOKE_MODEL:-ollama-cloud/glm-5.2}"
 INSTALL_URL="${GK_SMOKE_INSTALL_URL:-https://raw.githubusercontent.com/${REPO}/${REF}/install.sh}"
 VERIFY_URL="${GK_SMOKE_VERIFY_URL:-https://raw.githubusercontent.com/${REPO}/${REF}/scripts/verify-install-state.sh}"
 VERIFY_MODEL="${GK_SMOKE_VERIFY_MODEL:-1}"
+INSTALL_DIR="${GK_SMOKE_INSTALL_DIR:-}"
 
 ok() { printf '[OK]   %s\n' "$*"; }
 fail() {
@@ -65,6 +66,10 @@ log_file="$(mktemp "${TMPDIR:-/tmp}/groundskeeper-install-smoke.XXXXXX.log")"
 trap 'rm -f "$log_file"' EXIT
 
 install_args=(--non-interactive --run-setup --model "$MODEL")
+if [[ -n "$INSTALL_DIR" ]]; then
+  install_args+=(--dir "$INSTALL_DIR")
+  export PATH="$INSTALL_DIR:$PATH"
+fi
 if [[ "$VERIFY_MODEL" != "0" ]]; then
   install_args+=(--verify-model)
 fi
