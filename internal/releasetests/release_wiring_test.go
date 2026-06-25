@@ -82,6 +82,39 @@ func TestHomebrewVerifyDoesNotRunStaleChecksOnReleaseTags(t *testing.T) {
 	}
 }
 
+func TestPublicInstallCopyReflectsReleaseBinaryPath(t *testing.T) {
+	readme := readRepoFile(t, "README.md")
+	goreleaser := readRepoFile(t, ".goreleaser.yml")
+
+	for _, stale := range []string{
+		"This is a development build, not a release.",
+		"Until the first Groundskeeper release exists",
+	} {
+		if strings.Contains(readme, stale) {
+			t.Fatalf("README still contains stale prerelease install copy %q", stale)
+		}
+	}
+	for _, want := range []string{
+		"Public installs prefer the latest release binary.",
+		"Go 1.25.11 or\nnewer is required only for prerelease/source-fallback testing.",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README missing current release install copy %q", want)
+		}
+	}
+	for _, want := range []string{
+		"export OLLAMA_CLOUD_API_KEY='<your ollama cloud key>'",
+		"bash -s -- --non-interactive --run-setup --model ollama-cloud/glm-5.2 --verify-model",
+	} {
+		if !strings.Contains(goreleaser, want) {
+			t.Fatalf("GoReleaser release notes must advertise full-stack install command; missing %q", want)
+		}
+	}
+	if strings.Contains(goreleaser, "curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh | bash") {
+		t.Fatal("GoReleaser release notes must not advertise binary-only quick install as the primary path")
+	}
+}
+
 func readRepoFile(t *testing.T, rel string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(repoRoot(t), rel))

@@ -33,7 +33,7 @@ Phases 0–8 are implemented:
 - **Phase 7:** Channel gateway (`internal/channel`) — notification policy, HMAC-signed delivery, approval routing.
 - **Phase 8:** Sidecars (`internal/sidecar`) — email/calendar/contact handlers behind an HMAC-verified HTTP server; the daemon never holds platform credentials.
 
-This is a development build, not a release. The bubbletea TUI shows Groundskeeper threads alongside Agent Deck sessions via the Home projection model (`internal/ui/gk_home.go`).
+This is an early public release. The bubbletea TUI shows Groundskeeper threads alongside Agent Deck sessions via the Home projection model (`internal/ui/gk_home.go`).
 
 ## Quick Start
 
@@ -55,11 +55,10 @@ curl -fsSL -H 'Accept: application/vnd.github.raw' \
   bash -s -- --non-interactive --run-setup --model ollama-cloud/glm-5.2 --verify-model
 ```
 
-Pre-release installs prefer release binaries when available. Until the first
-Groundskeeper release exists, the installer falls back to building
-`github.com/potato-hash/groundskeeper/cmd/groundskeeper@main`, so Go 1.25.11
-or newer must be available on a fresh machine. First-run setup installs or
-discovers OMP, builds Espalier with Bun, creates
+Public installs prefer the latest release binary. Source fallback is only used
+when GitHub has no latest release available for the installer, so Go 1.25.11 or
+newer is required only for prerelease/source-fallback testing. First-run setup
+installs or discovers OMP, builds Espalier with Bun, creates
 `~/.local/share/groundskeeper/gk.db`, and delegates provider authentication to
 OMP/environment variables.
 
