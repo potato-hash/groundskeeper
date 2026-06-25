@@ -456,6 +456,10 @@ func TestInstallStateVerifierScansWithoutPrintingSecretValues(t *testing.T) {
 		"$HOME/.omp",
 		"grep -IlF -- \"$value\"",
 		"sensitive value from $name persisted in $hit",
+		"Summary:",
+		"Next commands:",
+		"Remediation:",
+		"groundskeeper setup --install-missing --model",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("verify-install-state.sh missing %q", want)
@@ -463,6 +467,73 @@ func TestInstallStateVerifierScansWithoutPrintingSecretValues(t *testing.T) {
 	}
 	if strings.Contains(script, "persisted value") {
 		t.Fatal("verify-install-state.sh appears to describe printing persisted secret values")
+	}
+}
+
+func TestInstallStateVerifierPrintsSummaryWithoutSecretValues(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, "bin")
+	data := filepath.Join(home, "data")
+	config := filepath.Join(home, "config")
+	cache := filepath.Join(home, "cache")
+	espalier := filepath.Join(data, "groundskeeper", "espalier")
+	for _, dir := range []string{
+		bin,
+		filepath.Join(data, "groundskeeper"),
+		filepath.Join(config, "groundskeeper"),
+		filepath.Join(cache, "groundskeeper"),
+		filepath.Join(espalier, "node_modules"),
+		filepath.Join(espalier, "dist", "extensions"),
+		filepath.Join(home, ".omp"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"groundskeeper", "omp"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(data, "groundskeeper", "gk.db"), []byte("db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(espalier, "dist", "extensions", "index.js"), []byte("export default {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "../../scripts/verify-install-state.sh")
+	cmd.Env = []string{
+		"HOME=" + home,
+		"PATH=" + bin + string(os.PathListSeparator) + "/usr/bin:/bin:/usr/sbin:/sbin",
+		"XDG_DATA_HOME=" + data,
+		"XDG_CONFIG_HOME=" + config,
+		"XDG_CACHE_HOME=" + cache,
+		"GK_SMOKE_MODEL=test/model",
+		"OLLAMA_CLOUD_API_KEY=summary-fixture-secret",
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("verify-install-state.sh failed: %v\n%s", err, out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"Summary:",
+		"groundskeeper: " + filepath.Join(bin, "groundskeeper"),
+		"omp: " + filepath.Join(bin, "omp"),
+		"Espalier extension: " + filepath.Join(espalier, "dist", "extensions", "index.js"),
+		"Groundskeeper DB: " + filepath.Join(data, "groundskeeper", "gk.db"),
+		"Secret scan roots:",
+		"Next commands:",
+		"groundskeeper gk-daemon --model test/model --slots 2 --espalier-path",
+		"Install-state verification passed.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("verify output missing %q\n--- output ---\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "summary-fixture-secret") {
+		t.Fatalf("verify output printed a secret value\n--- output ---\n%s", body)
 	}
 }
 

@@ -11,6 +11,8 @@
 set -euo pipefail
 
 failures=0
+gk_bin=""
+omp_bin=""
 
 ok() { printf '[OK]   %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*"; }
@@ -107,10 +109,56 @@ scan_secret_values() {
   fi
 }
 
+summary_model() {
+  printf '%s\n' "${GK_OMP_MODEL:-${GK_SMOKE_MODEL:-ollama-cloud/glm-5.2}}"
+}
+
+print_summary() {
+  local model="$1"
+  shift
+  local scan_dirs=("$@")
+  local gk_display="${gk_bin:-missing}"
+  local omp_display="${omp_bin:-missing}"
+
+  printf '\nSummary:\n'
+  printf '  groundskeeper: %s\n' "$gk_display"
+  printf '  omp: %s\n' "$omp_display"
+  printf '  Espalier checkout: %s\n' "$ESPALIER_ROOT"
+  printf '  Espalier extension: %s\n' "$ESPALIER_ENTRYPOINT"
+  printf '  Groundskeeper DB: %s\n' "$gk_db"
+  printf '  Secret scan roots:\n'
+  local dir
+  for dir in "${scan_dirs[@]}"; do
+    printf '    - %s\n' "$dir"
+  done
+  printf '  Secret values are never printed by this verifier.\n'
+
+  if [[ "$failures" -eq 0 ]]; then
+    printf '\nNext commands:\n'
+    printf '  groundskeeper gk-thread create --title "Fix tests" --runtime omp --workspace .\n'
+    printf '  groundskeeper loop set <thread-id> --mode until_done --prompt "Fix the test" --max-turns 5\n'
+    printf '  groundskeeper loop start <thread-id>\n'
+    printf '  groundskeeper gk-daemon --model %s --slots 2 --espalier-path %s\n' "$model" "$ESPALIER_ENTRYPOINT"
+    printf '  groundskeeper fleet\n'
+  fi
+}
+
+print_remediation() {
+  local model="$1"
+  printf '\nRemediation:\n' >&2
+  printf '  Re-run setup:\n' >&2
+  printf '    groundskeeper setup --install-missing --model %s\n' "$model" >&2
+  printf '  Or re-run the public installer:\n' >&2
+  printf '    curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh | bash -s -- --non-interactive --run-setup --model %s\n' "$model" >&2
+  printf '  Then verify again:\n' >&2
+  printf '    curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/scripts/verify-install-state.sh | bash\n' >&2
+}
+
 config_dir="$(xdg_dir XDG_CONFIG_HOME .config)"
 data_dir="$(xdg_dir XDG_DATA_HOME .local/share)"
 cache_dir="$(xdg_dir XDG_CACHE_HOME .cache)"
 gk_db="${GK_DB_PATH:-$data_dir/gk.db}"
+model="$(summary_model)"
 
 if gk_bin="$(find_executable "${GK_BIN:-groundskeeper}" "$HOME/.local/bin/groundskeeper" "/usr/local/bin/groundskeeper")"; then
   ok "groundskeeper binary: $gk_bin"
@@ -147,17 +195,22 @@ else
   fail "Groundskeeper DB missing: $gk_db"
 fi
 
-scan_secret_values \
-  "$config_dir" \
-  "$data_dir" \
-  "$cache_dir" \
-  "$ESPALIER_ROOT" \
+scan_dirs=(
+  "$config_dir"
+  "$data_dir"
+  "$cache_dir"
+  "$ESPALIER_ROOT"
   "$HOME/.omp"
+)
+scan_secret_values \
+  "${scan_dirs[@]}"
 
 if [[ "$failures" -gt 0 ]]; then
+  print_summary "$model" "${scan_dirs[@]}"
   printf '\nInstall-state verification failed with %d issue(s).\n' "$failures" >&2
-  printf 'Re-run the installer with --run-setup, then re-run this script.\n' >&2
+  print_remediation "$model"
   exit 1
 fi
 
+print_summary "$model" "${scan_dirs[@]}"
 printf '\nInstall-state verification passed.\n'
