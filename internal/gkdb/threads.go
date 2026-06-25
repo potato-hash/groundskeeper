@@ -3,6 +3,9 @@ package gkdb
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -32,8 +35,8 @@ const (
 	TurnStreaming       = "streaming"
 	TurnWaitingApproval = "waiting_approval"
 	TurnCompleted       = "completed"
-	TurnFailed         = "failed"
-	TurnCancelled      = "cancelled"
+	TurnFailed          = "failed"
+	TurnCancelled       = "cancelled"
 )
 
 // ThreadRow is a row in agent_threads.
@@ -54,12 +57,14 @@ type ThreadRow struct {
 // CreateThread inserts a new agent thread in 'idle' status and returns it.
 func (g *DB) CreateThread(title, runtime, workspacePath string) (*ThreadRow, error) {
 	now := time.Now().Unix()
+	id := newID()
 	t := &ThreadRow{
-		ID:            newID(),
+		ID:            id,
 		Title:         title,
 		Runtime:       runtime,
 		Status:        ThreadIdle,
 		WorkspacePath: workspacePath,
+		SessionDir:    defaultThreadSessionDir(id),
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
@@ -73,6 +78,18 @@ func (g *DB) CreateThread(title, runtime, workspacePath string) (*ThreadRow, err
 		return nil, fmt.Errorf("gkdb: create thread: %w", err)
 	}
 	return t, nil
+}
+
+func defaultThreadSessionDir(threadID string) string {
+	base := ""
+	if dataHome := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); dataHome != "" && filepath.IsAbs(dataHome) {
+		base = filepath.Join(dataHome, "groundskeeper")
+	} else if home, err := os.UserHomeDir(); err == nil && home != "" {
+		base = filepath.Join(home, ".local", "share", "groundskeeper")
+	} else {
+		base = filepath.Join(os.TempDir(), "groundskeeper")
+	}
+	return filepath.Join(base, "sessions", threadID)
 }
 
 // ListThreads returns all non-archived threads (or all if includeArchived).

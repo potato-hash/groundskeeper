@@ -43,6 +43,7 @@ Thumbs.db
 
 # Groundskeeper data (for development)
 .groundskeeper/
+.espalier/
 
 # VS Code extensions data
 .serena/

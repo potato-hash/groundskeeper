@@ -74,6 +74,36 @@ func TestInstallScript_AbortsOnChecksumFailure(t *testing.T) {
 	}
 }
 
+func TestInstallScript_FallsBackToLocalSourceCheckoutWhenLatestMissing(t *testing.T) {
+	body := installScriptBody(t)
+
+	for _, want := range []string{
+		"No latest release found; building from local source checkout",
+		`-f "go.mod"`,
+		`-d "cmd/groundskeeper"`,
+		"go build -o",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install.sh should support local source fallback when latest release lookup fails; missing %q", want)
+		}
+	}
+}
+
+func TestInstallScript_FallsBackToPublicModuleWhenLatestMissing(t *testing.T) {
+	body := installScriptBody(t)
+
+	for _, want := range []string{
+		"No latest release found; building from public source module",
+		`GOBIN="$INSTALL_DIR" go install`,
+		`github.com/${REPO}/cmd/groundskeeper@main`,
+		`mv -f "$INSTALL_DIR/groundskeeper" "$INSTALL_DIR/$BINARY_NAME"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install.sh should support public module fallback when latest release lookup fails; missing %q", want)
+		}
+	}
+}
+
 // sourceAndVerify sources install.sh in isolation (without running main) and
 // invokes verify_download_checksum with the given args, returning its exit code.
 func sourceAndVerify(t *testing.T, file, asset, checksums string) int {

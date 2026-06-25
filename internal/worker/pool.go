@@ -33,16 +33,16 @@ type Pool struct {
 	gateway *channel.Gateway // optional notification gateway (Phase 7 wiring)
 
 	mu       sync.Mutex
-	inflight  map[string]*runningJob // thread_id -> active job
+	inflight map[string]*runningJob // thread_id -> active job
 	stopCh   chan struct{}
 	wg       sync.WaitGroup
 }
 
 type runningJob struct {
-	jobID    string
-	threadID string
+	jobID     string
+	threadID  string
 	startedAt time.Time
-	cancel   context.CancelFunc
+	cancel    context.CancelFunc
 }
 
 // Config tunes the pool.
@@ -71,18 +71,23 @@ func New(db *gkdb.DB, adapter runtime.AgentRuntimeAdapter, cfg Config) *Pool {
 		cfg.PollInterval = 500 * time.Millisecond
 	}
 	return &Pool{
-		db:      db,
-		adapter: adapter,
-		cfg:     cfg,
-		slots:   make(chan struct{}, cfg.MaxSlots),
-		logger:  slog.Default(),
+		db:       db,
+		adapter:  adapter,
+		cfg:      cfg,
+		slots:    make(chan struct{}, cfg.MaxSlots),
+		logger:   slog.Default(),
 		inflight: make(map[string]*runningJob),
-		stopCh:  make(chan struct{}),
+		stopCh:   make(chan struct{}),
 	}
 }
 
 // SetLogger overrides the default logger.
-func (p *Pool) SetLogger(l *slog.Logger) { p.logger = l }
+func (p *Pool) SetLogger(l *slog.Logger) {
+	if l == nil {
+		l = slog.Default()
+	}
+	p.logger = l
+}
 
 // SetGateway wires a notification gateway. When set, the pool triggers
 // notifications on dead-lettered jobs and privileged host_tool_call events.
@@ -233,10 +238,13 @@ func (p *Pool) runJob(ctx context.Context, job *gkdb.JobRow) {
 	// Wait for agent_end (turn completion). This is the prompt-ack-is-not-
 	// completion contract: SendTurn returned immediately, but we block here
 	// until agent_end.
-	if !p.waitForCompletion(jobCtx, events, job) {
-		dead, _ := p.db.FailJob(job.ID, "turn did not complete")
+	if ok, reason := p.waitForCompletion(jobCtx, events, job); !ok {
+		if reason == "" {
+			reason = "turn did not complete"
+		}
+		dead, _ := p.db.FailJob(job.ID, reason)
 		if dead {
-			p.notifyDeadLetter(job, "turn did not complete")
+			p.notifyDeadLetter(job, reason)
 		}
 		return
 	}
@@ -290,7 +298,7 @@ func (p *Pool) waitForReady(ctx context.Context, events <-chan runtime.RuntimeEv
 	}
 }
 
-func (p *Pool) waitForCompletion(ctx context.Context, events <-chan runtime.RuntimeEvent, job *gkdb.JobRow) bool {
+func (p *Pool) waitForCompletion(ctx context.Context, events <-chan runtime.RuntimeEvent, job *gkdb.JobRow) (bool, string) {
 	// Per-turn timeout: a stuck worker (no agent_end) fails the turn rather
 	// than holding the slot forever. Zero TurnTimeout disables this.
 	var timeoutCh <-chan time.Time
@@ -303,14 +311,14 @@ func (p *Pool) waitForCompletion(ctx context.Context, events <-chan runtime.Runt
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				return false
+				return false, "runtime exited before completion"
 			}
 			switch ev.Kind {
 			case runtime.EventAgentStart:
 				// State: streaming (agent is producing output)
 				p.setJobStatus(job.ID, gkdb.JobRunning)
 			case runtime.EventAgentEnd:
-				return true
+				return true, ""
 			case runtime.EventHostToolCall:
 				_ = p.db.RecordAudit(job.ThreadID, job.ID, "host_tool_call", "agent",
 					ev.ToolName+" "+ev.ToolArgs)
@@ -326,12 +334,13 @@ func (p *Pool) waitForCompletion(ctx context.Context, events <-chan runtime.Runt
 				}
 			case runtime.EventError:
 				p.logger.Warn("worker: error event", "job", job.ID, "payload", ev.Payload)
+				return false, "runtime error: " + ev.Payload
 			}
 		case <-timeoutCh:
 			p.logger.Warn("worker: turn timed out", "job", job.ID, "timeout", p.cfg.TurnTimeout)
-			return false
+			return false, "turn timed out"
 		case <-ctx.Done():
-			return false
+			return false, "turn cancelled"
 		}
 	}
 }

@@ -80,9 +80,9 @@ type OmpAdapterConfig struct {
 // managed process launcher (internal/process.ProcessOmpRpc) without a
 // cross-package import.
 type LaunchCtx struct {
-	ThreadID   string
-	JobID      string
-	WorkerID   string
+	ThreadID string
+	JobID    string
+	WorkerID string
 	// Authorize validates the launch request and records an audit event.
 	// If nil, the adapter validates the fields inline (command must be omp,
 	// args must include --mode rpc, all IDs must be present).
@@ -101,8 +101,9 @@ type HostHandler interface {
 // RpcHostToolDefinition mirrors OMP's RpcHostToolDefinition: a privileged tool
 // the host (Groundskeeper) offers to the agent.
 type RpcHostToolDefinition struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters"`
 }
 
 // OmpAdapter is an AgentRuntimeAdapter backed by a real omp --mode rpc
@@ -528,7 +529,14 @@ func min(a, b int) int {
 
 // formatHostTool is a small helper for callers building host-tool definitions.
 func formatHostTool(name, desc string) RpcHostToolDefinition {
-	return RpcHostToolDefinition{Name: name, Description: desc}
+	return RpcHostToolDefinition{Name: name, Description: desc, Parameters: emptyObjectSchema()}
+}
+
+func emptyObjectSchema() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	}
 }
 
 // sessionIDFromDir derives a stable runtime session id from the session dir

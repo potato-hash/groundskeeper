@@ -11,6 +11,8 @@
 #   --dir <path>        Installation directory (default: ~/.local/bin)
 #   --version <ver>     Specific version (default: latest)
 #   --skip-tmux-config  Skip tmux configuration prompt
+#   --run-setup         Run `groundskeeper setup` after installing (no prompt)
+#   --skip-setup        Do not offer the first-run setup wizard
 #   --non-interactive   Skip all prompts (for CI/automated installs)
 #   --pkg-manager <mgr> macOS package manager: 'brew' or 'port' (default: auto-detect)
 #
@@ -19,7 +21,8 @@
 #   2. Check for tmux (offer to install if missing) - REQUIRED
 #   3. Check for jq (offer to install if missing) - Optional, for session forking
 #   4. Configure ~/.tmux.conf for mouse scrolling & clipboard - Optional
-#
+#   5. Report stack prerequisites (git, bun, jj, omp)
+#   6. Offer the first-run stack setup wizard (OMP + Espalier + model)
 # Supported platforms:
 #   - macOS (darwin) - arm64 (Apple Silicon), amd64 (Intel)
 #   - Linux - arm64, amd64
@@ -77,6 +80,10 @@ prompt_read() {
     fi
 }
 
+has_prompt_tty() {
+    [[ -t 0 ]] || { : </dev/tty; } 2>/dev/null
+}
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -92,6 +99,9 @@ REPO="potato-hash/groundskeeper"
 SKIP_TMUX_CONFIG=false
 SKIP_OPTIONAL_DEPS=false
 
+SETUP_MODE="prompt"  # prompt, run, or skip
+RUN_SETUP_REQUESTED=false
+SKIP_SETUP_REQUESTED=false
 # macOS package manager configuration
 MACOS_SUPPORTED_PKG_MGRS=("brew" "port")  # Order matters for preference
 MACOS_PKG_MANAGER=""  # Will be auto-detected or set by user
@@ -113,6 +123,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-tmux-config)
             SKIP_TMUX_CONFIG=true
+            shift
+            ;;
+        --run-setup)
+            RUN_SETUP_REQUESTED=true
+            shift
+            ;;
+        --skip-setup)
+            SKIP_SETUP_REQUESTED=true
             shift
             ;;
         --non-interactive)
@@ -150,6 +168,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --dir <path>        Installation directory (default: ~/.local/bin)"
             echo "  --version <ver>     Specific version (default: latest)"
             echo "  --skip-tmux-config  Skip tmux configuration prompt"
+            echo "  --run-setup         Run 'groundskeeper setup' after installing (no prompt)"
+            echo "  --skip-setup        Do not offer the first-run setup wizard"
             echo "  --non-interactive   Skip all prompts (for CI/automated installs)"
             echo "  --pkg-manager <mgr> macOS package manager: ${MACOS_SUPPORTED_PKG_MGRS[*]} (default: auto-detect)"
             echo "  -h, --help          Show this help message"
@@ -161,6 +181,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+if [[ "$RUN_SETUP_REQUESTED" == "true" && "$SKIP_SETUP_REQUESTED" == "true" ]]; then
+    echo -e "${RED}Error: --run-setup and --skip-setup cannot be used together${NC}"
+    exit 1
+fi
+if [[ "$RUN_SETUP_REQUESTED" == "true" ]]; then
+    SETUP_MODE="run"
+elif [[ "$SKIP_SETUP_REQUESTED" == "true" || "$SKIP_OPTIONAL_DEPS" == "true" ]]; then
+    SETUP_MODE="skip"
+fi
 
 echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║     Groundskeeper Stack Installer      ║${NC}"
@@ -490,31 +519,54 @@ if ! command -v jq &> /dev/null && [[ "$SKIP_OPTIONAL_DEPS" != "true" ]]; then
 fi
 
 # Get version
+INSTALLED_FROM_SOURCE=false
 if [[ "$VERSION" == "latest" ]]; then
     echo -e "Fetching latest version..."
     VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
     if [[ -z "$VERSION" ]]; then
-        echo -e "${RED}Error: Could not determine latest version${NC}"
-        echo "Please specify a version with --version"
-        exit 1
+        if [[ -f "go.mod" && -d "cmd/groundskeeper" ]] && command -v go &> /dev/null; then
+            echo -e "${YELLOW}No latest release found; building from local source checkout.${NC}"
+            mkdir -p "$INSTALL_DIR"
+            echo -e "Installing to ${GREEN}${INSTALL_DIR}/${BINARY_NAME}${NC}"
+            go build -o "$INSTALL_DIR/$BINARY_NAME" ./cmd/groundskeeper
+            chmod +x "$INSTALL_DIR/$BINARY_NAME"
+            INSTALLED_FROM_SOURCE=true
+        elif command -v go &> /dev/null; then
+            echo -e "${YELLOW}No latest release found; building from public source module.${NC}"
+            mkdir -p "$INSTALL_DIR"
+            echo -e "Installing to ${GREEN}${INSTALL_DIR}/${BINARY_NAME}${NC}"
+            GOBIN="$INSTALL_DIR" go install "github.com/${REPO}/cmd/groundskeeper@main"
+            if [[ "$BINARY_NAME" != "groundskeeper" ]]; then
+                mv -f "$INSTALL_DIR/groundskeeper" "$INSTALL_DIR/$BINARY_NAME"
+            fi
+            chmod +x "$INSTALL_DIR/$BINARY_NAME"
+            INSTALLED_FROM_SOURCE=true
+        else
+            echo -e "${RED}Error: Could not determine latest version${NC}"
+            echo "Please specify a version with --version"
+            echo "Or run from a source checkout with Go installed to build locally."
+            echo "Or install Go so the public module fallback can build from GitHub."
+            exit 1
+        fi
     fi
 fi
 
-# Remove 'v' prefix if present for URL
-VERSION_NUM="${VERSION#v}"
-echo -e "Installing version: ${GREEN}${VERSION}${NC}"
+if [[ "$INSTALLED_FROM_SOURCE" != "true" ]]; then
+    # Remove 'v' prefix if present for URL
+    VERSION_NUM="${VERSION#v}"
+    echo -e "Installing version: ${GREEN}${VERSION}${NC}"
 
-# Download URL
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/groundskeeper_${VERSION_NUM}_${OS}_${ARCH}.tar.gz"
-echo -e "Downloading from: ${BLUE}${DOWNLOAD_URL}${NC}"
+    # Download URL
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/groundskeeper_${VERSION_NUM}_${OS}_${ARCH}.tar.gz"
+    echo -e "Downloading from: ${BLUE}${DOWNLOAD_URL}${NC}"
 
-# Create temp directory
-TMP_DIR=$(mktemp -d)
-trap "rm -rf $TMP_DIR" EXIT
+    # Create temp directory
+    TMP_DIR=$(mktemp -d)
+    trap "rm -rf $TMP_DIR" EXIT
 
-# Download and extract
-echo -e "Downloading..."
-if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/groundskeeper.tar.gz"; then
+    # Download and extract
+    echo -e "Downloading..."
+    if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/groundskeeper.tar.gz"; then
     echo -e "${RED}Error: Download failed${NC}"
     echo "URL: $DOWNLOAD_URL"
     echo ""
@@ -563,24 +615,24 @@ if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/groundskeeper.tar.gz"; then
     echo "  git clone https://github.com/${REPO}.git"
     echo "  cd groundskeeper && make install"
     exit 1
-fi
+    fi
 
-# Verify SHA-256 before extracting/running the downloaded binary (audit H1).
-# goreleaser publishes checksums.txt alongside the archives (.goreleaser.yml
-# checksum.name_template). Fail closed: if checksums.txt cannot be fetched, the
-# asset is absent from it, or the hash mismatches, abort WITHOUT extracting.
-echo -e "Verifying checksum..."
-CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
-ASSET_NAME="groundskeeper_${VERSION_NUM}_${OS}_${ARCH}.tar.gz"
-CHECKSUMS=$(curl -fsSL "$CHECKSUMS_URL" 2>/dev/null || true)
-if [[ -z "$CHECKSUMS" ]]; then
+    # Verify SHA-256 before extracting/running the downloaded binary (audit H1).
+    # goreleaser publishes checksums.txt alongside the archives (.goreleaser.yml
+    # checksum.name_template). Fail closed: if checksums.txt cannot be fetched, the
+    # asset is absent from it, or the hash mismatches, abort WITHOUT extracting.
+    echo -e "Verifying checksum..."
+    CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
+    ASSET_NAME="groundskeeper_${VERSION_NUM}_${OS}_${ARCH}.tar.gz"
+    CHECKSUMS=$(curl -fsSL "$CHECKSUMS_URL" 2>/dev/null || true)
+    if [[ -z "$CHECKSUMS" ]]; then
     echo -e "${RED}Error: could not fetch checksums.txt for ${VERSION}${NC}"
     echo "Refusing to install an unverified binary. URL: $CHECKSUMS_URL"
     exit 1
-fi
-if verify_download_checksum "$TMP_DIR/groundskeeper.tar.gz" "$ASSET_NAME" "$CHECKSUMS"; then
+    fi
+    if verify_download_checksum "$TMP_DIR/groundskeeper.tar.gz" "$ASSET_NAME" "$CHECKSUMS"; then
     echo -e "${GREEN}Checksum verified.${NC}"
-else
+    else
     rc=$?
     case "$rc" in
         2) echo -e "${RED}Error: no published SHA-256 for ${ASSET_NAME} in checksums.txt${NC}" ;;
@@ -589,18 +641,19 @@ else
     esac
     echo "Refusing to install a tampered or corrupt artifact."
     exit 1
+    fi
+
+    echo -e "Extracting..."
+    tar -xzf "$TMP_DIR/groundskeeper.tar.gz" -C "$TMP_DIR"
+
+    # Create install directory
+    mkdir -p "$INSTALL_DIR"
+
+    # Install binary
+    echo -e "Installing to ${GREEN}${INSTALL_DIR}/${BINARY_NAME}${NC}"
+    mv "$TMP_DIR/agent-deck" "$INSTALL_DIR/$BINARY_NAME"
+    chmod +x "$INSTALL_DIR/$BINARY_NAME"
 fi
-
-echo -e "Extracting..."
-tar -xzf "$TMP_DIR/groundskeeper.tar.gz" -C "$TMP_DIR"
-
-# Create install directory
-mkdir -p "$INSTALL_DIR"
-
-# Install binary
-echo -e "Installing to ${GREEN}${INSTALL_DIR}/${BINARY_NAME}${NC}"
-mv "$TMP_DIR/agent-deck" "$INSTALL_DIR/$BINARY_NAME"
-chmod +x "$INSTALL_DIR/$BINARY_NAME"
 
 # Check if install directory is in PATH
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
@@ -803,6 +856,61 @@ else
     echo -e "${YELLOW}Skipping tmux configuration (--skip-tmux-config)${NC}"
 fi
 
+setup_command_display() {
+    if [[ ":$PATH:" == *":$INSTALL_DIR:"* ]]; then
+        echo "${BINARY_NAME} setup"
+    else
+        echo "${INSTALL_DIR}/${BINARY_NAME} setup"
+    fi
+}
+
+run_first_run_setup() {
+    local installed_binary="${INSTALL_DIR}/${BINARY_NAME}"
+    if [[ "$SKIP_OPTIONAL_DEPS" == "true" ]]; then
+        "$installed_binary" setup --non-interactive
+    elif has_prompt_tty; then
+        "$installed_binary" setup </dev/tty
+    else
+        "$installed_binary" setup --non-interactive
+    fi
+}
+
+maybe_run_first_run_setup() {
+    local setup_cmd
+    setup_cmd="$(setup_command_display)"
+
+    case "$SETUP_MODE" in
+        skip)
+            echo "First-run setup: skipped. Run later: ${setup_cmd}"
+            return 0
+            ;;
+        run)
+            ;;
+        prompt)
+            if ! has_prompt_tty; then
+                echo "First-run setup: no interactive terminal. Run later: ${setup_cmd}"
+                return 0
+            fi
+            echo -e "${BLUE}First-run setup wizard${NC}"
+            echo "Configures OMP, Espalier Core, the worker model, and gk.db."
+            echo ""
+            REPLY=""
+            prompt_read -p "Run first-run setup now? [Y/n] " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Nn]$ ]]; then
+                echo "First-run setup: skipped. Run later: ${setup_cmd}"
+                return 0
+            fi
+            ;;
+    esac
+
+    echo ""
+    echo -e "${BLUE}Starting first-run setup...${NC}"
+    if ! run_first_run_setup; then
+        echo -e "${YELLOW}First-run setup did not complete. Run again: ${setup_cmd}${NC}"
+    fi
+}
+
 # Verify installation
 if "$INSTALL_DIR/$BINARY_NAME" version &> /dev/null; then
     INSTALLED_VERSION=$("$INSTALL_DIR/$BINARY_NAME" version 2>&1 || echo "unknown")
@@ -828,6 +936,26 @@ if "$INSTALL_DIR/$BINARY_NAME" version &> /dev/null; then
     else
         echo -e "  ${YELLOW}○ jq (optional - install for session forking)${NC}"
     fi
+    if command -v git &> /dev/null; then
+        echo -e "  ✓ git $(git --version 2>/dev/null | head -1)"
+    else
+        echo -e "  ${RED}✗ git (required for Espalier clone/worktrees)${NC}"
+    fi
+    if command -v bun &> /dev/null; then
+        echo -e "  ✓ bun $(bun --version 2>/dev/null | head -1)"
+    else
+        echo -e "  ${YELLOW}○ bun (needed to build Espalier from source)${NC}"
+    fi
+    if command -v jj &> /dev/null; then
+        echo -e "  ✓ jj $(jj --version 2>/dev/null | head -1)"
+    else
+        echo -e "  ${YELLOW}○ jj (needed for Espalier self-edit gates)${NC}"
+    fi
+    if command -v omp &> /dev/null; then
+        echo -e "  ✓ omp $(omp --version 2>/dev/null | head -1)"
+    else
+        echo -e "  ${YELLOW}○ omp (installed by first-run setup if requested)${NC}"
+    fi
     echo ""
 
     # Show tmux config status
@@ -838,11 +966,14 @@ if "$INSTALL_DIR/$BINARY_NAME" version &> /dev/null; then
     fi
     echo ""
 
+    maybe_run_first_run_setup
+    echo ""
+
     echo "Get started:"
+    echo "  ${BINARY_NAME} setup        # First-run stack setup wizard"
     echo "  ${BINARY_NAME}              # Launch the TUI"
     echo "  ${BINARY_NAME} add .        # Add current directory as session"
     echo "  ${BINARY_NAME} --help       # Show help"
-
     # WSL-specific tips
     if [[ "$IS_WSL" == "true" ]]; then
         echo ""

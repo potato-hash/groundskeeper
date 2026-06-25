@@ -7,16 +7,17 @@ package main
 import (
 	"bufio"
 	"context"
-	"os/exec"
 	"flag"
 	"fmt"
 	"net/smtp"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/potato-hash/groundskeeper/internal/agentpaths"
 	"github.com/potato-hash/groundskeeper/internal/channel"
@@ -26,6 +27,7 @@ import (
 	"github.com/potato-hash/groundskeeper/internal/runtime"
 	"github.com/potato-hash/groundskeeper/internal/sidecar"
 	"github.com/potato-hash/groundskeeper/internal/worker"
+	"gopkg.in/yaml.v3"
 )
 
 // gkDBPath resolves the Groundskeeper durable DB location:
@@ -294,11 +296,17 @@ func handleGkDaemon(args []string) {
 	if *fake {
 		adapter = runtime.NewFakeAdapter()
 	} else {
+		extraArgs := []string(nil)
+		if *espalierPath != "" {
+			extraArgs = esplalierArgs(*espalierPath)
+		} else if *sshTarget == "" {
+			extraArgs = esplalierArgs(resolveEspalierPath())
+		}
 		adapter = runtime.NewOmpAdapter(runtime.OmpAdapterConfig{
 			Model:       *model,
 			HostHandler: bridge,
 			HostTools:   hostToolDefinitions(bridge),
-			ExtraArgs:   esplalierArgs(*espalierPath),
+			ExtraArgs:   extraArgs,
 			SSHTarget:   *sshTarget,
 			SSHOmpBin:   *sshOmpBin,
 		})
@@ -330,8 +338,12 @@ func handleGkDaemon(args []string) {
 	if *sshTarget != "" {
 		sshInfo = " ssh=" + *sshTarget
 	}
-	fmt.Printf("gk-daemon: running (%d slots, model=%q, adapter=%s%s)\n",
-		*slots, *model, adapterType(adapter), sshInfo)
+	espalierInfo := ""
+	if !*fake && *sshTarget == "" && len(esplalierArgs(firstNonEmpty(*espalierPath, resolveEspalierPath()))) > 0 {
+		espalierInfo = " espalier=loaded"
+	}
+	fmt.Printf("gk-daemon: running (%d slots, model=%q, adapter=%s%s%s)\n",
+		*slots, *model, adapterType(adapter), sshInfo, espalierInfo)
 	pool.Start(ctx)
 	<-ctx.Done()
 	pool.Stop()
@@ -502,11 +514,14 @@ func hostToolDefinitions(b *host.Bridge) []runtime.RpcHostToolDefinition {
 	for _, n := range names {
 		out = append(out, runtime.RpcHostToolDefinition{
 			Name: n, Description: "Groundskeeper host tool: " + n,
+			Parameters: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
 		})
 	}
 	return out
 }
-
 
 // handleLoop dispatches loop subcommands: set, start, stop, show.
 func handleLoop(args []string) {
@@ -553,28 +568,28 @@ func handleLoop(args []string) {
 			fmt.Fprintln(os.Stderr, "Usage: loop start <thread-id>")
 			os.Exit(1)
 		}
-	if err := db.SetLoopEnabled(args[1], true); err != nil {
-		fmt.Fprintf(os.Stderr, "loop start: %v\n", err)
-		os.Exit(1)
-	}
-	// Create a loop_run and enqueue the first turn associated with it.
-	spec, _ := db.GetLoopSpec(args[1])
-	specID := ""
-	if spec != nil {
-		specID = spec.ID
-	}
-	run, err := db.StartLoopRun(args[1], specID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "loop start: %v\n", err)
-		os.Exit(1)
-	}
-	_, _ = db.IncrementTurnEnqueued(run.ID) // first turn
-	j, err := db.CreateJobWithLoop(args[1], "turn", run.ID, "turn-1")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "loop start: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("loop started: %s (run: %s, job: %s)\n", args[1], run.ID, j.ID)
+		if err := db.SetLoopEnabled(args[1], true); err != nil {
+			fmt.Fprintf(os.Stderr, "loop start: %v\n", err)
+			os.Exit(1)
+		}
+		// Create a loop_run and enqueue the first turn associated with it.
+		spec, _ := db.GetLoopSpec(args[1])
+		specID := ""
+		if spec != nil {
+			specID = spec.ID
+		}
+		run, err := db.StartLoopRun(args[1], specID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "loop start: %v\n", err)
+			os.Exit(1)
+		}
+		_, _ = db.IncrementTurnEnqueued(run.ID) // first turn
+		j, err := db.CreateJobWithLoop(args[1], "turn", run.ID, "turn-1")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "loop start: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("loop started: %s (run: %s, job: %s)\n", args[1], run.ID, j.ID)
 	case "stop":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "Usage: loop stop <thread-id>")
@@ -616,15 +631,22 @@ func handleLoop(args []string) {
 func handleEspalier(args []string) {
 	if len(args) == 0 || args[0] == "status" {
 		fmt.Println("Espalier Core readiness check:")
-		// Check for the espalier extension dir / package.
-		espalierPath := os.Getenv("GK_ESPALIER_PATH")
-		if espalierPath == "" {
-			espalierPath = filepath.Join(os.Getenv("HOME"), "espalier")
-		}
-		if _, err := os.Stat(espalierPath); err == nil {
+		espalierPath := resolveEspalierPath()
+		entrypoint := espalierExtensionPath(espalierPath)
+		if _, err := os.Stat(entrypoint); err == nil {
 			fmt.Printf("  package path: %s (found)\n", espalierPath)
+			fmt.Printf("  extension: %s (found)\n", entrypoint)
+		} else if _, err := os.Stat(espalierPath); err == nil {
+			fmt.Printf("  package path: %s (found)\n", espalierPath)
+			fmt.Printf("  extension: %s (missing — build Espalier)\n", entrypoint)
 		} else {
 			fmt.Printf("  package path: %s (missing — degraded)\n", espalierPath)
+		}
+		configPath := espalierConfigPath(espalierPath)
+		if _, err := os.Stat(configPath); err == nil {
+			fmt.Printf("  config: %s (found)\n", configPath)
+		} else {
+			fmt.Printf("  config: %s (missing)\n", configPath)
 		}
 		// Check for a watchdog file.
 		watchdog := os.Getenv("GK_ESPALIER_WATCHDOG")
@@ -639,7 +661,11 @@ func handleEspalier(args []string) {
 		}
 		// OMP can see the extension if the extension entry exists.
 		fmt.Println("  Groundskeeper does not import Espalier learning internals.")
-		fmt.Println("  Worker launch with Espalier configured: --espalier-path flag on gk-daemon")
+		if entrypoint != "" {
+			fmt.Printf("  Worker launch args: --extension %s\n", entrypoint)
+		} else {
+			fmt.Println("  Worker launch args: none (Espalier degraded)")
+		}
 		return
 	}
 	fmt.Fprintf(os.Stderr, "espalier: unknown subcommand %q\n", args[0])
@@ -680,17 +706,99 @@ func handleAuthStatus(args []string) {
 	fmt.Println("Groundskeeper does not store provider tokens.")
 }
 
-// exec is imported via os/exec in main.go; use the package-level exec from there.
-// We need a local exec.LookPath — use os/exec directly.
-
 // esplalierArgs returns the omp --extension flags to load Espalier Core into
 // a worker, or nil if no path is given. Groundskeeper passes the extension path;
 // it never imports Espalier internals.
 func esplalierArgs(path string) []string {
-	if path == "" {
+	entrypoint := espalierExtensionPath(path)
+	if entrypoint == "" {
 		return nil
 	}
-	return []string{"--extension", path}
+	return []string{"--extension", entrypoint}
+}
+
+func resolveEspalierPath() string {
+	if path := os.Getenv("GK_ESPALIER_PATH"); path != "" {
+		return path
+	}
+	if path := nearbyEspalierPath(); path != "" {
+		return path
+	}
+	return managedEspalierPath()
+}
+
+func managedEspalierPath() string {
+	if dir, err := agentpaths.DataDir(); err == nil {
+		return filepath.Join(dir, "espalier")
+	}
+	return filepath.Join(os.Getenv("HOME"), ".local", "share", "groundskeeper", "espalier")
+}
+
+func nearbyEspalierPath() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	seen := map[string]bool{}
+	for dir := cwd; ; dir = filepath.Dir(dir) {
+		candidate := filepath.Join(filepath.Dir(dir), "espalier")
+		if !seen[candidate] {
+			seen[candidate] = true
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+	}
+}
+
+func espalierExtensionPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		return path
+	}
+	for _, rel := range []string{
+		filepath.Join("dist", "extensions", "index.js"),
+		filepath.Join("extensions", "index.js"),
+		"index.js",
+	} {
+		candidate := filepath.Join(path, rel)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func espalierConfigPath(path string) string {
+	root := espalierPackageRoot(path)
+	if root == "" {
+		root = path
+	}
+	return filepath.Join(root, "config", "espalier.yaml")
+}
+
+func espalierPackageRoot(path string) string {
+	if path == "" {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return path
+	}
+	if info.IsDir() {
+		return path
+	}
+	dir := filepath.Dir(path)
+	if filepath.Base(dir) == "extensions" && filepath.Base(filepath.Dir(dir)) == "dist" {
+		return filepath.Dir(filepath.Dir(dir))
+	}
+	return dir
 }
 
 // handleSetup is the full-stack installer and first-run onboarding. It installs
@@ -703,6 +811,9 @@ func esplalierArgs(path string) []string {
 func handleSetup(args []string) {
 	fs := flag.NewFlagSet("setup", flag.ExitOnError)
 	nonInteractive := fs.Bool("non-interactive", false, "skip all prompts (for CI)")
+	modelFlag := fs.String("model", "", "default OMP model for workers")
+	espalierPathFlag := fs.String("espalier-path", "", "Espalier package directory or extension entrypoint")
+	writeOmpConfigFlag := fs.Bool("write-omp-config", false, "write recommended global OMP config without prompting")
 	fs.Parse(args)
 	reader := bufio.NewReader(os.Stdin)
 	prompt := func(question string) string {
@@ -717,19 +828,39 @@ func handleSetup(args []string) {
 		if *nonInteractive {
 			return false
 		}
-		return prompt(question+" [y/N]") == "y"
+		answer := strings.ToLower(prompt(question + " [y/N]"))
+		return answer == "y" || answer == "yes"
 	}
 
-	fmt.Println()
-	fmt.Println("  ╔════════════════════════════════════════╗")
-	fmt.Println("  ║     Groundskeeper Stack Installer      ║")
-	fmt.Println("  ╚════════════════════════════════════════╝")
-	fmt.Println()
-	fmt.Println("  This installs the full Groundskeeper stack:")
-	fmt.Println("    1. OMP — the agent runtime (omp --mode rpc)")
-	fmt.Println("    2. Espalier Core — the learning/gating extension")
-	fmt.Println("    3. Groundskeeper — the durable substrate + TUI")
-	fmt.Println()
+	if *nonInteractive {
+		fmt.Println()
+		fmt.Println("Groundskeeper Setup — Non-interactive mode")
+		fmt.Println()
+		fmt.Println("  Running without prompts. Missing optional pieces are reported, not installed.")
+		fmt.Println()
+		fmt.Println("  Configure Groundskeeper with flags or environment variables:")
+		fmt.Println("    groundskeeper setup --model provider/model --espalier-path /path/to/espalier")
+		fmt.Println("    GK_ESPALIER_PATH=/path/to/espalier")
+		fmt.Println("    GK_OMP_MODEL=provider/model")
+		fmt.Println("    groundskeeper setup --write-omp-config")
+		fmt.Println("    groundskeeper gk-daemon --model provider/model --espalier-path /path/to/espalier")
+		fmt.Println()
+		fmt.Println("  Run 'groundskeeper setup' in an interactive terminal for the full installer.")
+		fmt.Println()
+	} else {
+		fmt.Println()
+		fmt.Println("  ╔════════════════════════════════════════╗")
+		fmt.Println("  ║       Groundskeeper Stack Setup        ║")
+		fmt.Println("  ╚════════════════════════════════════════╝")
+		fmt.Println()
+		fmt.Println("  Interactive first-run setup for:")
+		fmt.Println("    1. OMP — the agent runtime (omp --mode rpc)")
+		fmt.Println("    2. Espalier Core — the learning/gating extension")
+		fmt.Println("    3. Groundskeeper — durable jobs, approvals, loops, and TUI")
+		fmt.Println()
+		fmt.Println("  Press Enter to accept defaults. Re-run safely any time.")
+		fmt.Println()
+	}
 
 	// ── Step 1: OMP ──
 	fmt.Println("── 1/5 · OMP runtime ──────────────────────")
@@ -759,12 +890,18 @@ func handleSetup(args []string) {
 	// ── Step 2: Espalier Core ──
 	fmt.Println("── 2/5 · Espalier Core ───────────────────")
 	fmt.Println()
-	espalierPath := os.Getenv("GK_ESPALIER_PATH")
-	if espalierPath == "" {
-		espalierPath = filepath.Join(os.Getenv("HOME"), "espalier")
+	espalierPath := resolveEspalierPath()
+	if *espalierPathFlag != "" {
+		espalierPath = *espalierPathFlag
 	}
-	if _, err := os.Stat(filepath.Join(espalierPath, "dist", "extensions", "index.js")); err == nil {
-		fmt.Printf("  [OK] Espalier found at %s (dist built)\n", espalierPath)
+	inputEspalierPath := prompt(fmt.Sprintf("  Espalier path (press Enter for %s):", espalierPath))
+	if inputEspalierPath != "" {
+		espalierPath = inputEspalierPath
+	}
+	entrypoint := espalierExtensionPath(espalierPath)
+	if _, err := os.Stat(entrypoint); err == nil {
+		fmt.Printf("  [OK] Espalier found at %s\n", espalierPath)
+		fmt.Printf("  [OK] extension entrypoint: %s\n", entrypoint)
 	} else if _, err := os.Stat(espalierPath); err == nil {
 		fmt.Printf("  [PARTIAL] %s exists but dist/ is not built\n", espalierPath)
 		if confirm("  Build Espalier now? (requires bun)") {
@@ -772,6 +909,7 @@ func handleSetup(args []string) {
 				fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
 			} else {
 				fmt.Println("  [OK] Espalier built")
+				entrypoint = espalierExtensionPath(espalierPath)
 			}
 		}
 	} else {
@@ -781,6 +919,7 @@ func handleSetup(args []string) {
 				fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
 			} else {
 				fmt.Println("  [OK] Espalier installed and built")
+				entrypoint = espalierExtensionPath(espalierPath)
 			}
 		} else {
 			fmt.Println("  [SKIP] Workers will run without Espalier (degraded)")
@@ -809,7 +948,10 @@ func handleSetup(args []string) {
 	// ── Step 4: Model configuration ──
 	fmt.Println("── 4/5 · Model configuration ─────────────")
 	fmt.Println()
-	model := os.Getenv("GK_OMP_MODEL")
+	model := *modelFlag
+	if model == "" {
+		model = os.Getenv("GK_OMP_MODEL")
+	}
 	if model == "" {
 		model = "ollama-cloud/glm-5.2"
 	}
@@ -828,6 +970,24 @@ func handleSetup(args []string) {
 	}
 	fmt.Printf("  [SET] model = %s\n", model)
 	fmt.Println("  Override per-run: gk-daemon --model <model>")
+	if *nonInteractive {
+		fmt.Println("  [SKIP] Global OMP config write skipped in non-interactive mode")
+	} else if *writeOmpConfigFlag || confirm("  Write recommended global OMP config now?") {
+		path, backup, changed, err := writeRecommendedOmpConfig(model)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  [ERROR] write OMP config: %v\n", err)
+		} else if changed {
+			if backup != "" {
+				fmt.Printf("  [OK] OMP config updated: %s (backup: %s)\n", path, backup)
+			} else {
+				fmt.Printf("  [OK] OMP config created: %s\n", path)
+			}
+		} else {
+			fmt.Printf("  [OK] OMP config already has recommended defaults: %s\n", path)
+		}
+	} else {
+		fmt.Println("  [SKIP] Global OMP config unchanged")
+	}
 	fmt.Println()
 
 	// ── Step 5: Tmux (dependency check, not install) ──
@@ -849,6 +1009,11 @@ func handleSetup(args []string) {
 	} else {
 		fmt.Println("  [OK] bun found")
 	}
+	if _, err := exec.LookPath("jj"); err != nil {
+		fmt.Println("  [OPTIONAL] jj not found (needed for Espalier self-edit gates)")
+	} else {
+		fmt.Println("  [OK] jj found")
+	}
 	fmt.Println()
 
 	// ── Summary + getting started ──
@@ -860,7 +1025,11 @@ func handleSetup(args []string) {
 	fmt.Println("    groundskeeper gk-thread create --title \"Fix tests\" --runtime omp --workspace .")
 	fmt.Printf("    groundskeeper loop set <thread-id> --mode until_done --prompt \"Fix the test\" --max-turns 5\n")
 	fmt.Printf("    groundskeeper loop start <thread-id>\n")
-	fmt.Printf("    groundskeeper gk-daemon --model %s --slots 2\n", model)
+	if _, err := os.Stat(entrypoint); err == nil {
+		fmt.Printf("    groundskeeper gk-daemon --model %s --slots 2 --espalier-path %s\n", model, entrypoint)
+	} else {
+		fmt.Printf("    groundskeeper gk-daemon --model %s --slots 2\n", model)
+	}
 	fmt.Println("    groundskeeper fleet")
 	fmt.Println("    groundskeeper")
 	fmt.Println()
@@ -875,7 +1044,7 @@ func installOMP() error {
 	// We delegate to OMP's install method rather than reimplementing it.
 	fmt.Println("  Downloading OMP installer...")
 	cmd := exec.Command("bash", "-c",
-		"curl -fsSL https://raw.githubusercontent.com/can1357/oh-my-pi/main/install.sh | bash")
+		"curl -fsSL https://omp.sh/install | sh")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
@@ -885,6 +1054,9 @@ func installOMP() error {
 // installEspalier clones and builds the Espalier Core extension.
 func installEspalier(path string) error {
 	fmt.Printf("  Cloning Espalier to %s...\n", path)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create parent dir: %w", err)
+	}
 	cmd := exec.Command("git", "clone", "https://github.com/potato-hash/espalier.git", path)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -913,4 +1085,99 @@ func buildEspalier(path string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func writeRecommendedOmpConfig(model string) (string, string, bool, error) {
+	path := ompConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return path, "", false, err
+	}
+	recommended := recommendedOmpConfig(model)
+	current := map[string]any{}
+	original, err := os.ReadFile(path)
+	var backup string
+	if err == nil {
+		backup = fmt.Sprintf("%s.groundskeeper-%s.bak", path, time.Now().Format("20060102150405"))
+		if err := os.WriteFile(backup, original, 0o600); err != nil {
+			return path, "", false, fmt.Errorf("backup existing config: %w", err)
+		}
+		if len(strings.TrimSpace(string(original))) > 0 {
+			if err := yaml.Unmarshal(original, &current); err != nil {
+				return path, backup, false, fmt.Errorf("parse existing config: %w", err)
+			}
+			if current == nil {
+				current = map[string]any{}
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return path, "", false, err
+	}
+	changed := mergeMissingYAML(current, recommended)
+	if !changed && err == nil {
+		_ = os.Remove(backup)
+		return path, "", false, nil
+	}
+	out, err := yaml.Marshal(current)
+	if err != nil {
+		return path, backup, false, err
+	}
+	if err := atomicWriteFile(path, out, 0o600); err != nil {
+		return path, backup, false, err
+	}
+	return path, backup, true, nil
+}
+
+func ompConfigPath() string {
+	return filepath.Join(os.Getenv("HOME"), ".omp", "agent", "config.yml")
+}
+
+func recommendedOmpConfig(model string) map[string]any {
+	cfg := map[string]any{
+		"memory": map[string]any{"backend": "mnemopi"},
+		"mnemopi": map[string]any{
+			"scoping":           "per-project",
+			"noEmbeddings":      true,
+			"autoRecall":        true,
+			"autoRetain":        true,
+			"retainEveryNTurns": 4,
+		},
+		"tools":      map[string]any{"approvalMode": "write"},
+		"advisor":    map[string]any{"enabled": true},
+		"compaction": map[string]any{"enabled": true, "reserveTokens": 8000},
+	}
+	if model != "" {
+		cfg["modelRoles"] = map[string]any{"default": model}
+	}
+	return cfg
+}
+
+func mergeMissingYAML(dst, src map[string]any) bool {
+	changed := false
+	for key, srcValue := range src {
+		if dstValue, ok := dst[key]; ok {
+			dstMap, dstOK := dstValue.(map[string]any)
+			srcMap, srcOK := srcValue.(map[string]any)
+			if dstOK && srcOK {
+				if mergeMissingYAML(dstMap, srcMap) {
+					changed = true
+				}
+			}
+			continue
+		}
+		dst[key] = srcValue
+		changed = true
+	}
+	return changed
+}
+
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }

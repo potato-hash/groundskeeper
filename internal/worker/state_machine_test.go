@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,4 +116,44 @@ func TestProcessExitRetriesOrDeadLetters(t *testing.T) {
 		}
 	}
 	pool.Stop()
+}
+
+func TestRuntimeErrorDeadLettersWithReason(t *testing.T) {
+	db := newTestPoolDB(t)
+	adapter := runtime.NewFakeAdapter()
+	adapter.TurnError = "No API key found for ollama-cloud."
+	pool := New(db, adapter, Config{MaxSlots: 1, PollInterval: 15 * time.Millisecond})
+	pool.SetLogger(nil)
+
+	th, _ := db.CreateThread("runtime-error", "omp", ".")
+	db.DB().Exec(`UPDATE agent_threads SET goal=? WHERE id=?`, "go", th.ID)
+	j, _ := db.CreateJob(th.ID, "turn")
+	db.DB().Exec(`UPDATE jobs SET max_attempts=1 WHERE id=?`, j.ID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool.Start(ctx)
+
+	deadline := time.After(5 * time.Second)
+	for {
+		got, _ := db.GetJob(j.ID)
+		if got != nil && got.Status == gkdb.JobDeadLetter {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("job did not dead-letter after runtime error")
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	pool.Stop()
+
+	var reason string
+	if err := db.DB().QueryRow(`SELECT reason FROM dead_letters WHERE job_id=?`, j.ID).Scan(&reason); err != nil {
+		t.Fatalf("dead letter reason: %v", err)
+	}
+	if !strings.Contains(reason, "No API key found for ollama-cloud") {
+		t.Fatalf("dead letter reason = %q", reason)
+	}
 }

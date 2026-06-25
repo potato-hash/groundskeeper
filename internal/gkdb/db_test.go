@@ -54,6 +54,15 @@ func TestThreadPersistsAcrossReopen(t *testing.T) {
 	if got.Status != ThreadIdle {
 		t.Fatalf("status = %q, want idle", got.Status)
 	}
+	if created.SessionDir == "" {
+		t.Fatal("created thread has empty session_dir")
+	}
+	if got.SessionDir != created.SessionDir {
+		t.Fatalf("session_dir = %q, want %q", got.SessionDir, created.SessionDir)
+	}
+	if filepath.Base(got.SessionDir) != created.ID {
+		t.Fatalf("session_dir should end with thread id %q, got %q", created.ID, got.SessionDir)
+	}
 }
 
 // TestJobPersists: a created job is retrievable and starts queued.

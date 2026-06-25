@@ -21,6 +21,8 @@ type FakeAdapter struct {
 	// TurnDelay is the delay between agent_start and agent_end. Zero = immediate.
 	// Negative = never emit agent_end (simulates a stuck worker).
 	TurnDelay time.Duration
+	// TurnError emits a runtime error instead of running the turn.
+	TurnError string
 
 	mu      sync.Mutex
 	threads map[string]*fakeThread
@@ -65,14 +67,17 @@ func (f *FakeAdapter) ResumeThread(ctx context.Context, ref *RuntimeThreadRef) e
 	// the thread handle valid. A missing thread is created on demand.
 	key := threadKey(ref)
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, ok := f.threads[key]; !ok {
-		f.threads[key] = &fakeThread{
+	ft, ok := f.threads[key]
+	if !ok {
+		ft = &fakeThread{
 			ref:    ref,
 			events: make(chan RuntimeEvent, 16),
 			done:   make(chan struct{}),
 		}
+		f.threads[key] = ft
 	}
+	f.mu.Unlock()
+	ft.send(RuntimeEvent{Kind: EventReady})
 	return nil
 }
 
@@ -84,6 +89,10 @@ func (f *FakeAdapter) SendTurn(ctx context.Context, ref *RuntimeThreadRef, promp
 	// agent_start is emitted synchronously so the caller sees the turn begin.
 	// agent_end is emitted after TurnDelay (or immediately, or never if negative).
 	go func() {
+		if f.TurnError != "" {
+			ft.send(RuntimeEvent{Kind: EventError, Payload: f.TurnError})
+			return
+		}
 		if !ft.send(RuntimeEvent{Kind: EventAgentStart, Payload: prompt}) {
 			return // shut down before start
 		}
