@@ -195,15 +195,49 @@ func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 	for _, want := range []string{
 		"--run-setup",
 		"--skip-setup",
+		"--model <model>",
+		"--verify-model",
 		"maybe_run_first_run_setup",
 		"Run first-run setup now? [Y/n]",
-		"setup </dev/tty",
-		"setup --non-interactive",
+		"setup_args+=(--non-interactive --install-missing)",
+		"</dev/tty",
+		"--non-interactive --install-missing",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("install.sh missing %q", want)
 		}
 	}
+}
+
+func TestSetupCommandEnvAliasesOllamaAPIKeyForOllamaCloud(t *testing.T) {
+	t.Setenv("OLLAMA_API_KEY", "temporary-test-key")
+	t.Setenv("OLLAMA_CLOUD_API_KEY", "")
+
+	env := setupCommandEnv("ollama-cloud/glm-5.2")
+	if !containsEnv(env, "OLLAMA_CLOUD_API_KEY=temporary-test-key") {
+		t.Fatalf("setupCommandEnv did not alias OLLAMA_API_KEY for ollama-cloud model: %#v", env)
+	}
+}
+
+func TestRedactedCommandOutputHidesProviderKeys(t *testing.T) {
+	t.Setenv("OLLAMA_CLOUD_API_KEY", "temporary-test-key")
+
+	got := redactedCommandOutput([]byte("failed with temporary-test-key"))
+	if strings.Contains(got, "temporary-test-key") {
+		t.Fatalf("redactedCommandOutput leaked provider key: %q", got)
+	}
+	if !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("redactedCommandOutput missing redaction marker: %q", got)
+	}
+}
+
+func containsEnv(env []string, want string) bool {
+	for _, kv := range env {
+		if kv == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestWriteRecommendedOmpConfigCreatesGlobalConfig(t *testing.T) {

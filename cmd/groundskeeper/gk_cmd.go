@@ -811,8 +811,10 @@ func espalierPackageRoot(path string) string {
 func handleSetup(args []string) {
 	fs := flag.NewFlagSet("setup", flag.ExitOnError)
 	nonInteractive := fs.Bool("non-interactive", false, "skip all prompts (for CI)")
+	installMissing := fs.Bool("install-missing", false, "install missing OMP and Espalier dependencies without prompting")
 	modelFlag := fs.String("model", "", "default OMP model for workers")
 	espalierPathFlag := fs.String("espalier-path", "", "Espalier package directory or extension entrypoint")
+	verifyModelFlag := fs.Bool("verify-model", false, "run a small OMP model smoke test using configured credentials")
 	writeOmpConfigFlag := fs.Bool("write-omp-config", false, "write recommended global OMP config without prompting")
 	fs.Parse(args)
 	reader := bufio.NewReader(os.Stdin)
@@ -836,12 +838,17 @@ func handleSetup(args []string) {
 		fmt.Println()
 		fmt.Println("Groundskeeper Setup — Non-interactive mode")
 		fmt.Println()
-		fmt.Println("  Running without prompts. Missing optional pieces are reported, not installed.")
+		if *installMissing {
+			fmt.Println("  Running without prompts. Missing stack pieces will be installed.")
+		} else {
+			fmt.Println("  Running without prompts. Missing optional pieces are reported, not installed.")
+		}
 		fmt.Println()
 		fmt.Println("  Configure Groundskeeper with flags or environment variables:")
-		fmt.Println("    groundskeeper setup --model provider/model --espalier-path /path/to/espalier")
+		fmt.Println("    groundskeeper setup --install-missing --model provider/model --espalier-path /path/to/espalier")
 		fmt.Println("    GK_ESPALIER_PATH=/path/to/espalier")
 		fmt.Println("    GK_OMP_MODEL=provider/model")
+		fmt.Println("    OLLAMA_CLOUD_API_KEY=<key> groundskeeper setup --verify-model")
 		fmt.Println("    groundskeeper setup --write-omp-config")
 		fmt.Println("    groundskeeper gk-daemon --model provider/model --espalier-path /path/to/espalier")
 		fmt.Println()
@@ -865,8 +872,8 @@ func handleSetup(args []string) {
 	// ── Step 1: OMP ──
 	fmt.Println("── 1/5 · OMP runtime ──────────────────────")
 	fmt.Println()
-	ompPath, err := exec.LookPath("omp")
-	if err == nil {
+	ompPath := lookupOMP()
+	if ompPath != "" {
 		fmt.Printf("  [OK] omp found at %s\n", ompPath)
 		out, vErr := exec.Command(ompPath, "--version").Output()
 		if vErr == nil {
@@ -874,12 +881,22 @@ func handleSetup(args []string) {
 		}
 	} else {
 		fmt.Println("  [MISSING] omp is not on PATH.")
-		if confirm("  Install OMP now?") {
+		if *installMissing || confirm("  Install OMP now?") {
 			if err := installOMP(); err != nil {
 				fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
+				if *installMissing {
+					os.Exit(1)
+				}
 			} else {
-				fmt.Println("  [OK] OMP installed to ~/.local/bin/omp")
-				ompPath = filepath.Join(os.Getenv("HOME"), ".local", "bin", "omp")
+				ompPath = lookupOMP()
+				if ompPath == "" {
+					fmt.Fprintln(os.Stderr, "  [ERROR] OMP installer completed but omp is still not discoverable")
+					if *installMissing {
+						os.Exit(1)
+					}
+				} else {
+					fmt.Printf("  [OK] OMP installed at %s\n", ompPath)
+				}
 			}
 		} else {
 			fmt.Println("  [SKIP] Install OMP manually: https://github.com/can1357/oh-my-pi")
@@ -904,9 +921,12 @@ func handleSetup(args []string) {
 		fmt.Printf("  [OK] extension entrypoint: %s\n", entrypoint)
 	} else if _, err := os.Stat(espalierPath); err == nil {
 		fmt.Printf("  [PARTIAL] %s exists but dist/ is not built\n", espalierPath)
-		if confirm("  Build Espalier now? (requires bun)") {
+		if *installMissing || confirm("  Build Espalier now? (requires bun)") {
 			if err := buildEspalier(espalierPath); err != nil {
 				fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
+				if *installMissing {
+					os.Exit(1)
+				}
 			} else {
 				fmt.Println("  [OK] Espalier built")
 				entrypoint = espalierExtensionPath(espalierPath)
@@ -914,9 +934,12 @@ func handleSetup(args []string) {
 		}
 	} else {
 		fmt.Printf("  [MISSING] Espalier not found at %s\n", espalierPath)
-		if confirm("  Clone and build Espalier now?") {
+		if *installMissing || confirm("  Clone and build Espalier now?") {
 			if err := installEspalier(espalierPath); err != nil {
 				fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
+				if *installMissing {
+					os.Exit(1)
+				}
 			} else {
 				fmt.Println("  [OK] Espalier installed and built")
 				entrypoint = espalierExtensionPath(espalierPath)
@@ -959,6 +982,8 @@ func handleSetup(args []string) {
 		credPath := filepath.Join(os.Getenv("HOME"), ".omp", "agent", "agent.db")
 		if _, err := os.Stat(credPath); err == nil {
 			fmt.Println("  [OK] OMP credential store found")
+		} else if hasModelEnvCredential(model) {
+			fmt.Println("  [OK] provider API key found in environment")
 		} else {
 			fmt.Println("  [NOT FOUND] No OMP credential store")
 			fmt.Println("  Run 'omp /login <provider>' to configure a provider.")
@@ -970,6 +995,18 @@ func handleSetup(args []string) {
 	}
 	fmt.Printf("  [SET] model = %s\n", model)
 	fmt.Println("  Override per-run: gk-daemon --model <model>")
+	if *verifyModelFlag {
+		if ompPath == "" {
+			fmt.Fprintln(os.Stderr, "  [ERROR] cannot verify model: omp is not installed")
+			os.Exit(1)
+		}
+		fmt.Println("  Verifying OMP model access...")
+		if err := verifyOmpModel(ompPath, model); err != nil {
+			fmt.Fprintf(os.Stderr, "  [ERROR] model verification failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("  [OK] OMP model smoke test passed")
+	}
 	if *nonInteractive {
 		fmt.Println("  [SKIP] Global OMP config write skipped in non-interactive mode")
 	} else if *writeOmpConfigFlag || confirm("  Write recommended global OMP config now?") {
@@ -1049,6 +1086,88 @@ func installOMP() error {
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	return cmd.Run()
+}
+
+func lookupOMP() string {
+	if p, err := exec.LookPath("omp"); err == nil {
+		return p
+	}
+	home := os.Getenv("HOME")
+	for _, candidate := range []string{
+		filepath.Join(home, ".local", "bin", "omp"),
+		filepath.Join(home, ".bun", "bin", "omp"),
+	} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func hasModelEnvCredential(model string) bool {
+	if strings.HasPrefix(model, "ollama-cloud/") {
+		return os.Getenv("OLLAMA_CLOUD_API_KEY") != "" || os.Getenv("OLLAMA_API_KEY") != ""
+	}
+	return false
+}
+
+func setupCommandEnv(model string) []string {
+	env := os.Environ()
+	if strings.HasPrefix(model, "ollama-cloud/") && os.Getenv("OLLAMA_CLOUD_API_KEY") == "" {
+		if key := os.Getenv("OLLAMA_API_KEY"); key != "" {
+			env = append(env, "OLLAMA_CLOUD_API_KEY="+key)
+		}
+	}
+	return env
+}
+
+func redactedCommandOutput(out []byte) string {
+	s := string(out)
+	for _, secret := range []string{
+		os.Getenv("OLLAMA_CLOUD_API_KEY"),
+		os.Getenv("OLLAMA_API_KEY"),
+	} {
+		if secret != "" {
+			s = strings.ReplaceAll(s, secret, "[REDACTED]")
+		}
+	}
+	s = strings.TrimSpace(s)
+	if len(s) > 2000 {
+		s = s[len(s)-2000:]
+	}
+	return s
+}
+
+func verifyOmpModel(ompPath, model string) error {
+	if model == "" {
+		return fmt.Errorf("model is required")
+	}
+	env := setupCommandEnv(model)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	refresh := exec.CommandContext(ctx, ompPath, "models", "refresh")
+	refresh.Env = env
+	if out, err := refresh.CombinedOutput(); err != nil {
+		return fmt.Errorf("refresh OMP model catalog: %w: %s", err, redactedCommandOutput(out))
+	}
+
+	ctx, cancel = context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, ompPath,
+		"--model", model,
+		"--no-session",
+		"--max-time=60",
+		"-p", "Reply exactly: GK_OK")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("run OMP smoke prompt: %w: %s", err, redactedCommandOutput(out))
+	}
+	if !strings.Contains(string(out), "GK_OK") {
+		return fmt.Errorf("unexpected OMP smoke response: %s", redactedCommandOutput(out))
+	}
+	return nil
 }
 
 // installEspalier clones and builds the Espalier Core extension.

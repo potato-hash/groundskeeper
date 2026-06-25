@@ -13,6 +13,8 @@
 #   --skip-tmux-config  Skip tmux configuration prompt
 #   --run-setup         Run `groundskeeper setup` after installing (no prompt)
 #   --skip-setup        Do not offer the first-run setup wizard
+#   --model <model>     Model to pass to first-run setup
+#   --verify-model      Verify model access during first-run setup
 #   --non-interactive   Skip all prompts (for CI/automated installs)
 #   --pkg-manager <mgr> macOS package manager: 'brew' or 'port' (default: auto-detect)
 #
@@ -102,6 +104,8 @@ SKIP_OPTIONAL_DEPS=false
 SETUP_MODE="prompt"  # prompt, run, or skip
 RUN_SETUP_REQUESTED=false
 SKIP_SETUP_REQUESTED=false
+SETUP_MODEL=""
+VERIFY_MODEL=false
 # macOS package manager configuration
 MACOS_SUPPORTED_PKG_MGRS=("brew" "port")  # Order matters for preference
 MACOS_PKG_MANAGER=""  # Will be auto-detected or set by user
@@ -131,6 +135,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-setup)
             SKIP_SETUP_REQUESTED=true
+            shift
+            ;;
+        --model)
+            if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then
+                echo -e "${RED}Error: --model requires a value${NC}"
+                exit 1
+            fi
+            SETUP_MODEL="$2"
+            shift 2
+            ;;
+        --verify-model)
+            VERIFY_MODEL=true
             shift
             ;;
         --non-interactive)
@@ -170,6 +186,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip-tmux-config  Skip tmux configuration prompt"
             echo "  --run-setup         Run 'groundskeeper setup' after installing (no prompt)"
             echo "  --skip-setup        Do not offer the first-run setup wizard"
+            echo "  --model <model>     Model to pass to first-run setup"
+            echo "  --verify-model      Verify model access during first-run setup"
             echo "  --non-interactive   Skip all prompts (for CI/automated installs)"
             echo "  --pkg-manager <mgr> macOS package manager: ${MACOS_SUPPORTED_PKG_MGRS[*]} (default: auto-detect)"
             echo "  -h, --help          Show this help message"
@@ -189,6 +207,9 @@ if [[ "$RUN_SETUP_REQUESTED" == "true" ]]; then
     SETUP_MODE="run"
 elif [[ "$SKIP_SETUP_REQUESTED" == "true" || "$SKIP_OPTIONAL_DEPS" == "true" ]]; then
     SETUP_MODE="skip"
+fi
+if [[ -z "${OLLAMA_CLOUD_API_KEY:-}" && -n "${OLLAMA_API_KEY:-}" ]]; then
+    export OLLAMA_CLOUD_API_KEY="$OLLAMA_API_KEY"
 fi
 
 echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
@@ -866,12 +887,22 @@ setup_command_display() {
 
 run_first_run_setup() {
     local installed_binary="${INSTALL_DIR}/${BINARY_NAME}"
+    local setup_args=()
+    if [[ -n "$SETUP_MODEL" ]]; then
+        setup_args+=(--model "$SETUP_MODEL")
+    fi
+    if [[ "$VERIFY_MODEL" == "true" ]]; then
+        setup_args+=(--verify-model)
+    fi
+
     if [[ "$SKIP_OPTIONAL_DEPS" == "true" ]]; then
-        "$installed_binary" setup --non-interactive
+        setup_args+=(--non-interactive --install-missing)
+        "$installed_binary" setup "${setup_args[@]}"
     elif has_prompt_tty; then
-        "$installed_binary" setup </dev/tty
+        "$installed_binary" setup "${setup_args[@]}" </dev/tty
     else
-        "$installed_binary" setup --non-interactive
+        setup_args+=(--non-interactive --install-missing)
+        "$installed_binary" setup "${setup_args[@]}"
     fi
 }
 
