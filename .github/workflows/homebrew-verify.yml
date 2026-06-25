@@ -8,6 +8,7 @@ on:
   pull_request:
     paths:
       - 'README.md'
+      - 'install.sh'
       - '.goreleaser.yml'
       - 'scripts/verify-homebrew-install.sh'
       - '.github/workflows/homebrew-verify.yml'

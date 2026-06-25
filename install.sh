@@ -726,14 +726,7 @@ if [[ "$INSTALLED_FROM_SOURCE" != "true" ]]; then
     fi
     echo ""
 
-    # Suggest Homebrew first if available (most reliable)
-    if [[ "$OS" == "darwin" ]] && command -v brew &> /dev/null; then
-        echo "Install via Homebrew instead (recommended):"
-        echo "  brew install potato-hash/tap/groundskeeper"
-        echo ""
-    fi
-
-    echo "Or build from source:"
+    echo "Build from source:"
     echo "  git clone https://github.com/${REPO}.git"
     echo "  cd groundskeeper && make install"
     exit 1

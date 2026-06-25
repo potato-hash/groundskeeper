@@ -28,12 +28,15 @@ pass() { echo -e "${GREEN}OK${NC}  : $*"; }
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root="${script_dir}/.."
 readme="${repo_root}/README.md"
+installer="${repo_root}/install.sh"
 goreleaser="${repo_root}/.goreleaser.yml"
 
 if [ -z "${TAP_OWNER}" ] || [ -z "${TAP_REPO}" ]; then
-  if grep -Eq "brew install .*${FORMULA_NAME}" "${readme}"; then
-    fail "README.md advertises Homebrew for ${FORMULA_NAME}, but no Groundskeeper tap is configured"
-  fi
+  for file in "${readme}" "${installer}"; do
+    if grep -Eq "brew install .*${FORMULA_NAME}" "${file}"; then
+      fail "${file#${repo_root}/} advertises Homebrew for ${FORMULA_NAME}, but no Groundskeeper tap is configured"
+    fi
+  done
   if grep -Eq '^[[:space:]]*brews:' "${goreleaser}"; then
     fail ".goreleaser.yml configures Homebrew, but verifier tap settings are missing"
   fi

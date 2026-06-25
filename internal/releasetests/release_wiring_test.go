@@ -59,6 +59,7 @@ func TestReleaseVersionIsStableForGitHubLatest(t *testing.T) {
 func TestHomebrewVerifyDoesNotRunStaleChecksOnReleaseTags(t *testing.T) {
 	workflow := readRepoFile(t, ".github/workflows/homebrew-verify.yml")
 	script := readRepoFile(t, "scripts/verify-homebrew-install.sh")
+	installer := readRepoFile(t, "install.sh")
 
 	for _, stale := range []string{"tags:", "'v*'", `"v*"`, "schedule:"} {
 		if strings.Contains(workflow, stale) {
@@ -72,6 +73,12 @@ func TestHomebrewVerifyDoesNotRunStaleChecksOnReleaseTags(t *testing.T) {
 	}
 	if !strings.Contains(script, "potato-hash") || !strings.Contains(script, "groundskeeper") {
 		t.Fatal("homebrew verifier should be wired to Groundskeeper when enabled")
+	}
+	if !strings.Contains(workflow, "'install.sh'") {
+		t.Fatal("homebrew verifier should run on installer changes")
+	}
+	if strings.Contains(installer, "brew install potato-hash/tap/groundskeeper") {
+		t.Fatal("installer must not advertise Homebrew until a Groundskeeper tap exists")
 	}
 }
 
