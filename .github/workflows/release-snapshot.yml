@@ -6,7 +6,7 @@
 # release.yml had already created the GitHub release):
 #
 #   - .goreleaser.yml missing a required field
-#   - cmd/agent-deck/main.go change that breaks the build for one of
+#   - cmd/groundskeeper/main.go change that breaks the build for one of
 #     the four release targets (linux/darwin x amd64/arm64)
 #   - Archive / checksum / brew-formula template error
 #
@@ -20,7 +20,7 @@ on:
   pull_request:
     paths:
       - '.goreleaser.yml'
-      - 'cmd/agent-deck/**'
+      - 'cmd/groundskeeper/**'
       - '.github/workflows/release.yml'
       - '.github/workflows/release-snapshot.yml'
 

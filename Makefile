@@ -90,7 +90,7 @@ css-verify: css
 
 # Run in development
 run:
-	go run ./cmd/agent-deck
+	go run ./cmd/groundskeeper
 
 # Install to /usr/local/bin (requires sudo)
 install: build
@@ -101,7 +101,7 @@ install: build
 	@# re-sign guarantees a valid signature. No-op on other platforms.
 	@if [ "$$(uname)" = "Darwin" ]; then sudo codesign --force --sign - /usr/local/bin/$(BINARY_NAME); fi
 	@echo "✅ Installed to /usr/local/bin/$(BINARY_NAME)"
-	@echo "Run 'agent-deck' to start"
+	@echo "Run 'groundskeeper' to start"
 
 # Install to user's local bin (no sudo required)
 install-user: build
@@ -114,7 +114,7 @@ install-user: build
 	@if [ "$$(uname)" = "Darwin" ]; then codesign --force --sign - $(HOME)/.local/bin/$(BINARY_NAME); fi
 	@echo "✅ Installed to $(HOME)/.local/bin/$(BINARY_NAME)"
 	@echo "Make sure $(HOME)/.local/bin is in your PATH"
-	@echo "Run 'agent-deck' to start"
+	@echo "Run 'groundskeeper' to start"
 
 # Uninstall from /usr/local/bin
 uninstall:
@@ -143,7 +143,7 @@ test:
 # Run hard-gated walltime regression tests (Track B). Honors PERF_BUDGET_MULTIPLIER
 # (default 1.0 locally; CI sets 2.0). See docs/perf-budget-suite.md.
 #
-# ./... (not just ./cmd/agent-deck/...) so Tier 1 TestPerf_* added in any
+# ./... (not just ./cmd/groundskeeper/...) so Tier 1 TestPerf_* added in any
 # package — internal/statedb, internal/session — are exercised locally, matching
 # the perf-smoke.yml CI gate which already runs the whole module.
 test-perf:
@@ -155,7 +155,7 @@ test-perf:
 # Output is for trending; not a CI gate.
 bench:
 	go test -run '^$$' -bench '^Benchmark' -benchmem -benchtime=1x -count=3 -timeout 5m \
-		./cmd/agent-deck/... ./internal/tmux/...
+		./cmd/groundskeeper/... ./internal/tmux/...
 
 # Format code
 fmt:
@@ -180,7 +180,7 @@ release-local:
 	@test -n "$$GITHUB_TOKEN" || (echo "ERROR: GITHUB_TOKEN not set" && exit 1)
 	@test -n "$$HOMEBREW_TAP_GITHUB_TOKEN" || (echo "ERROR: HOMEBREW_TAP_GITHUB_TOKEN not set" && exit 1)
 	@TAG=$$(git describe --tags --exact-match 2>/dev/null) || (echo "ERROR: HEAD is not tagged. Run: git tag vX.Y.Z" && exit 1); \
-	CODE_VERSION=$$(grep 'var Version' cmd/agent-deck/main.go | sed 's/.*"\(.*\)".*/\1/'); \
+	CODE_VERSION=$$(grep 'var Version' cmd/groundskeeper/main.go | sed 's/.*"\(.*\)".*/\1/'); \
 	TAG_VERSION=$${TAG#v}; \
 	if [ "$$TAG_VERSION" != "$$CODE_VERSION" ]; then \
 		echo "ERROR: Tag $$TAG ($$TAG_VERSION) != code Version $$CODE_VERSION"; \
@@ -192,7 +192,7 @@ release-local:
 	@echo "=== Running GoReleaser ==="
 	goreleaser release --clean
 	@echo "=== Release complete ==="
-	@echo "Verify: gh release view $$(git describe --tags --exact-match) --repo asheshgoplani/agent-deck"
+	@echo "Verify: gh release view $$(git describe --tags --exact-match) --repo potato-hash/groundskeeper"
 
 # Web UI test targets
 # Vitest (unit) + Playwright (e2e + screenshot regression). Both run against
