@@ -1,9 +1,8 @@
 name: homebrew-verify
 
-# Regression gate for #873 - users on Mac/Linux/WSL run
-# `brew install asheshgoplani/tap/agent-deck` from README and release notes.
-# That path silently broke once when goreleaser's brews block was misconfigured;
-# this workflow probes the live tap so the next break is caught in CI.
+# Groundskeeper does not currently publish a Homebrew tap/formula. Keep this
+# guard on install-doc release wiring so Homebrew is not advertised until the
+# tap is configured. Release tags are served by install.sh + GoReleaser assets.
 
 on:
   pull_request:
@@ -12,12 +11,6 @@ on:
       - '.goreleaser.yml'
       - 'scripts/verify-homebrew-install.sh'
       - '.github/workflows/homebrew-verify.yml'
-  push:
-    tags:
-      - 'v*'
-  schedule:
-    # Weekly probe so a broken tap is detected even without commits.
-    - cron: '0 9 * * 1'
   workflow_dispatch: {}
 
 jobs:

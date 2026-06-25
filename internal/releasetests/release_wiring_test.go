@@ -56,6 +56,25 @@ func TestReleaseVersionIsStableForGitHubLatest(t *testing.T) {
 	}
 }
 
+func TestHomebrewVerifyDoesNotRunStaleChecksOnReleaseTags(t *testing.T) {
+	workflow := readRepoFile(t, ".github/workflows/homebrew-verify.yml")
+	script := readRepoFile(t, "scripts/verify-homebrew-install.sh")
+
+	for _, stale := range []string{"tags:", "'v*'", `"v*"`, "schedule:"} {
+		if strings.Contains(workflow, stale) {
+			t.Fatalf("homebrew verifier must not run on release tags or schedules without a Groundskeeper tap; found %q", stale)
+		}
+	}
+	for _, stale := range []string{"asheshgoplani", "agent-deck"} {
+		if strings.Contains(workflow, stale) || strings.Contains(script, stale) {
+			t.Fatalf("homebrew verifier still contains stale Agent Deck tap wiring %q", stale)
+		}
+	}
+	if !strings.Contains(script, "potato-hash") || !strings.Contains(script, "groundskeeper") {
+		t.Fatal("homebrew verifier should be wired to Groundskeeper when enabled")
+	}
+}
+
 func readRepoFile(t *testing.T, rel string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(repoRoot(t), rel))

@@ -1,25 +1,22 @@
 #!/usr/bin/env bash
-# Regression gate for #873: README and release notes advertise
-# `brew install asheshgoplani/tap/agent-deck`. Goreleaser publishes the
-# formula to https://github.com/asheshgoplani/homebrew-tap on each release.
+# Guard for Groundskeeper Homebrew install wiring.
 #
-# This script verifies the public path users actually take:
-#   1. The tap repo is reachable.
-#   2. The formula file exists in the expected directory.
-#   3. The formula's `version` matches the latest GitHub release tag.
-#   4. Every download URL in the formula resolves (no 404 dangling refs).
-#
-# Run on every release tag; also run on PRs that touch install docs or
-# the goreleaser brews block.
+# Groundskeeper currently ships through install.sh and GoReleaser archives, not
+# Homebrew. Until a tap exists, this verifies that release docs/config do not
+# accidentally advertise a brew install path. If a tap is added later, set the
+# GROUNDSKEEPER_HOMEBREW_TAP_OWNER and GROUNDSKEEPER_HOMEBREW_TAP_REPO env vars
+# and this script will verify the public formula path.
 
 set -euo pipefail
 
-OWNER="asheshgoplani"
-TAP_REPO="homebrew-tap"
-FORMULA_NAME="agent-deck"
+PROJECT_OWNER="potato-hash"
+PROJECT_REPO="groundskeeper"
+FORMULA_NAME="${GROUNDSKEEPER_HOMEBREW_FORMULA:-groundskeeper}"
+TAP_OWNER="${GROUNDSKEEPER_HOMEBREW_TAP_OWNER:-}"
+TAP_REPO="${GROUNDSKEEPER_HOMEBREW_TAP_REPO:-}"
 FORMULA_PATH="Formula/${FORMULA_NAME}.rb"
-RAW_BASE="https://raw.githubusercontent.com/${OWNER}/${TAP_REPO}/main"
-RELEASES_API="https://api.github.com/repos/${OWNER}/agent-deck/releases/latest"
+RAW_BASE="https://raw.githubusercontent.com/${TAP_OWNER}/${TAP_REPO}/main"
+RELEASES_API="https://api.github.com/repos/${PROJECT_OWNER}/${PROJECT_REPO}/releases/latest"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -28,9 +25,25 @@ NC='\033[0m'
 fail() { echo -e "${RED}FAIL${NC}: $*" >&2; exit 1; }
 pass() { echo -e "${GREEN}OK${NC}  : $*"; }
 
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+repo_root="${script_dir}/.."
+readme="${repo_root}/README.md"
+goreleaser="${repo_root}/.goreleaser.yml"
+
+if [ -z "${TAP_OWNER}" ] || [ -z "${TAP_REPO}" ]; then
+  if grep -Eq "brew install .*${FORMULA_NAME}" "${readme}"; then
+    fail "README.md advertises Homebrew for ${FORMULA_NAME}, but no Groundskeeper tap is configured"
+  fi
+  if grep -Eq '^[[:space:]]*brews:' "${goreleaser}"; then
+    fail ".goreleaser.yml configures Homebrew, but verifier tap settings are missing"
+  fi
+  pass "Groundskeeper Homebrew tap is not configured; install.sh remains the public install path"
+  exit 0
+fi
+
 # 1. Tap reachable
-if ! curl -sf -o /dev/null "https://github.com/${OWNER}/${TAP_REPO}"; then
-  fail "tap repo https://github.com/${OWNER}/${TAP_REPO} is not reachable"
+if ! curl -sf -o /dev/null "https://github.com/${TAP_OWNER}/${TAP_REPO}"; then
+  fail "tap repo https://github.com/${TAP_OWNER}/${TAP_REPO} is not reachable"
 fi
 pass "tap repo reachable"
 
@@ -64,10 +77,10 @@ while IFS= read -r url; do
 done <<< "${urls}"
 
 # 5. README still advertises the same install command (catches doc drift)
-script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-readme="${script_dir}/../README.md"
-if ! grep -qF "brew install ${OWNER}/tap/${FORMULA_NAME}" "${readme}"; then
-  fail "README.md no longer references 'brew install ${OWNER}/tap/${FORMULA_NAME}'; tap is configured but advertised command drifted"
+tap_name="${TAP_REPO#homebrew-}"
+install_command="brew install ${TAP_OWNER}/${tap_name}/${FORMULA_NAME}"
+if ! grep -qF "${install_command}" "${readme}"; then
+  fail "README.md no longer references '${install_command}'; tap is configured but advertised command drifted"
 fi
 pass "README install command matches tap"
 
