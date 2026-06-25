@@ -2,7 +2,7 @@ package update
 
 // Release-asset integrity verification (#1206 security hardening).
 //
-// `agent-deck remote update` downloads a GitHub release asset and pipes it onto
+// `groundskeeper remote update` downloads a GitHub release asset and pipes it onto
 // every configured remote via `ssh "cat > path"`. HTTPS authenticates the
 // transport but not the artifact: a compromised release, a swapped asset, or a
 // TLS-stripping position can plant an arbitrary executable on every remote.
@@ -85,7 +85,7 @@ func VerifyAssetChecksum(assetName string, archive []byte, checksums map[string]
 // GetAssetURLForPlatform, so the checksums.txt entry will be found.
 func assetArchiveName(release *Release, goos, goarch string) string {
 	version := strings.TrimPrefix(release.TagName, "v")
-	return fmt.Sprintf("agent-deck_%s_%s_%s.tar.gz", version, goos, goarch)
+	return fmt.Sprintf("groundskeeper_%s_%s_%s.tar.gz", version, goos, goarch)
 }
 
 // httpGetBytes downloads url fully into memory under a bounded timeout.
@@ -104,7 +104,7 @@ func httpGetBytes(url string, timeout time.Duration) ([]byte, error) {
 
 // DownloadVerifiedBinary downloads the release archive for goos/goarch, verifies
 // its SHA-256 against the release's checksums.txt, then extracts and returns the
-// agent-deck binary bytes. It is the integrity gate for remote deploys and is
+// groundskeeper binary bytes. It is the integrity gate for remote deploys and is
 // safe to reuse for local self-update. It fails closed: a missing platform
 // asset, a missing checksums.txt asset, an asset absent from checksums.txt, or a
 // hash mismatch all abort BEFORE any binary is returned.

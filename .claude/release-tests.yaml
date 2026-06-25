@@ -36,35 +36,35 @@ tests:
 - id: ch-support-add-flag
   added: 2026-04-16
   task: ch-support
-  file: cmd/agent-deck/channels_cmd_test.go
+  file: cmd/groundskeeper/channels_cmd_test.go
   test_name: TestAddChannelFlag
   purpose: 'CLI: ''agent-deck add --channel <id>'' (repeatable) persists channels via SQLite round-trip'
   source: telegram-incident-2026-04-15
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestAddChannelFlag -count=1 -timeout 90s -v
+    command: go test ./cmd/groundskeeper/ -run TestAddChannelFlag -count=1 -timeout 90s -v
     expected: pass
 - id: ch-support-session-set
   added: 2026-04-16
   task: ch-support
-  file: cmd/agent-deck/channels_cmd_test.go
+  file: cmd/groundskeeper/channels_cmd_test.go
   test_name: TestSessionSetChannels
   purpose: 'CLI: ''agent-deck session set <id> channels <csv>'' persists via SQLite round-trip'
   source: telegram-incident-2026-04-15
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestSessionSetChannels -count=1 -timeout 90s -v
+    command: go test ./cmd/groundskeeper/ -run TestSessionSetChannels -count=1 -timeout 90s -v
     expected: pass
 - id: ch-support-only-for-claude
   added: 2026-04-16
   task: ch-support
-  file: cmd/agent-deck/channels_cmd_test.go
+  file: cmd/groundskeeper/channels_cmd_test.go
   test_name: TestChannelsOnlyForClaude
   purpose: "Channels is claude-only \u2014 bash/codex/gemini sessions reject the field with a tool-specific error"
   source: telegram-incident-2026-04-15
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestChannelsOnlyForClaude -count=1 -timeout 90s -v
+    command: go test ./cmd/groundskeeper/ -run TestChannelsOnlyForClaude -count=1 -timeout 90s -v
     expected: pass
 - id: ch-support-e2e-manual
   added: 2026-04-16
@@ -138,13 +138,13 @@ tests:
 - id: fix-615-session-show-channels
   added: '2026-04-16'
   task: fix-615
-  file: cmd/agent-deck/channels_cmd_test.go
+  file: cmd/groundskeeper/channels_cmd_test.go
   test_name: TestSessionShowJSONIncludesChannels
   purpose: "session show --json must include channels field when set \u2014 guards parallel-paths regression where list --json and show --json emitters drift."
   source: gh#615
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestSessionShowJSONIncludesChannels -count=1 -timeout 90s -v
+    command: go test ./cmd/groundskeeper/ -run TestSessionShowJSONIncludesChannels -count=1 -timeout 90s -v
     expected: pass
 - id: fix-config-dir-priority-group-beats-env
   added: '2026-04-17'
@@ -270,13 +270,13 @@ tests:
 - id: v178-revive-cli-dispatch
   added: '2026-04-17'
   task: v178-ssh-reviver
-  file: cmd/agent-deck/revive_cmd_test.go
+  file: cmd/groundskeeper/revive_cmd_test.go
   test_name: TestRevive_CLI_AllFlag_TriggersReviver
   purpose: "CLI dispatch wiring \u2014 `agent-deck session revive --all` correctly classifies a mixed fixture (errored/alive/dead) and emits the stable summary string \"revived=N errored=N alive=N dead=N\". Guards the one-shot recovery path used on conductor restart."
   source: REPORT-D-auto-revive.md
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestRevive_CLI_AllFlag_TriggersReviver -race -count=1 -v
+    command: go test ./cmd/groundskeeper/ -run TestRevive_CLI_AllFlag_TriggersReviver -race -count=1 -v
     expected: pass
 - id: issue-610-cli-parity-spinner
   added: '2026-04-17'
@@ -303,46 +303,46 @@ tests:
 - id: issue-616-send-no-wait-late-composer
   added: '2026-04-17'
   task: fix-issue-616
-  file: cmd/agent-deck/session_send_test.go
+  file: cmd/groundskeeper/session_send_test.go
   test_name: TestSendNoWait_ReEntersWhenComposerRendersLate
   purpose: "Regression guard for [#616] \u2014 sendNoWait must keep detecting the unsent composer prompt and re-firing SendEnter even when the Claude composer renders late (after 5 iterations of status=active/pane=\"\"). Also asserts that only one SendKeysAndEnter fires (preserves the [#479] no-double-send guarantee)."
   source: .planning/fix-issue-616/PLAN.md
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestSendNoWait_ReEntersWhenComposerRendersLate -race -count=1 -v
+    command: go test ./cmd/groundskeeper/ -run TestSendNoWait_ReEntersWhenComposerRendersLate -race -count=1 -v
     expected: pass
 - id: issue-616-no-wait-budget-sizing
   added: '2026-04-17'
   task: fix-issue-616
-  file: cmd/agent-deck/session_send_test.go
+  file: cmd/groundskeeper/session_send_test.go
   test_name: TestSendWithRetryTarget_NoWait_BudgetSpansRealisticClaudeStartup
   purpose: "Locks in that noWaitSendOptions() has \u22654s total verification budget so future refactors cannot silently shrink it back to the pre-v1.7.10 1.2s window that caused [#616]. Also pins maxFullResends=-1 (preserves [#479] double-send fix)."
   source: .planning/fix-issue-616/PLAN.md
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestSendWithRetryTarget_NoWait_BudgetSpansRealisticClaudeStartup -race -count=1 -v
+    command: go test ./cmd/groundskeeper/ -run TestSendWithRetryTarget_NoWait_BudgetSpansRealisticClaudeStartup -race -count=1 -v
     expected: pass
 - id: issue-616-preflight-barrier-correctness
   added: '2026-04-17'
   task: fix-issue-616
-  file: cmd/agent-deck/session_send_test.go
+  file: cmd/groundskeeper/session_send_test.go
   test_name: TestAwaitComposerReadyBestEffort_ReturnsTrueWhenComposerAppears
   purpose: "Preflight barrier must detect Claude composer `\u276F` appearing within the cap window. Without this, --no-wait sends before Claude's TUI mounts and the keystrokes are discarded by pre-mount handlers (#616 root cause layer 1)."
   source: .planning/fix-issue-616/PLAN.md
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestAwaitComposerReadyBestEffort_ReturnsTrueWhenComposerAppears -race -count=1 -v
+    command: go test ./cmd/groundskeeper/ -run TestAwaitComposerReadyBestEffort_ReturnsTrueWhenComposerAppears -race -count=1 -v
     expected: pass
 - id: issue-616-preflight-barrier-cap-respected
   added: '2026-04-17'
   task: fix-issue-616
-  file: cmd/agent-deck/session_send_test.go
+  file: cmd/groundskeeper/session_send_test.go
   test_name: TestAwaitComposerReadyBestEffort_CappedAtMaxWait
   purpose: Preflight barrier must NOT block --no-wait indefinitely on broken sessions where the composer never renders. Returns at maxWait with false. Protects --no-wait spirit (fast, bounded).
   source: .planning/fix-issue-616/PLAN.md
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestAwaitComposerReadyBestEffort_CappedAtMaxWait -race -count=1 -v
+    command: go test ./cmd/groundskeeper/ -run TestAwaitComposerReadyBestEffort_CappedAtMaxWait -race -count=1 -v
     expected: pass
 - id: issue-616-live-boundary-fresh-session
   added: '2026-04-17'
@@ -611,24 +611,24 @@ tests:
 - id: issue-601-cli-folds-extras-into-wrapper
   added: '2026-04-17'
   task: fix-issue-601
-  file: cmd/agent-deck/launch_cmd_test.go
+  file: cmd/groundskeeper/launch_cmd_test.go
   test_name: TestLaunch_ToolWithFlags_FoldsExtrasIntoWrapper
   purpose: "CLI-parse boundary regression \u2014 resolveSessionCommand must fold EVERY extra arg of a recognized tool into the wrapper template as \"{command} <extras>\". Paired with the session-layer TestPrepareCommand_Issue601_ReporterRepro, this pins both ends of the [#601] data flow."
   source: .planning/fix-issue-601/PLAN.md
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestLaunch_ToolWithFlags_FoldsExtrasIntoWrapper -race -count=1 -v
+    command: go test ./cmd/groundskeeper/ -run TestLaunch_ToolWithFlags_FoldsExtrasIntoWrapper -race -count=1 -v
     expected: pass
 - id: issue-601-cli-session-id-preserved
   added: '2026-04-17'
   task: fix-issue-601
-  file: cmd/agent-deck/launch_cmd_test.go
+  file: cmd/groundskeeper/launch_cmd_test.go
   test_name: TestLaunch_ToolWithSessionIdFlag_IsPreserved
   purpose: "Narrower [#601] symptom \u2014 --session-id must survive CLI parse for claude-compatible wrappers, unblocking deterministic session IDs and JSONL file resolution."
   source: .planning/fix-issue-601/PLAN.md
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestLaunch_ToolWithSessionIdFlag_IsPreserved -race -count=1 -v
+    command: go test ./cmd/groundskeeper/ -run TestLaunch_ToolWithSessionIdFlag_IsPreserved -race -count=1 -v
     expected: pass
 - id: v1716-manifest-yaml-valid
   added: '2026-04-17'
@@ -721,13 +721,13 @@ tests:
 - id: fix-560-outer-tmux-guard
   added: '2026-04-17'
   task: fix-560-tmux-detach-guidance
-  file: cmd/agent-deck/main_test.go
+  file: cmd/groundskeeper/main_test.go
   test_name: TestOuterTmuxGuard
   purpose: "Guards issue-560 regressions \u2014 warns-and-exits when TUI is launched inside a non-agentdeck tmux session without AGENT_DECK_ALLOW_OUTER_TMUX=1. Covers three subcases (no-optin blocks, optin passes, no-tmux passes) + defensive narrow-match on opt-in value."
   source: gh#560
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestOuterTmuxGuard -count=1 -v
+    command: go test ./cmd/groundskeeper/ -run TestOuterTmuxGuard -count=1 -v
     expected: pass
 - id: fix-574-mouse-wheel-scrolls-preview
   added: '2026-04-17'
@@ -974,24 +974,24 @@ tests:
 - id: v1722-telegram-settings-reader
   added: '2026-04-18'
   task: v1722-telegram-poller-stability
-  file: cmd/agent-deck/conductor_cmd_telegram_test.go
+  file: cmd/groundskeeper/conductor_cmd_telegram_test.go
   test_name: TestReadTelegramGloballyEnabled_TrueWhenSettingsHasIt
   purpose: 'CLI helper parses Claude Code settings.json defensively — missing file and missing key both map to false (safe baseline), explicit true surfaces the anti-pattern.'
   source: .planning/fix-v1722-telegram-poller-stability/PLAN.md
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestReadTelegramGloballyEnabled_ -count=1 -v
+    command: go test ./cmd/groundskeeper/ -run TestReadTelegramGloballyEnabled_ -count=1 -v
     expected: pass
 - id: v1722-telegram-warn-formatting
   added: '2026-04-18'
   task: v1722-telegram-poller-stability
-  file: cmd/agent-deck/conductor_cmd_telegram_test.go
+  file: cmd/groundskeeper/conductor_cmd_telegram_test.go
   test_name: TestConductorSetup_WarnsOnGlobalTelegramEnabled
   purpose: 'End-to-end CLI surface — the human-facing warning text includes the ⚠ prefix, the GLOBAL_ANTIPATTERN code or label, and the exact settings.json key so users can find and fix the setting.'
   source: .planning/fix-v1722-telegram-poller-stability/PLAN.md
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run "TestConductorSetup_WarnsOnGlobalTelegramEnabled|TestConductorSetup_RecommendsEnvFileOverWrapper|TestEmitTelegramWarnings_CleanConfig_Silent" -count=1 -v
+    command: go test ./cmd/groundskeeper/ -run "TestConductorSetup_WarnsOnGlobalTelegramEnabled|TestConductorSetup_RecommendsEnvFileOverWrapper|TestEmitTelegramWarnings_CleanConfig_Silent" -count=1 -v
     expected: pass
 - id: v1723-history-loss-rebind-rejects-less-data
   added: '2026-04-18'
@@ -1106,35 +1106,35 @@ tests:
 - id: issue-628-watcher-help-examples
   added: '2026-04-17'
   task: feat-628-watcher-docs
-  file: cmd/agent-deck/watcher_cmd_test.go
+  file: cmd/groundskeeper/watcher_cmd_test.go
   test_name: TestWatcherHelp_MentionsAdapterExamples
   purpose: "agent-deck watcher --help must include an example for every adapter type (webhook/github/ntfy/slack) plus a pointer to watcher-creator skill and the README anchor \u2014 guards against docs regression that erases first-time-setup guidance."
   source: issue-628-documentation-for-watcher-feature
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestWatcherHelp_MentionsAdapterExamples -count=1 -v
+    command: go test ./cmd/groundskeeper/ -run TestWatcherHelp_MentionsAdapterExamples -count=1 -v
     expected: pass
 - id: issue-391-session-color-valid
   added: '2026-04-17'
   task: feat-391-per-session-colors
-  file: cmd/agent-deck/session_color_test.go
+  file: cmd/groundskeeper/session_color_test.go
   test_name: TestIsValidSessionColor
   purpose: 'Locks the CLI-boundary validator for per-session color (issue #391): empty/truecolor-hex/ANSI-256 accepted; typos like "red", malformed hex, and out-of-range ints rejected. Prevents bad values reaching the render layer.'
   source: issue-391-per-session-colors
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestIsValidSessionColor -count=1 -v
+    command: go test ./cmd/groundskeeper/ -run TestIsValidSessionColor -count=1 -v
     expected: pass
 - id: issue-391-session-color-persist
   added: '2026-04-17'
   task: feat-391-per-session-colors
-  file: cmd/agent-deck/session_color_test.go
+  file: cmd/groundskeeper/session_color_test.go
   test_name: TestSessionSetColor_PersistsValidAndRejectsInvalid
   purpose: "End-to-end CLI round-trip for per-session color (issue #391): set \u2192 list shows field; invalid value rejected with non-zero exit AND prior value preserved; empty clears the field (omitempty on persisted JSON). Guards the full persistence path through SQLite blob."
   source: issue-391-per-session-colors
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestSessionSetColor_PersistsValidAndRejectsInvalid -count=1 -v -timeout 120s
+    command: go test ./cmd/groundskeeper/ -run TestSessionSetColor_PersistsValidAndRejectsInvalid -count=1 -v -timeout 120s
     expected: pass
 - id: v1725-issue666-empty-grouppath-load-fallback
   added: '2026-04-18'
@@ -1172,35 +1172,35 @@ tests:
 - id: v1725-issue666-autodisable-telegram-global
   added: '2026-04-18'
   task: v1725-issue666-group-disappearance
-  file: cmd/agent-deck/conductor_cmd_telegram_autofix_test.go
+  file: cmd/groundskeeper/conductor_cmd_telegram_autofix_test.go
   test_name: TestDisableTelegramGlobally_FixesTrueToFalse
   purpose: 'Issue #666 mechanism 1 — `agent-deck conductor setup` now auto-remediates enabledPlugins."telegram@claude-plugins-official" = true (not just warn). v1.7.22 warn-only path let the silent-crash anti-pattern persist across setups. The autofix preserves unknown keys in settings.json and only touches the telegram key.'
   source: .planning/investigate-issue-666/REPORT.md
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestDisableTelegramGlobally_FixesTrueToFalse -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestDisableTelegramGlobally_FixesTrueToFalse -count=1 -race -v
     expected: pass
 - id: v1725-issue666-autodisable-idempotent
   added: '2026-04-18'
   task: v1725-issue666-group-disappearance
-  file: cmd/agent-deck/conductor_cmd_telegram_autofix_test.go
+  file: cmd/groundskeeper/conductor_cmd_telegram_autofix_test.go
   test_name: TestDisableTelegramGlobally_NoOpWhenAlreadyFalse
   purpose: 'Issue #666 — autofix is idempotent. Re-running setup must not rewrite settings.json when the flag is already false (mtime preserved to avoid spurious Claude Code watcher reloads).'
   source: .planning/investigate-issue-666/REPORT.md
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestDisableTelegramGlobally_NoOpWhenAlreadyFalse -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestDisableTelegramGlobally_NoOpWhenAlreadyFalse -count=1 -race -v
     expected: pass
 - id: v1725-issue666-autodisable-missing-file
   added: '2026-04-18'
   task: v1725-issue666-group-disappearance
-  file: cmd/agent-deck/conductor_cmd_telegram_autofix_test.go
+  file: cmd/groundskeeper/conductor_cmd_telegram_autofix_test.go
   test_name: TestDisableTelegramGlobally_NoOpWhenMissingFile
   purpose: 'Issue #666 — autofix must not create settings.json when the file is absent. Missing file = safe baseline, nothing to remediate.'
   source: .planning/investigate-issue-666/REPORT.md
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestDisableTelegramGlobally_NoOpWhenMissingFile -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestDisableTelegramGlobally_NoOpWhenMissingFile -count=1 -race -v
     expected: pass
 - id: v1725-issue666-respawn-sweep-claude
   added: '2026-04-18'
@@ -1326,101 +1326,101 @@ tests:
 - id: v1726-issue556-copilot-cli-detect
   added: '2026-04-18'
   task: v1726-issue556-copilot-cli
-  file: cmd/agent-deck/copilot_detect_test.go
+  file: cmd/groundskeeper/copilot_detect_test.go
   test_name: TestDetectTool_Copilot
   purpose: 'Issue #556 — `agent-deck add -c copilot .` must resolve to Tool="copilot" instead of the shell fallback. Covers bare / flagged / uppercase invocations routed through the CLI-layer detectTool helper in main.go.'
   source: github-issue-556
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestDetectTool_Copilot -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestDetectTool_Copilot -count=1 -race -v
     expected: pass
 - id: v1728-issue572-name-sync-find-match
   added: '2026-04-18'
   task: v1728-issue572-auto-sync-title
-  file: cmd/agent-deck/hook_name_sync_test.go
+  file: cmd/groundskeeper/hook_name_sync_test.go
   test_name: TestFindClaudeSessionName_MatchBySessionID
   purpose: 'Issue #572 — core lookup primitive: scan ~/.claude/sessions/*.json and return the `name` field for the matching sessionId. Proves the filesystem-walk + JSON-decode + sessionId-match wiring before any storage writes.'
   source: '#572'
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestFindClaudeSessionName_MatchBySessionID -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestFindClaudeSessionName_MatchBySessionID -count=1 -race -v
     expected: pass
 - id: v1728-issue572-name-sync-empty-name-noop
   added: '2026-04-18'
   task: v1728-issue572-auto-sync-title
-  file: cmd/agent-deck/hook_name_sync_test.go
+  file: cmd/groundskeeper/hook_name_sync_test.go
   test_name: TestFindClaudeSessionName_EmptyNameField
   purpose: 'Issue #572 — sessions started without --name (or with name="") must NOT stomp on agent-deck''s auto-generated adjective-noun title. Missing-field and explicit-empty both return "".'
   source: '#572'
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestFindClaudeSessionName_EmptyNameField -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestFindClaudeSessionName_EmptyNameField -count=1 -race -v
     expected: pass
 - id: v1728-issue572-apply-title-sync-updates
   added: '2026-04-18'
   task: v1728-issue572-auto-sync-title
-  file: cmd/agent-deck/hook_name_sync_test.go
+  file: cmd/groundskeeper/hook_name_sync_test.go
   test_name: TestApplyClaudeTitleSync_UpdatesInstance
   purpose: 'Issue #572 end-to-end integration — seeds an instance in SQLite with auto-generated title, seeds a Claude session file with user-set name, calls applyClaudeTitleSync, asserts the title updated in storage. Pins the Storage round-trip so a future refactor to MigrateClaudeProjectDir''s storage layer can''t silently break title sync.'
   source: '#572'
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestApplyClaudeTitleSync_UpdatesInstance -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestApplyClaudeTitleSync_UpdatesInstance -count=1 -race -v
     expected: pass
 - id: v1728-issue572-apply-title-sync-no-redundant-write
   added: '2026-04-18'
   task: v1728-issue572-auto-sync-title
-  file: cmd/agent-deck/hook_name_sync_test.go
+  file: cmd/groundskeeper/hook_name_sync_test.go
   test_name: TestApplyClaudeTitleSync_NoopWhenNameEqualsTitle
   purpose: 'Issue #572 — hooks fire on every UserPromptSubmit. If the title already matches the Claude name, the sync must NOT write to SQLite (would thrash WAL and trigger unnecessary notifier re-reads). Asserts DB last-modified timestamp doesn''t advance on the equal-name path.'
   source: '#572'
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestApplyClaudeTitleSync_NoopWhenNameEqualsTitle -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestApplyClaudeTitleSync_NoopWhenNameEqualsTitle -count=1 -race -v
     expected: pass
 - id: v1728-issue414-move-updates-path
   added: '2026-04-18'
   task: v1728-issue414-session-move
-  file: cmd/agent-deck/session_move_test.go
+  file: cmd/groundskeeper/session_move_test.go
   test_name: TestSessionMove_UpdatesPath
   purpose: 'Issue #414 — the most basic contract: `agent-deck session move <id> <new-path>` accepts the subcommand and persists the new path. On pre-1.7.26 main this fails with "unknown session command: move" (exit 1 from handleSession dispatcher).'
   source: '#414'
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestSessionMove_UpdatesPath -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestSessionMove_UpdatesPath -count=1 -race -v
     expected: pass
 - id: v1728-issue414-move-migrates-claude-history
   added: '2026-04-18'
   task: v1728-issue414-session-move
-  file: cmd/agent-deck/session_move_test.go
+  file: cmd/groundskeeper/session_move_test.go
   test_name: TestSessionMove_MigratesClaudeProjectDir
   purpose: 'Issue #414 value-add over plain `session set path` — ~/.claude/projects/<old-slug>/ is renamed to <new-slug>/ so `claude --resume` in the new path picks up prior conversation history. Sentinel file (abc-123.jsonl) confirms byte-for-byte preservation.'
   source: '#414'
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestSessionMove_MigratesClaudeProjectDir -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestSessionMove_MigratesClaudeProjectDir -count=1 -race -v
     expected: pass
 - id: v1728-issue414-move-copy-flag-preserves-old
   added: '2026-04-18'
   task: v1728-issue414-session-move
-  file: cmd/agent-deck/session_move_test.go
+  file: cmd/groundskeeper/session_move_test.go
   test_name: TestSessionMove_CopyFlagPreservesOldDir
   purpose: 'Issue #414 --copy flag contract — when multiple sessions share the same Claude projects dir, --copy lets the user migrate one without orphaning the others. Both source AND destination dirs must exist afterward with identical contents.'
   source: '#414'
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestSessionMove_CopyFlagPreservesOldDir -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestSessionMove_CopyFlagPreservesOldDir -count=1 -race -v
     expected: pass
 - id: v1728-issue414-move-group-flag
   added: '2026-04-18'
   task: v1728-issue414-session-move
-  file: cmd/agent-deck/session_move_test.go
+  file: cmd/groundskeeper/session_move_test.go
   test_name: TestSessionMove_GroupFlag
   purpose: 'Issue #414 — --group flag moves the session to a new group path in the same atomic operation, eliminating the second `group move` step of the 4-step manual ritual.'
   source: '#414'
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestSessionMove_GroupFlag -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestSessionMove_GroupFlag -count=1 -race -v
     expected: pass
 - id: v1728-watcher-event-dedup-busy-retry
   added: '2026-04-18'
@@ -1502,46 +1502,46 @@ tests:
 - id: v1729-issue447-group-change-cli-e2e
   added: '2026-04-18'
   task: v1729-issues-447-483
-  file: cmd/agent-deck/group_change_test.go
+  file: cmd/groundskeeper/group_change_test.go
   test_name: TestGroupChange_RootToSubgroup
   purpose: 'Issue #447 — end-to-end CLI: group change reparents a group and the change survives SaveWithGroups + reload.'
   source: github-issue-447
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestGroupChange_RootToSubgroup -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestGroupChange_RootToSubgroup -count=1 -race -v
     expected: pass
 - id: v1729-issue447-group-change-rejects-circular
   added: '2026-04-18'
   task: v1729-issues-447-483
-  file: cmd/agent-deck/group_change_test.go
+  file: cmd/groundskeeper/group_change_test.go
   test_name: TestGroupChange_RejectsCircular
   purpose: 'Issue #447 — CLI refuses circular moves with a non-zero exit and a diagnostic that names the reason.'
   source: github-issue-447
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestGroupChange_RejectsCircular -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestGroupChange_RejectsCircular -count=1 -race -v
     expected: pass
 - id: v1729-issue483-session-search-content
   added: '2026-04-18'
   task: v1729-issues-447-483
-  file: cmd/agent-deck/session_search_test.go
+  file: cmd/groundskeeper/session_search_test.go
   test_name: TestSessionSearch_FindsMessageContent
   purpose: 'Issue #483 — `agent-deck session search` matches on JSONL message content (not titles) and returns session_id + snippet + cwd. Locks the JSON output shape.'
   source: github-issue-483
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestSessionSearch_FindsMessageContent -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestSessionSearch_FindsMessageContent -count=1 -race -v
     expected: pass
 - id: v1729-issue483-session-search-no-matches
   added: '2026-04-18'
   task: v1729-issues-447-483
-  file: cmd/agent-deck/session_search_test.go
+  file: cmd/groundskeeper/session_search_test.go
   test_name: TestSessionSearch_NoMatches
   purpose: 'Issue #483 — exit 0 + empty results array when no sessions match; keeps `search | jq` pipelines clean.'
   source: github-issue-483
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestSessionSearch_NoMatches -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestSessionSearch_NoMatches -count=1 -race -v
     expected: pass
 - id: v1730-issue391-hex-color-rendered
   added: '2026-04-19'
@@ -1579,13 +1579,13 @@ tests:
 - id: v1731-pr674-pi-detect-cli
   added: '2026-04-19'
   task: v1731-pr-674
-  file: cmd/agent-deck/copilot_detect_test.go
+  file: cmd/groundskeeper/copilot_detect_test.go
   test_name: TestDetectTool_Pi
   purpose: 'PR #674 (community contribution from @masta-g3) — `agent-deck add -c pi .` must produce Tool="pi" not Tool="shell" with Command="pi". Pins token-matching detection so short ambiguous names like "pi" survive a future refactor without false-matching against substrings ("epic", "tapioca"). Companion to the existing tmux-side detection in internal/tmux; this is the CLI -c flag parser at the boundary.'
   source: github-pr-674
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestDetectTool_Pi -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestDetectTool_Pi -count=1 -race -v
     expected: pass
 - id: v1731-pr674-pi-detect-tui
   added: '2026-04-19'
@@ -1788,24 +1788,24 @@ tests:
 - id: v1759-fix45-version-annotation
   added: '2026-04-22'
   task: fix-45
-  file: cmd/agent-deck/version_nudge_test.go
+  file: cmd/groundskeeper/version_nudge_test.go
   test_name: TestVersionOutput_AppendsUpdateAnnotationWhenBehind
   purpose: 'Conductor task #45 — agent-deck --version must append " (update available: vA.B.C)" when the disk cache shows the user is behind. Writes to an io.Writer, not os.Stdout, so the assertion is byte-exact. Catches a flag-dispatch refactor that bypasses writeVersionOutput.'
   source: conductor-task-45
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestVersionOutput_AppendsUpdateAnnotationWhenBehind -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestVersionOutput_AppendsUpdateAnnotationWhenBehind -count=1 -race -v
     expected: pass
 - id: v1759-fix45-version-env-skip
   added: '2026-04-22'
   task: fix-45
-  file: cmd/agent-deck/version_nudge_test.go
+  file: cmd/groundskeeper/version_nudge_test.go
   test_name: TestVersionOutput_NoAnnotationWhenEnvSkipped
   purpose: 'Conductor task #45 — AGENTDECK_SKIP_UPDATE_CHECK=1 strips the --version annotation. Users who opt out of update nagging get a clean "Agent Deck vX.Y.Z" line even with a populated cache.'
   source: conductor-task-45
   manual: false
   run:
-    command: go test ./cmd/agent-deck/ -run TestVersionOutput_NoAnnotationWhenEnvSkipped -count=1 -race -v
+    command: go test ./cmd/groundskeeper/ -run TestVersionOutput_NoAnnotationWhenEnvSkipped -count=1 -race -v
     expected: pass
 - id: v1759-fix45-eval-version-annotation
   added: '2026-04-22'

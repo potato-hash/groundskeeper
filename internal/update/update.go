@@ -21,7 +21,7 @@ import (
 
 const (
 	// GitHubRepo is the repository to check for updates
-	GitHubRepo = "asheshgoplani/agent-deck"
+	GitHubRepo = "potato-hash/groundskeeper"
 
 	// CacheFileName stores the last update check result
 	CacheFileName = "update-cache.json"
@@ -114,23 +114,28 @@ type UpdateInfo struct {
 const NudgeThreshold = 5
 
 // SkipUpdateCheckEnv is the env var that fully disables update checking.
-// Set AGENTDECK_SKIP_UPDATE_CHECK=1 in CI, in automation, or for users on
-// locked-down networks.
-const SkipUpdateCheckEnv = "AGENTDECK_SKIP_UPDATE_CHECK"
+// Set GROUNDSKEEPER_SKIP_UPDATE_CHECK=1 in CI, automation, or locked-down
+// networks. The old Agent Deck variable remains supported for forked installs.
+const SkipUpdateCheckEnv = "GROUNDSKEEPER_SKIP_UPDATE_CHECK"
+const legacySkipUpdateCheckEnv = "AGENTDECK_SKIP_UPDATE_CHECK"
 
 // recentReleasesLimit is how many recent releases we ask GitHub for when
 // counting how far behind the user is. We only need to know "more than
 // NudgeThreshold", so a single page is plenty.
 const recentReleasesLimit = 30
 
-// isUpdateCheckSkipped reports whether AGENTDECK_SKIP_UPDATE_CHECK is set to
-// a truthy value.
+// isUpdateCheckSkipped reports whether the current or legacy skip env var is
+// set to a truthy value.
 func isUpdateCheckSkipped() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(SkipUpdateCheckEnv))) {
-	case "", "0", "false", "no", "off":
-		return false
+	for _, name := range []string{SkipUpdateCheckEnv, legacySkipUpdateCheckEnv} {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+		case "", "0", "false", "no", "off":
+			continue
+		default:
+			return true
+		}
 	}
-	return true
+	return false
 }
 
 // getCacheDir returns the cache directory path
@@ -272,7 +277,7 @@ func CountReleasesBehind(currentVersion string, releases []Release) int {
 }
 
 // CachedUpdateInfo returns the update info from the on-disk cache without
-// touching the network. Used by `agent-deck --version` to annotate the
+// touching the network. Used by `groundskeeper --version` to annotate the
 // banner instantly (never blocks on a GitHub call). Returns (nil, nil) if
 // there is no cache yet; err only on corruption.
 func CachedUpdateInfo(currentVersion string) (*UpdateInfo, error) {
@@ -303,7 +308,7 @@ func CachedUpdateInfo(currentVersion string) (*UpdateInfo, error) {
 
 // ShouldNudge decides whether the startup nudge should render. Returns
 // true only when there is a real update available AND the user is more
-// than NudgeThreshold releases behind AND AGENTDECK_SKIP_UPDATE_CHECK is
+// than NudgeThreshold releases behind AND update checking is not skipped.
 // not set. Nil info is safe — returns false.
 func ShouldNudge(info *UpdateInfo) bool {
 	if info == nil || !info.Available {
@@ -344,9 +349,9 @@ func getAssetURL(release *Release) string {
 
 // GetAssetURLForPlatform returns the download URL for a specific OS/arch combination.
 func GetAssetURLForPlatform(release *Release, goos, goarch string) string {
-	// Construct expected asset name: agent-deck_X.Y.Z_os_arch.tar.gz
+	// Construct expected asset name: groundskeeper_X.Y.Z_os_arch.tar.gz
 	version := strings.TrimPrefix(release.TagName, "v")
-	expectedName := fmt.Sprintf("agent-deck_%s_%s_%s.tar.gz", version, goos, goarch)
+	expectedName := fmt.Sprintf("groundskeeper_%s_%s_%s.tar.gz", version, goos, goarch)
 
 	for _, asset := range release.Assets {
 		if asset.Name == expectedName {
@@ -551,7 +556,7 @@ func PerformUpdate(downloadURL string) error {
 	}
 
 	// Create temp file for download
-	tmpFile, err := os.CreateTemp("", "agent-deck-update-*.tar.gz")
+	tmpFile, err := os.CreateTemp("", "groundskeeper-update-*.tar.gz")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -648,13 +653,13 @@ func HomebrewUpgradeHint(execPath string) (string, bool) {
 	// Homebrew-managed binaries resolve to Cellar paths. Self-overwriting these
 	// can leave installs in a bad state; prefer brew-managed upgrades.
 	knownCellars := []string{
-		"/opt/homebrew/Cellar/agent-deck/",
-		"/usr/local/Cellar/agent-deck/",
-		"/home/linuxbrew/.linuxbrew/Cellar/agent-deck/",
+		"/opt/homebrew/Cellar/groundskeeper/",
+		"/usr/local/Cellar/groundskeeper/",
+		"/home/linuxbrew/.linuxbrew/Cellar/groundskeeper/",
 	}
 	for _, prefix := range knownCellars {
 		if strings.HasPrefix(clean, prefix) {
-			return "brew upgrade asheshgoplani/tap/agent-deck", true
+			return "brew upgrade potato-hash/tap/groundskeeper", true
 		}
 	}
 	return "", false
@@ -819,7 +824,7 @@ func FormatChangelogForDisplay(entries []ChangelogEntry) string {
 	return sb.String()
 }
 
-// extractBinaryFromTarGz extracts the agent-deck binary from a .tar.gz file.
+// extractBinaryFromTarGz extracts the groundskeeper binary from a .tar.gz file.
 func extractBinaryFromTarGz(tarPath string) ([]byte, error) {
 	file, err := os.Open(tarPath)
 	if err != nil {
@@ -829,14 +834,14 @@ func extractBinaryFromTarGz(tarPath string) ([]byte, error) {
 	return extractBinaryFromTarGzReader(file)
 }
 
-// extractBinaryFromTarGzBytes extracts the agent-deck binary from an in-memory
+// extractBinaryFromTarGzBytes extracts the groundskeeper binary from an in-memory
 // .tar.gz, used by the verified-download path so the archive bytes can be
 // SHA-256'd before extraction (#1206).
 func extractBinaryFromTarGzBytes(data []byte) ([]byte, error) {
 	return extractBinaryFromTarGzReader(bytes.NewReader(data))
 }
 
-// extractBinaryFromTarGzReader extracts the agent-deck binary from a gzipped
+// extractBinaryFromTarGzReader extracts the groundskeeper binary from a gzipped
 // tar stream.
 func extractBinaryFromTarGzReader(r io.Reader) ([]byte, error) {
 	gzr, err := gzip.NewReader(r)
@@ -856,8 +861,8 @@ func extractBinaryFromTarGzReader(r io.Reader) ([]byte, error) {
 			return nil, err
 		}
 
-		// Look for the agent-deck binary (may be at root or nested in a directory)
-		if header.Typeflag == tar.TypeReg && filepath.Base(header.Name) == "agent-deck" {
+		// Look for the groundskeeper binary (may be at root or nested in a directory)
+		if header.Typeflag == tar.TypeReg && filepath.Base(header.Name) == "groundskeeper" {
 			data, err := io.ReadAll(tr)
 			if err != nil {
 				return nil, err
@@ -866,7 +871,7 @@ func extractBinaryFromTarGzReader(r io.Reader) ([]byte, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("agent-deck binary not found in archive")
+	return nil, fmt.Errorf("groundskeeper binary not found in archive")
 }
 
 // UpdateBridgePy refreshes the installed bridge.py from the embedded runtime template.

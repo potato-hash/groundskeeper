@@ -1,6 +1,6 @@
 package update
 
-// Regression tests for #1206 (security): `agent-deck remote update` deployed
+// Regression tests for #1206 (security): `groundskeeper remote update` deployed
 // release binaries to remotes with NO integrity check. These tests pin the
 // fail-closed SHA-256 verification gate: a matching checksum proceeds, a
 // mismatch or a missing checksum aborts WITHOUT returning a binary to deploy.
@@ -18,7 +18,7 @@ import (
 	"testing"
 )
 
-// makeTarGz builds a goreleaser-style .tar.gz containing an `agent-deck` binary
+// makeTarGz builds a goreleaser-style .tar.gz containing a `groundskeeper` binary
 // with the given bytes, so DownloadVerifiedBinary can extract it.
 func makeTarGz(t *testing.T, binary []byte) []byte {
 	t.Helper()
@@ -26,7 +26,7 @@ func makeTarGz(t *testing.T, binary []byte) []byte {
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
 	hdr := &tar.Header{
-		Name:     "agent-deck",
+		Name:     "groundskeeper",
 		Mode:     0o755,
 		Size:     int64(len(binary)),
 		Typeflag: tar.TypeReg,
@@ -54,29 +54,29 @@ func sha256hex(b []byte) string {
 func TestParseChecksums_GoreleaserFormat(t *testing.T) {
 	// goreleaser checksums.txt: "<hex>  <filename>", optional "*" binary-mode
 	// prefix, blank lines tolerated.
-	body := "abc123  agent-deck_1.2.3_linux_amd64.tar.gz\n" +
+	body := "abc123  groundskeeper_1.2.3_linux_amd64.tar.gz\n" +
 		"\n" +
-		"DEF456  *agent-deck_1.2.3_darwin_arm64.tar.gz\n"
+		"DEF456  *groundskeeper_1.2.3_darwin_arm64.tar.gz\n"
 	got := ParseChecksums([]byte(body))
-	if got["agent-deck_1.2.3_linux_amd64.tar.gz"] != "abc123" {
-		t.Fatalf("linux entry = %q, want abc123", got["agent-deck_1.2.3_linux_amd64.tar.gz"])
+	if got["groundskeeper_1.2.3_linux_amd64.tar.gz"] != "abc123" {
+		t.Fatalf("linux entry = %q, want abc123", got["groundskeeper_1.2.3_linux_amd64.tar.gz"])
 	}
 	// hex normalized to lowercase, "*" stripped.
-	if got["agent-deck_1.2.3_darwin_arm64.tar.gz"] != "def456" {
-		t.Fatalf("darwin entry = %q, want def456 (lowercased, * stripped)", got["agent-deck_1.2.3_darwin_arm64.tar.gz"])
+	if got["groundskeeper_1.2.3_darwin_arm64.tar.gz"] != "def456" {
+		t.Fatalf("darwin entry = %q, want def456 (lowercased, * stripped)", got["groundskeeper_1.2.3_darwin_arm64.tar.gz"])
 	}
 }
 
 func TestGetChecksumsURL(t *testing.T) {
 	rel := &Release{Assets: []Asset{
-		{Name: "agent-deck_1.2.3_linux_amd64.tar.gz", BrowserDownloadURL: "https://x/bin"},
+		{Name: "groundskeeper_1.2.3_linux_amd64.tar.gz", BrowserDownloadURL: "https://x/bin"},
 		{Name: "checksums.txt", BrowserDownloadURL: "https://x/checksums.txt"},
 	}}
 	if url := GetChecksumsURL(rel); url != "https://x/checksums.txt" {
 		t.Fatalf("GetChecksumsURL = %q, want the checksums.txt asset URL", url)
 	}
 	// Fail closed: no checksums asset → empty.
-	none := &Release{Assets: []Asset{{Name: "agent-deck_1.2.3_linux_amd64.tar.gz"}}}
+	none := &Release{Assets: []Asset{{Name: "groundskeeper_1.2.3_linux_amd64.tar.gz"}}}
 	if url := GetChecksumsURL(none); url != "" {
 		t.Fatalf("GetChecksumsURL with no checksums asset = %q, want empty", url)
 	}
@@ -113,7 +113,7 @@ func TestVerifyAssetChecksum_Missing(t *testing.T) {
 func releaseServer(t *testing.T, archive, checksums []byte, includeChecksumsAsset bool) (*Release, func()) {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/agent-deck_1.2.3_linux_amd64.tar.gz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/groundskeeper_1.2.3_linux_amd64.tar.gz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(archive)
 	})
 	mux.HandleFunc("/checksums.txt", func(w http.ResponseWriter, _ *http.Request) {
@@ -123,7 +123,7 @@ func releaseServer(t *testing.T, archive, checksums []byte, includeChecksumsAsse
 	rel := &Release{
 		TagName: "v1.2.3",
 		Assets: []Asset{
-			{Name: "agent-deck_1.2.3_linux_amd64.tar.gz", BrowserDownloadURL: srv.URL + "/agent-deck_1.2.3_linux_amd64.tar.gz"},
+			{Name: "groundskeeper_1.2.3_linux_amd64.tar.gz", BrowserDownloadURL: srv.URL + "/groundskeeper_1.2.3_linux_amd64.tar.gz"},
 		},
 	}
 	if includeChecksumsAsset {
@@ -133,9 +133,9 @@ func releaseServer(t *testing.T, archive, checksums []byte, includeChecksumsAsse
 }
 
 func TestDownloadVerifiedBinary_MatchingChecksumProceeds(t *testing.T) {
-	binary := []byte("ELF-agent-deck-binary")
+	binary := []byte("ELF-groundskeeper-binary")
 	archive := makeTarGz(t, binary)
-	checksums := []byte(sha256hex(archive) + "  agent-deck_1.2.3_linux_amd64.tar.gz\n")
+	checksums := []byte(sha256hex(archive) + "  groundskeeper_1.2.3_linux_amd64.tar.gz\n")
 	rel, cleanup := releaseServer(t, archive, checksums, true)
 	defer cleanup()
 
@@ -149,10 +149,10 @@ func TestDownloadVerifiedBinary_MatchingChecksumProceeds(t *testing.T) {
 }
 
 func TestDownloadVerifiedBinary_MismatchedChecksumAborts(t *testing.T) {
-	binary := []byte("ELF-agent-deck-binary")
+	binary := []byte("ELF-groundskeeper-binary")
 	archive := makeTarGz(t, binary)
 	// Published checksum is for a DIFFERENT artifact → tampered/corrupt.
-	checksums := []byte(sha256hex([]byte("tampered")) + "  agent-deck_1.2.3_linux_amd64.tar.gz\n")
+	checksums := []byte(sha256hex([]byte("tampered")) + "  groundskeeper_1.2.3_linux_amd64.tar.gz\n")
 	rel, cleanup := releaseServer(t, archive, checksums, true)
 	defer cleanup()
 
@@ -169,7 +169,7 @@ func TestDownloadVerifiedBinary_MismatchedChecksumAborts(t *testing.T) {
 }
 
 func TestDownloadVerifiedBinary_MissingChecksumsAssetAborts(t *testing.T) {
-	binary := []byte("ELF-agent-deck-binary")
+	binary := []byte("ELF-groundskeeper-binary")
 	archive := makeTarGz(t, binary)
 	// Release publishes NO checksums.txt asset → cannot verify → fail closed.
 	rel, cleanup := releaseServer(t, archive, nil, false)
@@ -185,10 +185,10 @@ func TestDownloadVerifiedBinary_MissingChecksumsAssetAborts(t *testing.T) {
 }
 
 func TestDownloadVerifiedBinary_AssetNotInChecksumsAborts(t *testing.T) {
-	binary := []byte("ELF-agent-deck-binary")
+	binary := []byte("ELF-groundskeeper-binary")
 	archive := makeTarGz(t, binary)
 	// checksums.txt exists but lists a different filename → our asset is unverified.
-	checksums := []byte(sha256hex(archive) + "  agent-deck_1.2.3_windows_amd64.tar.gz\n")
+	checksums := []byte(sha256hex(archive) + "  groundskeeper_1.2.3_windows_amd64.tar.gz\n")
 	rel, cleanup := releaseServer(t, archive, checksums, true)
 	defer cleanup()
 
@@ -201,9 +201,9 @@ func TestDownloadVerifiedBinary_AssetNotInChecksumsAborts(t *testing.T) {
 // fetches, so a real release's checksums entry will be found.
 func TestAssetArchiveName_MatchesAssetURL(t *testing.T) {
 	rel := &Release{TagName: "v1.2.3", Assets: []Asset{
-		{Name: "agent-deck_1.2.3_linux_amd64.tar.gz", BrowserDownloadURL: "https://x/a"},
+		{Name: "groundskeeper_1.2.3_linux_amd64.tar.gz", BrowserDownloadURL: "https://x/a"},
 	}}
-	name := fmt.Sprintf("agent-deck_%s_%s_%s.tar.gz", "1.2.3", "linux", "amd64")
+	name := fmt.Sprintf("groundskeeper_%s_%s_%s.tar.gz", "1.2.3", "linux", "amd64")
 	if GetAssetURLForPlatform(rel, "linux", "amd64") == "" {
 		t.Fatalf("asset URL lookup failed for computed name %q", name)
 	}

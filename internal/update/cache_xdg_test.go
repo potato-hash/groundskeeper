@@ -34,7 +34,7 @@ func TestCachePath_XDGCacheHomeRoundtrip(t *testing.T) {
 
 	require.NoError(t, saveCache(cache))
 
-	cachePath := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "agent-deck", CacheFileName)
+	cachePath := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "groundskeeper", CacheFileName)
 	require.FileExists(t, cachePath)
 
 	loaded, err := loadCache()

@@ -109,8 +109,8 @@ func TestCheckForUpdate_PopulatesReleasesBehind(t *testing.T) {
 		Name:    "v1.7.58",
 		HTMLURL: "https://example/releases/v1.7.58",
 		Assets: []Asset{{
-			Name:               "agent-deck_1.7.58_linux_amd64.tar.gz",
-			BrowserDownloadURL: "https://example/d/agent-deck_1.7.58_linux_amd64.tar.gz",
+			Name:               "groundskeeper_1.7.58_linux_amd64.tar.gz",
+			BrowserDownloadURL: "https://example/d/groundskeeper_1.7.58_linux_amd64.tar.gz",
 		}},
 	}
 	recent := []Release{
@@ -153,7 +153,7 @@ func TestCheckForUpdate_PopulatesReleasesBehind(t *testing.T) {
 }
 
 func TestCachedUpdateInfo_OfflineReadFromCache(t *testing.T) {
-	// `agent-deck --version` must be instant — never hit the network.
+	// `groundskeeper --version` must be instant - never hit the network.
 	// CachedUpdateInfo reads the on-disk cache directly.
 	isolateUpdatePaths(t)
 

@@ -37,6 +37,33 @@ This is a development build, not a release. The bubbletea TUI shows Groundskeepe
 
 ## Quick Start
 
+Public one-command install from GitHub:
+
+```sh
+export OLLAMA_CLOUD_API_KEY='<your ollama cloud key>'
+curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh |
+  bash -s -- --non-interactive --run-setup --model ollama-cloud/glm-5.2 --verify-model
+```
+
+If `raw.githubusercontent.com` is behind `main` during install testing, use the
+GitHub Contents API raw endpoint:
+
+```sh
+export OLLAMA_CLOUD_API_KEY='<your ollama cloud key>'
+curl -fsSL -H 'Accept: application/vnd.github.raw' \
+  'https://api.github.com/repos/potato-hash/groundskeeper/contents/install.sh?ref=main' |
+  bash -s -- --non-interactive --run-setup --model ollama-cloud/glm-5.2 --verify-model
+```
+
+Pre-release installs prefer release binaries when available. Until the first
+Groundskeeper release exists, the installer falls back to building
+`github.com/potato-hash/groundskeeper/cmd/groundskeeper@main`, so Go must be
+available on a fresh machine. First-run setup installs or discovers OMP,
+builds Espalier with Bun, creates `~/.local/share/groundskeeper/gk.db`, and
+delegates provider authentication to OMP/environment variables.
+
+Local development:
+
 ```sh
 # Build
 go build ./cmd/groundskeeper

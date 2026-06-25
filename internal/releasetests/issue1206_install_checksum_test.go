@@ -141,7 +141,7 @@ echo "RC=$?"`
 
 func TestVerifyDownloadChecksum_Functional(t *testing.T) {
 	dir := t.TempDir()
-	asset := "agent-deck_1.2.3_linux_amd64.tar.gz"
+	asset := "groundskeeper_1.2.3_linux_amd64.tar.gz"
 	file := filepath.Join(dir, asset)
 	content := []byte("pretend-this-is-a-release-tarball")
 	if err := os.WriteFile(file, content, 0o644); err != nil {

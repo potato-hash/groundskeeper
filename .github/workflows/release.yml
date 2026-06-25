@@ -62,7 +62,7 @@ jobs:
       - name: Validate tag matches code version
         run: |
           TAG="${REF_NAME#v}"
-          CODE=$(grep 'var Version' cmd/agent-deck/main.go | head -1 | sed 's/.*= "\([^"]*\)".*/\1/')
+          CODE=$(grep 'var Version' cmd/groundskeeper/main.go | head -1 | sed 's/.*= "\([^"]*\)".*/\1/')
           if [ "$TAG" != "$CODE" ]; then
             echo "ERROR: Tag v$TAG does not match code Version $CODE"
             exit 1
@@ -130,10 +130,10 @@ jobs:
           ASSETS=$(gh api "repos/${{ github.repository }}/releases/tags/${REF_NAME}" --jq '.assets[].name')
 
           EXPECTED=(
-            "agent-deck_${VERSION}_darwin_amd64.tar.gz"
-            "agent-deck_${VERSION}_darwin_arm64.tar.gz"
-            "agent-deck_${VERSION}_linux_amd64.tar.gz"
-            "agent-deck_${VERSION}_linux_arm64.tar.gz"
+            "groundskeeper_${VERSION}_darwin_amd64.tar.gz"
+            "groundskeeper_${VERSION}_darwin_arm64.tar.gz"
+            "groundskeeper_${VERSION}_linux_amd64.tar.gz"
+            "groundskeeper_${VERSION}_linux_arm64.tar.gz"
           )
 
           MISSING=()
@@ -187,10 +187,10 @@ jobs:
           # Keep in lockstep with the EXPECTED list in "Validate release
           # assets" above and with .goreleaser's archive matrix.
           ARTIFACTS=(
-            "agent-deck_${VERSION}_darwin_amd64.tar.gz"
-            "agent-deck_${VERSION}_darwin_arm64.tar.gz"
-            "agent-deck_${VERSION}_linux_amd64.tar.gz"
-            "agent-deck_${VERSION}_linux_arm64.tar.gz"
+            "groundskeeper_${VERSION}_darwin_amd64.tar.gz"
+            "groundskeeper_${VERSION}_darwin_arm64.tar.gz"
+            "groundskeeper_${VERSION}_linux_amd64.tar.gz"
+            "groundskeeper_${VERSION}_linux_arm64.tar.gz"
           )
 
           # Download each artifact (plus checksums.txt) one at a time, checking

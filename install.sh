@@ -672,7 +672,7 @@ if [[ "$INSTALLED_FROM_SOURCE" != "true" ]]; then
 
     # Install binary
     echo -e "Installing to ${GREEN}${INSTALL_DIR}/${BINARY_NAME}${NC}"
-    mv "$TMP_DIR/agent-deck" "$INSTALL_DIR/$BINARY_NAME"
+    mv "$TMP_DIR/groundskeeper" "$INSTALL_DIR/$BINARY_NAME"
     chmod +x "$INSTALL_DIR/$BINARY_NAME"
 fi
 
@@ -695,7 +695,7 @@ if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
     echo ""
 fi
 
-# Configure tmux for optimal agent-deck experience
+# Configure tmux for optimal Groundskeeper experience
 configure_tmux() {
     local TMUX_CONF="$HOME/.tmux.conf"
     local MARKER="# Groundskeeper configuration"
@@ -714,7 +714,7 @@ configure_tmux() {
             echo ""
             echo -e "${YELLOW}tmux config update available!${NC}"
             if [[ -z "$INSTALLED_VERSION" ]]; then
-                echo "Your current agent-deck tmux config is from an older version."
+                echo "Your current Groundskeeper tmux config is from an older version."
             else
                 echo "Installed version: $INSTALLED_VERSION, Available: $CURRENT_VERSION"
             fi

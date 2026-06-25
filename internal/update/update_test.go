@@ -366,8 +366,8 @@ func TestFetchReleaseByTag(t *testing.T) {
 		Name:    "v1.7.4",
 		HTMLURL: "https://example/releases/v1.7.4",
 		Assets: []Asset{{
-			Name:               "agent-deck_1.7.4_darwin_arm64.tar.gz",
-			BrowserDownloadURL: "https://example/download/agent-deck_1.7.4_darwin_arm64.tar.gz",
+			Name:               "groundskeeper_1.7.4_darwin_arm64.tar.gz",
+			BrowserDownloadURL: "https://example/download/groundskeeper_1.7.4_darwin_arm64.tar.gz",
 			Size:               123,
 		}},
 	}
@@ -388,7 +388,7 @@ func TestFetchReleaseByTag(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, rel)
 		assert.Equal(t, "v1.7.4", rel.TagName)
-		assert.Equal(t, "https://example/download/agent-deck_1.7.4_darwin_arm64.tar.gz",
+		assert.Equal(t, "https://example/download/groundskeeper_1.7.4_darwin_arm64.tar.gz",
 			GetAssetURLForPlatform(rel, "darwin", "arm64"))
 	})
 
@@ -411,12 +411,12 @@ func TestFetchReleaseByTag(t *testing.T) {
 }
 
 func TestPerformVerifiedUpdate_MatchingChecksumInstalls(t *testing.T) {
-	oldBinary := []byte("old-agent-deck")
-	newBinary := []byte("new-agent-deck")
+	oldBinary := []byte("old-groundskeeper")
+	newBinary := []byte("new-groundskeeper")
 	execPath := selfUpdateTestTarget(t, oldBinary)
 
 	archive := makeTarGz(t, newBinary)
-	checksums := []byte(sha256hex(archive) + "  agent-deck_1.2.3_linux_amd64.tar.gz\n")
+	checksums := []byte(sha256hex(archive) + "  groundskeeper_1.2.3_linux_amd64.tar.gz\n")
 	rel, cleanup := selfUpdateReleaseServer(t, archive, checksums, http.StatusOK)
 	defer cleanup()
 
@@ -429,12 +429,12 @@ func TestPerformVerifiedUpdate_MatchingChecksumInstalls(t *testing.T) {
 }
 
 func TestPerformVerifiedUpdate_MissingChecksumEntryLeavesBinaryUntouched(t *testing.T) {
-	oldBinary := []byte("old-agent-deck")
-	newBinary := []byte("new-agent-deck")
+	oldBinary := []byte("old-groundskeeper")
+	newBinary := []byte("new-groundskeeper")
 	execPath := selfUpdateTestTarget(t, oldBinary)
 
 	archive := makeTarGz(t, newBinary)
-	checksums := []byte(sha256hex(archive) + "  agent-deck_1.2.3_windows_amd64.tar.gz\n")
+	checksums := []byte(sha256hex(archive) + "  groundskeeper_1.2.3_windows_amd64.tar.gz\n")
 	rel, cleanup := selfUpdateReleaseServer(t, archive, checksums, http.StatusOK)
 	defer cleanup()
 
@@ -448,12 +448,12 @@ func TestPerformVerifiedUpdate_MissingChecksumEntryLeavesBinaryUntouched(t *test
 }
 
 func TestPerformVerifiedUpdate_MismatchedChecksumLeavesBinaryUntouched(t *testing.T) {
-	oldBinary := []byte("old-agent-deck")
-	newBinary := []byte("new-agent-deck")
+	oldBinary := []byte("old-groundskeeper")
+	newBinary := []byte("new-groundskeeper")
 	execPath := selfUpdateTestTarget(t, oldBinary)
 
 	archive := makeTarGz(t, newBinary)
-	checksums := []byte(sha256hex([]byte("different archive")) + "  agent-deck_1.2.3_linux_amd64.tar.gz\n")
+	checksums := []byte(sha256hex([]byte("different archive")) + "  groundskeeper_1.2.3_linux_amd64.tar.gz\n")
 	rel, cleanup := selfUpdateReleaseServer(t, archive, checksums, http.StatusOK)
 	defer cleanup()
 
@@ -467,8 +467,8 @@ func TestPerformVerifiedUpdate_MismatchedChecksumLeavesBinaryUntouched(t *testin
 }
 
 func TestPerformVerifiedUpdate_ChecksumsDownloadFailureLeavesBinaryUntouched(t *testing.T) {
-	oldBinary := []byte("old-agent-deck")
-	newBinary := []byte("new-agent-deck")
+	oldBinary := []byte("old-groundskeeper")
+	newBinary := []byte("new-groundskeeper")
 	execPath := selfUpdateTestTarget(t, oldBinary)
 
 	archive := makeTarGz(t, newBinary)
@@ -489,7 +489,7 @@ func selfUpdateTestTarget(t *testing.T, initial []byte) string {
 	t.Helper()
 
 	isolateUpdatePaths(t)
-	execPath := filepath.Join(t.TempDir(), "agent-deck")
+	execPath := filepath.Join(t.TempDir(), "groundskeeper")
 	require.NoError(t, os.WriteFile(execPath, initial, 0o755))
 
 	orig := detectHomebrewManagedInstall
@@ -505,7 +505,7 @@ func selfUpdateReleaseServer(t *testing.T, archive, checksums []byte, checksumsS
 	t.Helper()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/agent-deck_1.2.3_linux_amd64.tar.gz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/groundskeeper_1.2.3_linux_amd64.tar.gz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(archive)
 	})
 	mux.HandleFunc("/checksums.txt", func(w http.ResponseWriter, _ *http.Request) {
@@ -517,7 +517,7 @@ func selfUpdateReleaseServer(t *testing.T, archive, checksums []byte, checksumsS
 	rel := &Release{
 		TagName: "v1.2.3",
 		Assets: []Asset{
-			{Name: "agent-deck_1.2.3_linux_amd64.tar.gz", BrowserDownloadURL: srv.URL + "/agent-deck_1.2.3_linux_amd64.tar.gz"},
+			{Name: "groundskeeper_1.2.3_linux_amd64.tar.gz", BrowserDownloadURL: srv.URL + "/groundskeeper_1.2.3_linux_amd64.tar.gz"},
 			{Name: ChecksumsAssetName, BrowserDownloadURL: srv.URL + "/checksums.txt"},
 		},
 	}
@@ -533,25 +533,25 @@ func TestHomebrewUpgradeHint(t *testing.T) {
 	}{
 		{
 			name:     "mac arm64 cellar",
-			path:     "/opt/homebrew/Cellar/agent-deck/0.19.14/bin/agent-deck",
+			path:     "/opt/homebrew/Cellar/groundskeeper/0.19.14/bin/groundskeeper",
 			wantOK:   true,
-			wantHint: "brew upgrade asheshgoplani/tap/agent-deck",
+			wantHint: "brew upgrade potato-hash/tap/groundskeeper",
 		},
 		{
 			name:     "mac intel cellar",
-			path:     "/usr/local/Cellar/agent-deck/0.19.14/bin/agent-deck",
+			path:     "/usr/local/Cellar/groundskeeper/0.19.14/bin/groundskeeper",
 			wantOK:   true,
-			wantHint: "brew upgrade asheshgoplani/tap/agent-deck",
+			wantHint: "brew upgrade potato-hash/tap/groundskeeper",
 		},
 		{
 			name:     "linuxbrew cellar",
-			path:     "/home/linuxbrew/.linuxbrew/Cellar/agent-deck/0.19.14/bin/agent-deck",
+			path:     "/home/linuxbrew/.linuxbrew/Cellar/groundskeeper/0.19.14/bin/groundskeeper",
 			wantOK:   true,
-			wantHint: "brew upgrade asheshgoplani/tap/agent-deck",
+			wantHint: "brew upgrade potato-hash/tap/groundskeeper",
 		},
 		{
 			name:   "standalone local binary",
-			path:   "/Users/ashesh/.local/bin/agent-deck",
+			path:   "/Users/alan/.local/bin/groundskeeper",
 			wantOK: false,
 		},
 	}
