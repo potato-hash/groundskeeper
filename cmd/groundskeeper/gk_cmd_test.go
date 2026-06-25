@@ -396,6 +396,61 @@ func TestInstallScriptPreflightsGoWhenNoRelease(t *testing.T) {
 	}
 }
 
+func TestInstallScriptFailsWithoutTmuxInNonInteractiveMode(t *testing.T) {
+	bashPath := "/bin/bash"
+	if _, err := os.Stat(bashPath); err != nil {
+		var lookupErr error
+		bashPath, lookupErr = exec.LookPath("bash")
+		if lookupErr != nil {
+			t.Skip("bash not available")
+		}
+	}
+
+	home := t.TempDir()
+	bin := t.TempDir()
+	stubs := map[string]string{
+		"curl": "#!/bin/sh\nprintf '{\"tag_name\":\"v0.0.1\"}\\n'\n",
+		"grep": "#!/bin/sh\nwhile IFS= read -r line; do case \"$line\" in *tag_name*) printf '%s\\n' \"$line\";; esac; done\n",
+		"sed":  "#!/bin/sh\nprintf 'v0.0.1\\n'\n",
+		"tr":   "#!/bin/sh\nwhile IFS= read -r line; do case \"$line\" in Darwin) printf 'darwin\\n';; *) printf '%s\\n' \"$line\";; esac; done\n",
+		"uname": `#!/bin/sh
+case "$1" in
+  -m) printf 'arm64\n' ;;
+  *) printf 'Darwin\n' ;;
+esac
+`,
+	}
+	for name, body := range stubs {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cmd := exec.Command(bashPath, "../../install.sh", "--non-interactive")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"PATH="+bin,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("install.sh unexpectedly succeeded without tmux\n%s", out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"tmux is not installed.",
+		"Groundskeeper requires tmux to function.",
+		"Error: tmux is required but was not found after automatic install attempts.",
+		"Install tmux, then re-run the same install command.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install missing tmux output missing %q\n--- output ---\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "Installation successful!") {
+		t.Fatalf("install.sh claimed success without tmux\n--- output ---\n%s", body)
+	}
+}
+
 func TestShellUninstallUsesGroundskeeperPathsAndMarkers(t *testing.T) {
 	cmd := exec.Command("bash", "-n", "../../uninstall.sh")
 	if out, err := cmd.CombinedOutput(); err != nil {

@@ -513,7 +513,9 @@ if ! command -v tmux &> /dev/null; then
     # Check again after attempted install
     if ! command -v tmux &> /dev/null; then
         if [[ "$SKIP_OPTIONAL_DEPS" == "true" ]]; then
-            echo -e "${YELLOW}Warning: tmux not found. Continuing without tmux (non-interactive).${NC}"
+            echo -e "${RED}Error: tmux is required but was not found after automatic install attempts.${NC}"
+            echo "Install tmux, then re-run the same install command."
+            exit 1
         else
             echo ""
             prompt_read -p "tmux not found. Continue anyway? [y/N] " -n 1 -r
