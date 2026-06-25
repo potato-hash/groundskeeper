@@ -3229,7 +3229,7 @@ func detectTool(cmd string) string {
 	return session.MatchTool(cmd)
 }
 
-// handleUninstall removes agent-deck from the system
+// handleDebugDump writes recent debug logs to a support bundle.
 func handleDebugDump() {
 	cacheDir, err := ensureEffectiveCacheDir()
 	if err != nil {
@@ -3260,6 +3260,7 @@ func handleDebugDump() {
 	fmt.Println("Share this file when reporting lag or stuck issues.")
 }
 
+// handleUninstall removes Groundskeeper from the system.
 func handleUninstall(args []string) {
 	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
 	keepData := fs.Bool("keep-data", false, "Keep XDG config/data/cache locations and legacy ~/.agent-deck/")
@@ -3268,9 +3269,9 @@ func handleUninstall(args []string) {
 	yes := fs.Bool("y", false, "Skip confirmation prompts")
 
 	fs.Usage = func() {
-		fmt.Println("Usage: agent-deck uninstall [options]")
+		fmt.Println("Usage: groundskeeper uninstall [options]")
 		fmt.Println()
-		fmt.Println("Uninstall Agent Deck from your system.")
+		fmt.Println("Uninstall Groundskeeper from your system.")
 		fmt.Println()
 		fmt.Println("Options:")
 		fmt.Println("  --dry-run           Show what would be removed without removing")
@@ -3279,10 +3280,10 @@ func handleUninstall(args []string) {
 		fmt.Println("  -y                  Skip confirmation prompts")
 		fmt.Println()
 		fmt.Println("Examples:")
-		fmt.Println("  agent-deck uninstall              # Interactive uninstall")
-		fmt.Println("  agent-deck uninstall --dry-run    # Preview what would be removed")
-		fmt.Println("  agent-deck uninstall --keep-data  # Remove binary only, keep sessions")
-		fmt.Println("  agent-deck uninstall -y           # Uninstall without prompts")
+		fmt.Println("  groundskeeper uninstall              # Interactive uninstall")
+		fmt.Println("  groundskeeper uninstall --dry-run    # Preview what would be removed")
+		fmt.Println("  groundskeeper uninstall --keep-data  # Remove binary only, keep data")
+		fmt.Println("  groundskeeper uninstall -y           # Uninstall without prompts")
 	}
 
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
@@ -3290,7 +3291,7 @@ func handleUninstall(args []string) {
 	}
 
 	fmt.Println("╔════════════════════════════════════════╗")
-	fmt.Println("║       Agent Deck Uninstaller           ║")
+	fmt.Println("║       Groundskeeper Uninstaller        ║")
 	fmt.Println("╚════════════════════════════════════════╝")
 	fmt.Println()
 
@@ -3321,7 +3322,7 @@ func handleUninstall(args []string) {
 		cmd := exec.Command("brew", "list", "groundskeeper")
 		if cmd.Run() == nil {
 			homebrewInstalled = true
-			foundItems = append(foundItems, uninstallFoundItem{"homebrew", "", "Homebrew package: agent-deck"})
+			foundItems = append(foundItems, uninstallFoundItem{"homebrew", "", "Homebrew package: groundskeeper"})
 			fmt.Println("Found: Homebrew installation")
 		}
 	}
@@ -3329,7 +3330,7 @@ func handleUninstall(args []string) {
 	// Check common binary locations
 	binaryLocations := []string{
 		filepath.Join(homeDir, ".local", "bin", "groundskeeper"),
-		"/usr/local/bin/agent-deck",
+		"/usr/local/bin/groundskeeper",
 		filepath.Join(homeDir, "bin", "groundskeeper"),
 	}
 
@@ -3358,7 +3359,7 @@ func handleUninstall(args []string) {
 	// Check for tmux config
 	tmuxConf := filepath.Join(homeDir, ".tmux.conf")
 	if data, err := os.ReadFile(tmuxConf); err == nil {
-		if strings.Contains(string(data), "# agent-deck configuration") {
+		if strings.Contains(string(data), "# Groundskeeper configuration") {
 			foundItems = append(foundItems, uninstallFoundItem{"tmux", tmuxConf, "tmux configuration block"})
 			fmt.Println("Found: tmux configuration in ~/.tmux.conf")
 		}
@@ -3368,7 +3369,7 @@ func handleUninstall(args []string) {
 
 	// Nothing found?
 	if len(foundItems) == 0 {
-		fmt.Println("Agent Deck does not appear to be installed.")
+		fmt.Println("Groundskeeper does not appear to be installed.")
 		fmt.Println()
 		fmt.Println("Checked locations:")
 		for _, loc := range binaryLocations {
@@ -3387,7 +3388,7 @@ func handleUninstall(args []string) {
 			seenChecked[cleanPath] = struct{}{}
 			fmt.Printf("  - %s (%s)\n", cleanPath, strings.ToLower(c.label))
 		}
-		fmt.Printf("  - %s (for agent-deck config)\n", tmuxConf)
+		fmt.Printf("  - %s (for Groundskeeper config)\n", tmuxConf)
 		return
 	}
 
@@ -3398,7 +3399,7 @@ func handleUninstall(args []string) {
 	for _, item := range foundItems {
 		switch item.itemType {
 		case "homebrew":
-			fmt.Println("  • Homebrew package: agent-deck")
+			fmt.Println("  • Homebrew package: groundskeeper")
 		case "binary", "binary-symlink":
 			fmt.Printf("  • Binary: %s\n", item.path)
 		case "config":
@@ -3489,7 +3490,7 @@ func handleUninstall(args []string) {
 
 		// Check if we need sudo
 		dir := filepath.Dir(item.path)
-		testFile := filepath.Join(dir, ".agent-deck-write-test")
+		testFile := filepath.Join(dir, ".groundskeeper-write-test")
 		if f, err := os.Create(testFile); err != nil {
 			// Need elevated permissions
 			fmt.Printf("Requires sudo to remove %s\n", item.path)
@@ -3537,15 +3538,15 @@ func handleUninstall(args []string) {
 			}
 
 			// Create backup
-			backupPath := tmuxConf + ".bak.agentdeck-uninstall"
+			backupPath := tmuxConf + ".bak.groundskeeper-uninstall"
 			if err := os.WriteFile(backupPath, data, 0o644); err != nil {
 				fmt.Printf("Warning: failed to create backup: %v\n", err)
 			}
 
-			// Remove the agent-deck config block
+			// Remove the Groundskeeper config block
 			content := string(data)
-			startMarker := "# agent-deck configuration"
-			endMarker := "# End agent-deck configuration"
+			startMarker := "# Groundskeeper configuration"
+			endMarker := "# End Groundskeeper configuration"
 
 			startIdx := strings.Index(content, startMarker)
 			endIdx := strings.Index(content, endMarker)
@@ -3642,11 +3643,11 @@ func handleUninstall(args []string) {
 
 	if *keepTmuxConfig {
 		fmt.Println("Note: tmux config preserved in ~/.tmux.conf")
-		fmt.Println("      Remove the '# agent-deck configuration' block manually if desired")
+		fmt.Println("      Remove the '# Groundskeeper configuration' block manually if desired")
 	}
 
 	fmt.Println()
-	fmt.Println("Thank you for using Agent Deck!")
+	fmt.Println("Thank you for using Groundskeeper!")
 	fmt.Println("Feedback: https://github.com/potato-hash/groundskeeper/issues")
 }
 

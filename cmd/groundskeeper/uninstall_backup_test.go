@@ -47,6 +47,9 @@ func TestBackupUninstallDataLocations_IncludesXDGData(t *testing.T) {
 	if backupFile == "" {
 		t.Fatal("backupUninstallDataLocations returned empty backup path")
 	}
+	if !strings.HasPrefix(filepath.Base(backupFile), "groundskeeper-backup-") {
+		t.Fatalf("backup filename = %q, want groundskeeper-backup-*", filepath.Base(backupFile))
+	}
 
 	members := tarGzMembers(t, backupFile)
 

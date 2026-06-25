@@ -127,6 +127,7 @@ func TestSetupNonInteractiveReportsEspalierEntrypoint(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	t.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+	prependStubOMP(t)
 
 	espalierDir := filepath.Join(home, "espalier")
 	entrypoint := filepath.Join(espalierDir, "dist", "extensions", "index.js")
@@ -160,6 +161,36 @@ func TestSetupNonInteractiveDoesNotWriteOmpConfig(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	t.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+	prependStubOMP(t)
+
+	espalierDir := filepath.Join(home, "espalier")
+	entrypoint := filepath.Join(espalierDir, "dist", "extensions", "index.js")
+	if err := os.MkdirAll(filepath.Dir(entrypoint), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(entrypoint, []byte("export default function() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() {
+		handleSetup([]string{"--non-interactive", "--espalier-path", espalierDir})
+	})
+	if !strings.Contains(out, "Global OMP config write skipped in non-interactive mode") {
+		t.Fatalf("setup output missing non-interactive skip\n--- output ---\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".omp", "agent", "config.yml")); !os.IsNotExist(err) {
+		t.Fatalf("non-interactive setup wrote OMP config, stat err=%v", err)
+	}
+}
+
+func TestSetupNonInteractiveWritesOmpConfigWhenFlagSet(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+	prependStubOMP(t)
 
 	espalierDir := filepath.Join(home, "espalier")
 	entrypoint := filepath.Join(espalierDir, "dist", "extensions", "index.js")
@@ -173,11 +204,45 @@ func TestSetupNonInteractiveDoesNotWriteOmpConfig(t *testing.T) {
 	out := captureStdout(t, func() {
 		handleSetup([]string{"--non-interactive", "--write-omp-config", "--espalier-path", espalierDir})
 	})
-	if !strings.Contains(out, "Global OMP config write skipped in non-interactive mode") {
-		t.Fatalf("setup output missing non-interactive skip\n--- output ---\n%s", out)
+	if !strings.Contains(out, "OMP config created:") {
+		t.Fatalf("setup output missing config write confirmation\n--- output ---\n%s", out)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".omp", "agent", "config.yml")); !os.IsNotExist(err) {
-		t.Fatalf("non-interactive setup wrote OMP config, stat err=%v", err)
+	if _, err := os.Stat(filepath.Join(home, ".omp", "agent", "config.yml")); err != nil {
+		t.Fatalf("non-interactive --write-omp-config did not write OMP config: %v", err)
+	}
+}
+
+func TestSetupNonInteractiveExitsWhenRequiredPiecesMissing(t *testing.T) {
+	if os.Getenv("GK_SETUP_MISSING_HELPER") == "1" {
+		home := os.Getenv("GK_TEST_HOME")
+		os.Setenv("HOME", home)
+		os.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+		os.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+		os.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+		os.Setenv("PATH", filepath.Join(home, "empty-bin"))
+		handleSetup([]string{"--non-interactive", "--espalier-path", filepath.Join(home, "missing-espalier")})
+		return
+	}
+
+	home := t.TempDir()
+	if err := os.Mkdir(filepath.Join(home, "empty-bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestSetupNonInteractiveExitsWhenRequiredPiecesMissing")
+	cmd.Env = append(os.Environ(), "GK_SETUP_MISSING_HELPER=1", "GK_TEST_HOME="+home)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("setup unexpectedly succeeded\n%s", out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"Setup incomplete.",
+		"omp is not installed or discoverable",
+		"Espalier extension entrypoint is missing",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("setup missing failure detail %q\n--- output ---\n%s", want, body)
+		}
 	}
 }
 
@@ -211,6 +276,76 @@ func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 	}
 }
 
+func TestShellUninstallUsesGroundskeeperPathsAndMarkers(t *testing.T) {
+	cmd := exec.Command("bash", "-n", "../../uninstall.sh")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("uninstall.sh has invalid syntax: %v\n%s", err, out)
+	}
+
+	body, err := os.ReadFile("../../uninstall.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+	for _, want := range []string{
+		"https://github.com/potato-hash/groundskeeper",
+		"raw.githubusercontent.com/potato-hash/groundskeeper",
+		"XDG config/data/cache",
+		"$(xdg_path XDG_DATA_HOME .local/share)",
+		"# Groundskeeper configuration",
+		"# End Groundskeeper configuration",
+		"groundskeeper-backup-",
+		"${#TAR_ARGS[@]} -gt 4",
+		".tmux.conf.bak.groundskeeper-uninstall",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("uninstall.sh missing %q", want)
+		}
+	}
+	for _, stale := range []string{
+		"asheshgoplani/groundskeeper",
+		"~/.groundskeeper",
+		".tmux.conf.bak.agentdeck-uninstall",
+		"# groundskeeper configuration",
+		"# End groundskeeper configuration",
+	} {
+		if strings.Contains(script, stale) {
+			t.Fatalf("uninstall.sh still contains stale text %q", stale)
+		}
+	}
+}
+
+func TestInstallStateVerifierScansWithoutPrintingSecretValues(t *testing.T) {
+	cmd := exec.Command("bash", "-n", "../../scripts/verify-install-state.sh")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("verify-install-state.sh has invalid syntax: %v\n%s", err, out)
+	}
+
+	body, err := os.ReadFile("../../scripts/verify-install-state.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+	for _, want := range []string{
+		"raw.githubusercontent.com/potato-hash/groundskeeper/main/scripts/verify-install-state.sh",
+		"find_executable",
+		"$HOME/.local/bin/groundskeeper",
+		"$HOME/.local/bin/omp",
+		"dist/extensions/index.js",
+		"$data_dir/gk.db",
+		"$HOME/.omp",
+		"grep -IlF -- \"$value\"",
+		"sensitive value from $name persisted in $hit",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("verify-install-state.sh missing %q", want)
+		}
+	}
+	if strings.Contains(script, "persisted value") {
+		t.Fatal("verify-install-state.sh appears to describe printing persisted secret values")
+	}
+}
+
 func TestSetupCommandEnvAliasesOllamaAPIKeyForOllamaCloud(t *testing.T) {
 	t.Setenv("OLLAMA_API_KEY", "temporary-test-key")
 	t.Setenv("OLLAMA_CLOUD_API_KEY", "")
@@ -221,11 +356,25 @@ func TestSetupCommandEnvAliasesOllamaAPIKeyForOllamaCloud(t *testing.T) {
 	}
 }
 
+func TestSetupCommandEnvPassesOnlySelectedProviderCredential(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "provider-key")
+	t.Setenv("GITHUB_TOKEN", "should-not-pass")
+
+	env := setupCommandEnv("openai/gpt-5.2")
+	if !containsEnv(env, "OPENAI_API_KEY=provider-key") {
+		t.Fatalf("setupCommandEnv did not pass selected provider credential: %#v", env)
+	}
+	if containsEnv(env, "GITHUB_TOKEN=should-not-pass") {
+		t.Fatalf("setupCommandEnv leaked unrelated token env: %#v", env)
+	}
+}
+
 func TestRedactedCommandOutputHidesProviderKeys(t *testing.T) {
 	t.Setenv("OLLAMA_CLOUD_API_KEY", "temporary-test-key")
+	t.Setenv("GITHUB_TOKEN", "github-token-value")
 
-	got := redactedCommandOutput([]byte("failed with temporary-test-key"))
-	if strings.Contains(got, "temporary-test-key") {
+	got := redactedCommandOutput([]byte("failed with temporary-test-key and github-token-value"))
+	if strings.Contains(got, "temporary-test-key") || strings.Contains(got, "github-token-value") {
 		t.Fatalf("redactedCommandOutput leaked provider key: %q", got)
 	}
 	if !strings.Contains(got, "[REDACTED]") {
@@ -240,6 +389,17 @@ func containsEnv(env []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func prependStubOMP(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "omp")
+	body := "#!/usr/bin/env sh\nif [ \"$1\" = \"--version\" ]; then echo 'omp test'; exit 0; fi\nexit 0\n"
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func TestWriteRecommendedOmpConfigCreatesGlobalConfig(t *testing.T) {

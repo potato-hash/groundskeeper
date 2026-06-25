@@ -1,13 +1,13 @@
 #!/bin/bash
 #
 # Groundskeeper Uninstaller
-# https://github.com/asheshgoplani/groundskeeper
+# https://github.com/potato-hash/groundskeeper
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/asheshgoplani/groundskeeper/main/uninstall.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/uninstall.sh | bash
 #
 # Options:
-#   --keep-data         Keep ~/.groundskeeper/ (sessions, config, logs)
+#   --keep-data         Keep XDG config/data/cache and legacy ~/.agent-deck/
 #   --keep-tmux-config  Keep tmux configuration
 #   --non-interactive   Skip all prompts (removes everything)
 #   --dry-run           Show what would be removed without removing
@@ -54,7 +54,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: uninstall.sh [options]"
             echo ""
             echo "Options:"
-            echo "  --keep-data         Keep ~/.groundskeeper/ (sessions, config, logs)"
+            echo "  --keep-data         Keep XDG config/data/cache and legacy ~/.agent-deck/"
             echo "  --keep-tmux-config  Keep tmux configuration in ~/.tmux.conf"
             echo "  --non-interactive   Skip all prompts (removes everything)"
             echo "  --dry-run           Show what would be removed without removing"
@@ -69,7 +69,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║       Groundskeeper Uninstaller           ║${NC}"
+echo -e "${BLUE}║       Groundskeeper Uninstaller        ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -77,6 +77,16 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo -e "${YELLOW}DRY RUN MODE - Nothing will be removed${NC}"
     echo ""
 fi
+
+xdg_path() {
+    local env_name="$1"
+    local fallback="$2"
+    local base="${!env_name:-}"
+    if [[ -z "$base" ]]; then
+        base="$HOME/$fallback"
+    fi
+    echo "$base/groundskeeper"
+}
 
 # Track what we find
 FOUND_ITEMS=()
@@ -109,39 +119,29 @@ for loc in "${BINARY_LOCATIONS[@]}"; do
     fi
 done
 
-# Check for data directory
-DATA_DIR="$HOME/.groundskeeper"
-if [[ -d "$DATA_DIR" ]]; then
-    FOUND_ITEMS+=("data")
+DATA_LOCATIONS=(
+    "config:Config directory:$(xdg_path XDG_CONFIG_HOME .config)"
+    "data:Data directory:$(xdg_path XDG_DATA_HOME .local/share)"
+    "cache:Cache directory:$(xdg_path XDG_CACHE_HOME .cache)"
+    "legacy:Legacy directory:$HOME/.agent-deck"
+)
 
-    # Count sessions across profiles
-    SESSION_COUNT=0
-    PROFILE_COUNT=0
-    if [[ -d "$DATA_DIR/profiles" ]]; then
-        for profile_dir in "$DATA_DIR/profiles"/*/; do
-            if [[ -f "${profile_dir}state.db" ]]; then
-                PROFILE_COUNT=$((PROFILE_COUNT + 1))
-                count=$(sqlite3 "${profile_dir}state.db" "SELECT COUNT(*) FROM instances;" 2>/dev/null || echo 0)
-                SESSION_COUNT=$((SESSION_COUNT + count))
-            elif [[ -f "${profile_dir}sessions.json" ]]; then
-                # Legacy fallback for pre-v0.11.0 profiles
-                PROFILE_COUNT=$((PROFILE_COUNT + 1))
-                count=$(grep -o '"id"' "${profile_dir}sessions.json" 2>/dev/null | wc -l | tr -d ' ')
-                SESSION_COUNT=$((SESSION_COUNT + count))
-            fi
-        done
+for data_item in "${DATA_LOCATIONS[@]}"; do
+    kind="${data_item%%:*}"
+    rest="${data_item#*:}"
+    label="${rest%%:*}"
+    loc="${rest#*:}"
+    if [[ -e "$loc" ]] || [[ -L "$loc" ]]; then
+        FOUND_ITEMS+=("data:$kind:$loc")
+        DATA_SIZE=$(du -sh "$loc" 2>/dev/null | cut -f1 || true)
+        echo -e "Found: ${GREEN}${label}${NC} at $loc"
+        [[ -n "$DATA_SIZE" ]] && echo -e "       ${DIM}${DATA_SIZE} total${NC}"
     fi
-
-    # Get total size
-    DATA_SIZE=$(du -sh "$DATA_DIR" 2>/dev/null | cut -f1)
-
-    echo -e "Found: ${GREEN}Data directory${NC} at $DATA_DIR"
-    echo -e "       ${DIM}$PROFILE_COUNT profiles, $SESSION_COUNT sessions, $DATA_SIZE total${NC}"
-fi
+done
 
 # Check for tmux config
 TMUX_CONF="$HOME/.tmux.conf"
-if [[ -f "$TMUX_CONF" ]] && grep -q "# groundskeeper configuration" "$TMUX_CONF" 2>/dev/null; then
+if [[ -f "$TMUX_CONF" ]] && grep -q "# Groundskeeper configuration" "$TMUX_CONF" 2>/dev/null; then
     FOUND_ITEMS+=("tmux")
     echo -e "Found: ${GREEN}tmux configuration${NC} in $TMUX_CONF"
 fi
@@ -156,8 +156,10 @@ if [[ ${#FOUND_ITEMS[@]} -eq 0 ]]; then
     for loc in "${BINARY_LOCATIONS[@]}"; do
         echo "  - $loc"
     done
-    echo "  - $DATA_DIR"
-    echo "  - $TMUX_CONF (for groundskeeper config)"
+    for data_item in "${DATA_LOCATIONS[@]}"; do
+        echo "  - ${data_item##*:}"
+    done
+    echo "  - $TMUX_CONF (for Groundskeeper config)"
     exit 0
 fi
 
@@ -174,12 +176,14 @@ for item in "${FOUND_ITEMS[@]}"; do
             loc="${item#binary:}"
             echo -e "  ${RED}•${NC} Binary: $loc"
             ;;
-        data)
+        data:*)
+            kind="${item#data:}"
+            kind="${kind%%:*}"
+            loc="${item#data:$kind:}"
             if [[ "$KEEP_DATA" == "true" ]]; then
-                echo -e "  ${GREEN}•${NC} Data directory: $DATA_DIR ${YELLOW}(keeping)${NC}"
+                echo -e "  ${GREEN}•${NC} $kind directory: $loc ${YELLOW}(keeping)${NC}"
             else
-                echo -e "  ${RED}•${NC} Data directory: $DATA_DIR"
-                echo -e "    ${DIM}Including: sessions, logs, config${NC}"
+                echo -e "  ${RED}•${NC} $kind directory: $loc"
             fi
             ;;
         tmux)
@@ -244,15 +248,15 @@ if [[ " ${FOUND_ITEMS[*]} " =~ " tmux " ]] && [[ "$KEEP_TMUX_CONFIG" != "true" ]
     echo -e "Removing tmux configuration..."
 
     # Create backup
-    cp "$TMUX_CONF" "$TMUX_CONF.bak.agentdeck-uninstall"
+    cp "$TMUX_CONF" "$TMUX_CONF.bak.groundskeeper-uninstall"
 
     # Remove the groundskeeper config block (between markers)
     # Using sed to delete from start marker to end marker
     if [[ "$(uname)" == "Darwin" ]]; then
         # macOS sed requires different syntax
-        sed -i '' '/# groundskeeper configuration/,/# End groundskeeper configuration/d' "$TMUX_CONF"
+        sed -i '' '/# Groundskeeper configuration/,/# End Groundskeeper configuration/d' "$TMUX_CONF"
     else
-        sed -i '/# groundskeeper configuration/,/# End groundskeeper configuration/d' "$TMUX_CONF"
+        sed -i '/# Groundskeeper configuration/,/# End Groundskeeper configuration/d' "$TMUX_CONF"
     fi
 
     # Remove any trailing empty lines at end of file
@@ -262,27 +266,47 @@ if [[ " ${FOUND_ITEMS[*]} " =~ " tmux " ]] && [[ "$KEEP_TMUX_CONFIG" != "true" ]
         sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$TMUX_CONF" 2>/dev/null || true
     fi
 
-    echo -e "${GREEN}✓${NC} tmux configuration removed (backup: ~/.tmux.conf.bak.agentdeck-uninstall)"
+    echo -e "${GREEN}✓${NC} tmux configuration removed (backup: ~/.tmux.conf.bak.groundskeeper-uninstall)"
 fi
 
-# 4. Data directory
-if [[ " ${FOUND_ITEMS[*]} " =~ " data " ]] && [[ "$KEEP_DATA" != "true" ]]; then
-    echo -e "Removing data directory..."
+# 4. XDG and legacy data directories
+if [[ "$KEEP_DATA" != "true" ]]; then
+    DATA_ITEMS=()
+    for item in "${FOUND_ITEMS[@]}"; do
+        [[ "$item" == data:* ]] && DATA_ITEMS+=("$item")
+    done
 
-    # Offer backup for non-interactive mode
-    if [[ "$NON_INTERACTIVE" != "true" ]]; then
-        read -p "Create backup of data before removing? [Y/n] " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-            BACKUP_FILE="$HOME/groundskeeper-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-            echo -e "Creating backup at $BACKUP_FILE..."
-            tar -czf "$BACKUP_FILE" -C "$HOME" .groundskeeper
-            echo -e "${GREEN}✓${NC} Backup created: $BACKUP_FILE"
+    if [[ ${#DATA_ITEMS[@]} -gt 0 ]]; then
+        echo -e "Removing data directories..."
+
+        # Offer backup for interactive runs.
+        if [[ "$NON_INTERACTIVE" != "true" ]]; then
+            read -p "Create backup of data before removing? [Y/n] " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                BACKUP_FILE="$HOME/groundskeeper-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+                TAR_ARGS=(-czf "$BACKUP_FILE" -C /)
+                for item in "${DATA_ITEMS[@]}"; do
+                    loc="${item#data:}"
+                    loc="${loc#*:}"
+                    [[ -L "$loc" ]] && continue
+                    TAR_ARGS+=("${loc#/}")
+                done
+                if [[ ${#TAR_ARGS[@]} -gt 4 ]]; then
+                    echo -e "Creating backup at $BACKUP_FILE..."
+                    tar "${TAR_ARGS[@]}"
+                    echo -e "${GREEN}✓${NC} Backup created: $BACKUP_FILE"
+                fi
+            fi
         fi
-    fi
 
-    rm -rf "$DATA_DIR"
-    echo -e "${GREEN}✓${NC} Data directory removed: $DATA_DIR"
+        for item in "${DATA_ITEMS[@]}"; do
+            loc="${item#data:}"
+            loc="${loc#*:}"
+            rm -rf "$loc"
+            echo -e "${GREEN}✓${NC} Removed: $loc"
+        done
+    fi
 fi
 
 echo ""
@@ -292,15 +316,15 @@ echo -e "${GREEN}╚════════════════════
 echo ""
 
 if [[ "$KEEP_DATA" == "true" ]]; then
-    echo -e "${YELLOW}Note:${NC} Data directory preserved at $DATA_DIR"
-    echo "      Remove manually with: rm -rf ~/.groundskeeper"
+    echo -e "${YELLOW}Note:${NC} XDG config/data/cache and legacy ~/.agent-deck/ were preserved."
+    echo "      Remove manually after reviewing their contents."
 fi
 
 if [[ "$KEEP_TMUX_CONFIG" == "true" ]]; then
     echo -e "${YELLOW}Note:${NC} tmux config preserved in ~/.tmux.conf"
-    echo "      Remove the '# groundskeeper configuration' block manually if desired"
+    echo "      Remove the '# Groundskeeper configuration' block manually if desired"
 fi
 
 echo ""
 echo "Thank you for using Groundskeeper!"
-echo "Feedback: https://github.com/asheshgoplani/groundskeeper/issues"
+echo "Feedback: https://github.com/potato-hash/groundskeeper/issues"

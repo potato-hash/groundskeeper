@@ -833,6 +833,14 @@ func handleSetup(args []string) {
 		answer := strings.ToLower(prompt(question + " [y/N]"))
 		return answer == "y" || answer == "yes"
 	}
+	var setupProblems []string
+	addSetupProblem := func(problem, next string) {
+		if next != "" {
+			setupProblems = append(setupProblems, problem+"\n      Next: "+next)
+			return
+		}
+		setupProblems = append(setupProblems, problem)
+	}
 
 	if *nonInteractive {
 		fmt.Println()
@@ -902,6 +910,9 @@ func handleSetup(args []string) {
 			fmt.Println("  [SKIP] Install OMP manually: https://github.com/can1357/oh-my-pi")
 		}
 	}
+	if ompPath == "" {
+		addSetupProblem("omp is not installed or discoverable", "Install OMP or re-run: groundskeeper setup --install-missing")
+	}
 	fmt.Println()
 
 	// ── Step 2: Espalier Core ──
@@ -947,6 +958,9 @@ func handleSetup(args []string) {
 		} else {
 			fmt.Println("  [SKIP] Workers will run without Espalier (degraded)")
 		}
+	}
+	if entrypoint = espalierExtensionPath(espalierPath); entrypoint == "" {
+		addSetupProblem("Espalier extension entrypoint is missing", fmt.Sprintf("Build Espalier or re-run: groundskeeper setup --install-missing --espalier-path %s", espalierPath))
 	}
 	fmt.Println()
 
@@ -1007,12 +1021,22 @@ func handleSetup(args []string) {
 		}
 		fmt.Println("  [OK] OMP model smoke test passed")
 	}
-	if *nonInteractive {
+	writeOmpConfig := false
+	switch {
+	case *writeOmpConfigFlag:
+		writeOmpConfig = true
+	case *nonInteractive:
 		fmt.Println("  [SKIP] Global OMP config write skipped in non-interactive mode")
-	} else if *writeOmpConfigFlag || confirm("  Write recommended global OMP config now?") {
+	case confirm("  Write recommended global OMP config now?"):
+		writeOmpConfig = true
+	default:
+		fmt.Println("  [SKIP] Global OMP config unchanged")
+	}
+	if writeOmpConfig {
 		path, backup, changed, err := writeRecommendedOmpConfig(model)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  [ERROR] write OMP config: %v\n", err)
+			os.Exit(1)
 		} else if changed {
 			if backup != "" {
 				fmt.Printf("  [OK] OMP config updated: %s (backup: %s)\n", path, backup)
@@ -1022,8 +1046,6 @@ func handleSetup(args []string) {
 		} else {
 			fmt.Printf("  [OK] OMP config already has recommended defaults: %s\n", path)
 		}
-	} else {
-		fmt.Println("  [SKIP] Global OMP config unchanged")
 	}
 	fmt.Println()
 
@@ -1056,6 +1078,19 @@ func handleSetup(args []string) {
 	// ── Summary + getting started ──
 	fmt.Println("══════════════════════════════════════════")
 	fmt.Println()
+	if len(setupProblems) > 0 {
+		fmt.Println("  Setup incomplete.")
+		fmt.Println()
+		fmt.Println("  Required stack work still needs attention:")
+		for _, problem := range setupProblems {
+			fmt.Printf("    - %s\n", problem)
+		}
+		fmt.Println()
+		fmt.Println("  Re-run:")
+		fmt.Printf("    groundskeeper setup --install-missing --model %s\n", model)
+		fmt.Println()
+		os.Exit(1)
+	}
 	fmt.Println("  Setup complete!")
 	fmt.Println()
 	fmt.Println("  Quick start:")
@@ -1082,6 +1117,7 @@ func installOMP() error {
 	fmt.Println("  Downloading OMP installer...")
 	cmd := exec.Command("bash", "-c",
 		"curl -fsSL https://omp.sh/install | sh")
+	cmd.Env = setupBaseEnv()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
@@ -1105,31 +1141,82 @@ func lookupOMP() string {
 }
 
 func hasModelEnvCredential(model string) bool {
-	if strings.HasPrefix(model, "ollama-cloud/") {
-		return os.Getenv("OLLAMA_CLOUD_API_KEY") != "" || os.Getenv("OLLAMA_API_KEY") != ""
+	for _, name := range providerCredentialEnvNames(model) {
+		if os.Getenv(name) != "" {
+			return true
+		}
 	}
 	return false
 }
 
 func setupCommandEnv(model string) []string {
-	env := os.Environ()
-	if strings.HasPrefix(model, "ollama-cloud/") && os.Getenv("OLLAMA_CLOUD_API_KEY") == "" {
+	env := setupBaseEnv()
+	if strings.HasPrefix(model, "ollama-cloud/") {
+		if key := os.Getenv("OLLAMA_CLOUD_API_KEY"); key != "" {
+			return append(env, "OLLAMA_CLOUD_API_KEY="+key)
+		}
 		if key := os.Getenv("OLLAMA_API_KEY"); key != "" {
-			env = append(env, "OLLAMA_CLOUD_API_KEY="+key)
+			return append(env, "OLLAMA_CLOUD_API_KEY="+key)
+		}
+		return env
+	}
+	for _, name := range providerCredentialEnvNames(model) {
+		if value := os.Getenv(name); value != "" {
+			env = append(env, name+"="+value)
 		}
 	}
 	return env
 }
 
+func setupBaseEnv() []string {
+	env := os.Environ()
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, ok := strings.Cut(kv, "=")
+		if ok && isSensitiveEnvName(name) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+func providerCredentialEnvNames(model string) []string {
+	provider := model
+	if before, _, ok := strings.Cut(model, "/"); ok {
+		provider = before
+	}
+	provider = strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(provider))
+	switch provider {
+	case "":
+		return nil
+	case "OLLAMA_CLOUD":
+		return []string{"OLLAMA_CLOUD_API_KEY", "OLLAMA_API_KEY"}
+	case "GOOGLE":
+		return []string{"GOOGLE_API_KEY", "GEMINI_API_KEY"}
+	default:
+		return []string{provider + "_API_KEY"}
+	}
+}
+
+func isSensitiveEnvName(name string) bool {
+	upper := strings.ToUpper(name)
+	return strings.Contains(upper, "API_KEY") ||
+		strings.Contains(upper, "TOKEN") ||
+		strings.Contains(upper, "SECRET") ||
+		strings.Contains(upper, "PASSWORD") ||
+		strings.Contains(upper, "PRIVATE_KEY") ||
+		strings.Contains(upper, "ACCESS_KEY")
+}
+
 func redactedCommandOutput(out []byte) string {
 	s := string(out)
-	for _, secret := range []string{
-		os.Getenv("OLLAMA_CLOUD_API_KEY"),
-		os.Getenv("OLLAMA_API_KEY"),
-	} {
-		if secret != "" {
-			s = strings.ReplaceAll(s, secret, "[REDACTED]")
+	for _, kv := range os.Environ() {
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok || !isSensitiveEnvName(name) || len(value) < 4 {
+			continue
 		}
+		s = strings.ReplaceAll(s, value, "[REDACTED]")
 	}
 	s = strings.TrimSpace(s)
 	if len(s) > 2000 {
@@ -1177,6 +1264,7 @@ func installEspalier(path string) error {
 		return fmt.Errorf("create parent dir: %w", err)
 	}
 	cmd := exec.Command("git", "clone", "https://github.com/potato-hash/espalier.git", path)
+	cmd.Env = setupBaseEnv()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -1193,6 +1281,7 @@ func buildEspalier(path string) error {
 	fmt.Println("  Installing Espalier dependencies (bun install)...")
 	cmd := exec.Command("bun", "install")
 	cmd.Dir = path
+	cmd.Env = setupBaseEnv()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -1201,6 +1290,7 @@ func buildEspalier(path string) error {
 	fmt.Println("  Building Espalier (bun build)...")
 	cmd = exec.Command("bun", "run", "build")
 	cmd.Dir = path
+	cmd.Env = setupBaseEnv()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

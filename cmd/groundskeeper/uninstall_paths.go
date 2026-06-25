@@ -159,7 +159,7 @@ func backupUninstallDataLocations(items []uninstallFoundItem, homeDir string) (s
 
 	backupFile := filepath.Join(
 		homeDir,
-		fmt.Sprintf("agent-deck-backup-%s.tar.gz", time.Now().Format("20060102-150405")),
+		fmt.Sprintf("groundskeeper-backup-%s.tar.gz", time.Now().Format("20060102-150405")),
 	)
 
 	// Archive each path by its full path. -C / keeps absolute-ish layout

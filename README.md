@@ -62,6 +62,12 @@ available on a fresh machine. First-run setup installs or discovers OMP,
 builds Espalier with Bun, creates `~/.local/share/groundskeeper/gk.db`, and
 delegates provider authentication to OMP/environment variables.
 
+Post-install state and secret-persistence check:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/scripts/verify-install-state.sh | bash
+```
+
 Local development:
 
 ```sh
