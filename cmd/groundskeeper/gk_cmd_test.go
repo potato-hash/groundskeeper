@@ -202,6 +202,8 @@ func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 		"setup_args+=(--non-interactive --install-missing)",
 		"</dev/tty",
 		"--non-interactive --install-missing",
+		`if [[ "$SETUP_MODE" == "run" ]]; then`,
+		"GOPROXY=direct",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("install.sh missing %q", want)

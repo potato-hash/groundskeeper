@@ -94,7 +94,7 @@ func TestInstallScript_FallsBackToPublicModuleWhenLatestMissing(t *testing.T) {
 
 	for _, want := range []string{
 		"No latest release found; building from public source module",
-		`GOBIN="$INSTALL_DIR" go install`,
+		`GOPROXY=direct GOBIN="$INSTALL_DIR" go install`,
 		`github.com/${REPO}/cmd/groundskeeper@main`,
 		`mv -f "$INSTALL_DIR/groundskeeper" "$INSTALL_DIR/$BINARY_NAME"`,
 	} {

@@ -556,7 +556,7 @@ if [[ "$VERSION" == "latest" ]]; then
             echo -e "${YELLOW}No latest release found; building from public source module.${NC}"
             mkdir -p "$INSTALL_DIR"
             echo -e "Installing to ${GREEN}${INSTALL_DIR}/${BINARY_NAME}${NC}"
-            GOBIN="$INSTALL_DIR" go install "github.com/${REPO}/cmd/groundskeeper@main"
+            GOPROXY=direct GOBIN="$INSTALL_DIR" go install "github.com/${REPO}/cmd/groundskeeper@main"
             if [[ "$BINARY_NAME" != "groundskeeper" ]]; then
                 mv -f "$INSTALL_DIR/groundskeeper" "$INSTALL_DIR/$BINARY_NAME"
             fi
@@ -939,6 +939,9 @@ maybe_run_first_run_setup() {
     echo -e "${BLUE}Starting first-run setup...${NC}"
     if ! run_first_run_setup; then
         echo -e "${YELLOW}First-run setup did not complete. Run again: ${setup_cmd}${NC}"
+        if [[ "$SETUP_MODE" == "run" ]]; then
+            exit 1
+        fi
     fi
 }
 
