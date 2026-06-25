@@ -246,6 +246,83 @@ func TestSetupNonInteractiveExitsWhenRequiredPiecesMissing(t *testing.T) {
 	}
 }
 
+func TestSetupInstallMissingReplacesEmptyEspalierDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+	prependStubOMP(t)
+	prependStubGitAndBun(t)
+
+	espalierDir := filepath.Join(home, "empty-espalier")
+	if err := os.MkdirAll(espalierDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() {
+		handleSetup([]string{"--non-interactive", "--install-missing", "--espalier-path", espalierDir})
+	})
+	entrypoint := filepath.Join(espalierDir, "dist", "extensions", "index.js")
+	for _, want := range []string{
+		"exists but is empty",
+		"Cloning Espalier to " + espalierDir,
+		"[OK] Espalier installed and built",
+		"Setup complete!",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	if _, err := os.Stat(entrypoint); err != nil {
+		t.Fatalf("expected stub build to create Espalier entrypoint: %v", err)
+	}
+}
+
+func TestSetupRefusesNonEmptyNonEspalierDir(t *testing.T) {
+	if os.Getenv("GK_SETUP_BAD_ESPALIER_HELPER") == "1" {
+		home := os.Getenv("GK_TEST_HOME")
+		os.Setenv("HOME", home)
+		os.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+		os.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+		os.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+		os.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+		prependStubOMP(t)
+		handleSetup([]string{"--non-interactive", "--install-missing", "--espalier-path", filepath.Join(home, "not-espalier")})
+		return
+	}
+
+	home := t.TempDir()
+	badDir := filepath.Join(home, "not-espalier")
+	if err := os.MkdirAll(badDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "README.md"), []byte("user data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestSetupRefusesNonEmptyNonEspalierDir")
+	cmd.Env = append(os.Environ(), "GK_SETUP_BAD_ESPALIER_HELPER=1", "GK_TEST_HOME="+home)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("setup unexpectedly succeeded\n%s", out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"does not look like an Espalier checkout",
+		"missing " + filepath.Join(badDir, "package.json"),
+		"Move or remove that directory",
+		"Setup incomplete.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("setup missing failure detail %q\n--- output ---\n%s", want, body)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(badDir, "README.md")); err != nil {
+		t.Fatalf("setup removed non-empty non-Espalier directory contents: %v", err)
+	}
+}
+
 func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 	cmd := exec.Command("bash", "-n", "../../install.sh")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -393,9 +470,19 @@ func containsEnv(env []string, want string) bool {
 
 func prependStubOMP(t *testing.T) {
 	t.Helper()
+	prependStubTool(t, "omp", "#!/usr/bin/env sh\nif [ \"$1\" = \"--version\" ]; then echo 'omp test'; exit 0; fi\nexit 0\n")
+}
+
+func prependStubGitAndBun(t *testing.T) {
+	t.Helper()
+	prependStubTool(t, "git", "#!/usr/bin/env sh\nif [ \"$1\" = \"clone\" ]; then mkdir -p \"$3\"; printf '{\"scripts\":{\"build\":\"bun build\"}}\\n' > \"$3/package.json\"; exit 0; fi\nexit 1\n")
+	prependStubTool(t, "bun", "#!/usr/bin/env sh\nif [ \"$1\" = \"install\" ]; then exit 0; fi\nif [ \"$1\" = \"run\" ] && [ \"$2\" = \"build\" ]; then mkdir -p dist/extensions; printf 'export default function() {}\\n' > dist/extensions/index.js; exit 0; fi\nexit 1\n")
+}
+
+func prependStubTool(t *testing.T, name, body string) {
+	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "omp")
-	body := "#!/usr/bin/env sh\nif [ \"$1\" = \"--version\" ]; then echo 'omp test'; exit 0; fi\nexit 0\n"
+	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -927,20 +927,53 @@ func handleSetup(args []string) {
 		espalierPath = inputEspalierPath
 	}
 	entrypoint := espalierExtensionPath(espalierPath)
+	espalierProblemAdded := false
 	if _, err := os.Stat(entrypoint); err == nil {
 		fmt.Printf("  [OK] Espalier found at %s\n", espalierPath)
 		fmt.Printf("  [OK] extension entrypoint: %s\n", entrypoint)
-	} else if _, err := os.Stat(espalierPath); err == nil {
-		fmt.Printf("  [PARTIAL] %s exists but dist/ is not built\n", espalierPath)
-		if *installMissing || confirm("  Build Espalier now? (requires bun)") {
-			if err := buildEspalier(espalierPath); err != nil {
-				fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
-				if *installMissing {
-					os.Exit(1)
+	} else if info, err := os.Stat(espalierPath); err == nil {
+		switch {
+		case !info.IsDir():
+			fmt.Printf("  [PARTIAL] %s exists but is not a usable Espalier extension file\n", espalierPath)
+		case !espalierHasPackageManifest(espalierPath):
+			if espalierDirIsEmpty(espalierPath) {
+				fmt.Printf("  [PARTIAL] %s exists but is empty\n", espalierPath)
+				if *installMissing || confirm("  Replace it with a fresh Espalier checkout now?") {
+					if err := os.Remove(espalierPath); err != nil {
+						fmt.Fprintf(os.Stderr, "  [ERROR] remove empty Espalier directory: %v\n", err)
+						if *installMissing {
+							os.Exit(1)
+						}
+					} else if err := installEspalier(espalierPath); err != nil {
+						fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
+						if *installMissing {
+							os.Exit(1)
+						}
+					} else {
+						fmt.Println("  [OK] Espalier installed and built")
+						entrypoint = espalierExtensionPath(espalierPath)
+					}
 				}
 			} else {
-				fmt.Println("  [OK] Espalier built")
-				entrypoint = espalierExtensionPath(espalierPath)
+				fmt.Printf("  [PARTIAL] %s exists but does not look like an Espalier checkout\n", espalierPath)
+				addSetupProblem(
+					fmt.Sprintf("Espalier path is not buildable: missing %s", filepath.Join(espalierPath, "package.json")),
+					fmt.Sprintf("Move or remove that directory, then re-run: groundskeeper setup --install-missing --espalier-path %s", espalierPath),
+				)
+				espalierProblemAdded = true
+			}
+		default:
+			fmt.Printf("  [PARTIAL] %s exists but dist/ is not built\n", espalierPath)
+			if *installMissing || confirm("  Build Espalier now? (requires bun)") {
+				if err := buildEspalier(espalierPath); err != nil {
+					fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
+					if *installMissing {
+						os.Exit(1)
+					}
+				} else {
+					fmt.Println("  [OK] Espalier built")
+					entrypoint = espalierExtensionPath(espalierPath)
+				}
 			}
 		}
 	} else {
@@ -959,7 +992,7 @@ func handleSetup(args []string) {
 			fmt.Println("  [SKIP] Workers will run without Espalier (degraded)")
 		}
 	}
-	if entrypoint = espalierExtensionPath(espalierPath); entrypoint == "" {
+	if entrypoint = espalierExtensionPath(espalierPath); entrypoint == "" && !espalierProblemAdded {
 		addSetupProblem("Espalier extension entrypoint is missing", fmt.Sprintf("Build Espalier or re-run: groundskeeper setup --install-missing --espalier-path %s", espalierPath))
 	}
 	fmt.Println()
@@ -1108,6 +1141,16 @@ func handleSetup(args []string) {
 	fmt.Println("  In the TUI, press tab to switch to Groundskeeper threads.")
 	fmt.Println("  p = prompt, f = fork, a = archive")
 	fmt.Println()
+}
+
+func espalierHasPackageManifest(path string) bool {
+	info, err := os.Stat(filepath.Join(path, "package.json"))
+	return err == nil && !info.IsDir()
+}
+
+func espalierDirIsEmpty(path string) bool {
+	entries, err := os.ReadDir(path)
+	return err == nil && len(entries) == 0
 }
 
 // installOMP downloads and installs the omp binary from GitHub releases.
@@ -1277,6 +1320,9 @@ func installEspalier(path string) error {
 func buildEspalier(path string) error {
 	if _, err := exec.LookPath("bun"); err != nil {
 		return fmt.Errorf("bun is required to build Espalier: install from https://bun.sh")
+	}
+	if !espalierHasPackageManifest(path) {
+		return fmt.Errorf("Espalier checkout is incomplete: missing %s", filepath.Join(path, "package.json"))
 	}
 	fmt.Println("  Installing Espalier dependencies (bun install)...")
 	cmd := exec.Command("bun", "install")
