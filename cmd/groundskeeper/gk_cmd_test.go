@@ -323,6 +323,56 @@ func TestSetupRefusesNonEmptyNonEspalierDir(t *testing.T) {
 	}
 }
 
+func TestSetupFailsWhenRequiredDependenciesMissing(t *testing.T) {
+	if os.Getenv("GK_SETUP_DEPS_HELPER") == "1" {
+		home := os.Getenv("GK_TEST_HOME")
+		bin := filepath.Join(home, "bin")
+		os.Setenv("HOME", home)
+		os.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+		os.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+		os.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+		os.Setenv("PATH", bin)
+		handleSetup([]string{"--non-interactive", "--espalier-path", filepath.Join(home, "espalier")})
+		return
+	}
+
+	home := t.TempDir()
+	bin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "omp"), []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'omp test'; exit 0; fi\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entrypoint := filepath.Join(home, "espalier", "dist", "extensions", "index.js")
+	if err := os.MkdirAll(filepath.Dir(entrypoint), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(entrypoint, []byte("export default function() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestSetupFailsWhenRequiredDependenciesMissing")
+	cmd.Env = append(os.Environ(), "GK_SETUP_DEPS_HELPER=1", "GK_TEST_HOME="+home)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("setup unexpectedly succeeded without tmux/git\n%s", out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"Setup incomplete.",
+		"tmux is required but not installed",
+		"git is required for Espalier clone/worktrees",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("setup missing dependency failure detail %q\n--- output ---\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "Setup complete!") {
+		t.Fatalf("setup printed success despite missing dependencies\n--- output ---\n%s", body)
+	}
+}
+
 func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 	cmd := exec.Command("bash", "-n", "../../install.sh")
 	if out, err := cmd.CombinedOutput(); err != nil {

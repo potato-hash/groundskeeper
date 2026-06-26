@@ -1101,11 +1101,13 @@ func handleSetup(args []string) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		fmt.Println("  [MISSING] tmux (required for Agent Deck session management)")
 		fmt.Println("  Install: brew install tmux  (macOS)  or  apt install tmux  (Linux)")
+		addSetupProblem("tmux is required but not installed", "Install tmux, then re-run: groundskeeper setup --install-missing")
 	} else {
 		fmt.Println("  [OK] tmux found")
 	}
 	if _, err := exec.LookPath("git"); err != nil {
 		fmt.Println("  [MISSING] git (required for worktree creation)")
+		addSetupProblem("git is required for Espalier clone/worktrees", "Install git, then re-run: groundskeeper setup --install-missing")
 	} else {
 		fmt.Println("  [OK] git found")
 	}
