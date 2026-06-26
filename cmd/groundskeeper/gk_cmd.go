@@ -1386,7 +1386,14 @@ func buildEspalier(path string) error {
 	cmd.Env = setupBaseEnv()
 	cmd.Stdout = newSetupRedactingWriter(os.Stdout)
 	cmd.Stderr = newSetupRedactingWriter(os.Stderr)
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	entrypoint := filepath.Join(path, "dist", "extensions", "index.js")
+	if info, err := os.Stat(entrypoint); err != nil || info.IsDir() {
+		return fmt.Errorf("Espalier build did not create extension entrypoint: %s", entrypoint)
+	}
+	return nil
 }
 
 func writeRecommendedOmpConfig(model string) (string, string, bool, error) {

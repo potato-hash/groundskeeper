@@ -1062,6 +1062,23 @@ func TestBuildEspalierRedactsStreamingSubprocessOutput(t *testing.T) {
 	}
 }
 
+func TestBuildEspalierRequiresExtensionEntrypoint(t *testing.T) {
+	espalier := t.TempDir()
+	if err := os.WriteFile(filepath.Join(espalier, "package.json"), []byte(`{"name":"espalier"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prependStubTool(t, "bun", "#!/usr/bin/env sh\nif [ \"$1\" = \"install\" ]; then exit 0; fi\nif [ \"$1\" = \"run\" ] && [ \"$2\" = \"build\" ]; then exit 0; fi\nexit 1\n")
+
+	err := buildEspalier(espalier)
+	if err == nil {
+		t.Fatal("buildEspalier unexpectedly succeeded without dist/extensions/index.js")
+	}
+	want := "Espalier build did not create extension entrypoint: " + filepath.Join(espalier, "dist", "extensions", "index.js")
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("buildEspalier error = %q, want %q", err, want)
+	}
+}
+
 func captureStdoutStderr(t *testing.T, fn func() error) (string, error) {
 	t.Helper()
 
