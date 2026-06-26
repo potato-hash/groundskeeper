@@ -51,12 +51,19 @@ func TestInstallScript_VerifiesChecksumBeforeExtract(t *testing.T) {
 		t.Fatalf("install.sh has no verify_download_checksum step (H1)")
 	}
 
-	verifyIdx := strings.Index(body, "verify_download_checksum")
-	extractIdx := strings.Index(body, "tar -xzf")
-	if extractIdx < 0 {
+	downloadIdx := strings.Index(body, `curl -fsSL "$DOWNLOAD_URL"`)
+	if downloadIdx < 0 {
+		t.Fatalf("install.sh no longer downloads release assets with DOWNLOAD_URL — update this test")
+	}
+	installPath := body[downloadIdx:]
+	verifyOffset := strings.Index(installPath, `verify_download_checksum "$TMP_DIR/groundskeeper.tar.gz"`)
+	extractOffset := strings.Index(installPath, "tar -xzf")
+	verifyIdx := downloadIdx + verifyOffset
+	extractIdx := downloadIdx + extractOffset
+	if extractOffset < 0 {
 		t.Fatalf("install.sh no longer extracts with `tar -xzf` — update this test")
 	}
-	if verifyIdx < 0 || verifyIdx > extractIdx {
+	if verifyOffset < 0 || verifyIdx > extractIdx {
 		t.Fatalf("checksum verification must run BEFORE `tar -xzf` (verifyIdx=%d, extractIdx=%d)", verifyIdx, extractIdx)
 	}
 }
@@ -78,7 +85,7 @@ func TestInstallScript_FallsBackToLocalSourceCheckoutWhenLatestMissing(t *testin
 	body := installScriptBody(t)
 
 	for _, want := range []string{
-		"No latest release found; building from local source checkout",
+		"building from local source checkout",
 		`-f "go.mod"`,
 		`-d "cmd/groundskeeper"`,
 		"go build -o",
@@ -93,7 +100,7 @@ func TestInstallScript_FallsBackToPublicModuleWhenLatestMissing(t *testing.T) {
 	body := installScriptBody(t)
 
 	for _, want := range []string{
-		"No latest release found; building from public source module",
+		"building from public source module",
 		`GOPROXY=direct GOBIN="$INSTALL_DIR" go install`,
 		`github.com/${REPO}/cmd/groundskeeper@main`,
 		`mv -f "$INSTALL_DIR/groundskeeper" "$INSTALL_DIR/$BINARY_NAME"`,
@@ -112,7 +119,12 @@ func TestInstallScript_PreflightsSupportedGoForSourceFallback(t *testing.T) {
 		"installed_go_version()",
 		"go_version_at_least()",
 		"source_build_go_ok()",
+		"latest_release_installable()",
+		"release_json_has_install_assets()",
+		"latest_release_unavailable_reason()",
 		"Groundskeeper source builds require Go ${SOURCE_BUILD_MIN_GO_VERSION} or newer.",
+		"latest_release_installable && return 0",
+		`Latest release ${LATEST_RELEASE_TAG} is missing`,
 		`[[ -f "go.mod" && -d "cmd/groundskeeper" ]] && source_build_go_ok`,
 		"elif source_build_go_ok; then",
 	} {
@@ -142,6 +154,43 @@ func TestInstallScript_UsesGroundskeeperInstallerCopy(t *testing.T) {
 		if strings.Contains(body, stale) {
 			t.Fatalf("install.sh still contains stale installer copy %q", stale)
 		}
+	}
+}
+
+func sourceAndCheckReleaseInstallable(t *testing.T, releaseJSON, version, goos, goarch string) int {
+	t.Helper()
+	script := installScriptPath(t)
+	prog := `set +e
+export AGENT_DECK_INSTALL_SH_SOURCE_ONLY=1
+source "$1"
+release_json_has_install_assets "$2" "$3" "$4" "$5"
+echo "RC=$?"`
+	cmd := exec.Command("bash", "-c", prog, "bash", script, releaseJSON, version, goos, goarch)
+	out, _ := cmd.CombinedOutput()
+	m := regexp.MustCompile(`RC=(\d+)`).FindStringSubmatch(string(out))
+	if m == nil {
+		t.Fatalf("could not parse release asset check exit code from output:\n%s", out)
+	}
+	if m[1] == "0" {
+		return 0
+	}
+	return 1
+}
+
+func TestReleaseJSONRequiresPlatformAssetAndChecksum(t *testing.T) {
+	const version = "v1.2.3"
+	good := `{"tag_name":"v1.2.3","assets":[{"name":"checksums.txt"},{"name":"groundskeeper_1.2.3_darwin_arm64.tar.gz"}]}`
+	missingPlatform := `{"tag_name":"v1.2.3","assets":[{"name":"checksums.txt"},{"name":"groundskeeper_1.2.3_linux_arm64.tar.gz"}]}`
+	missingChecksums := `{"tag_name":"v1.2.3","assets":[{"name":"groundskeeper_1.2.3_darwin_arm64.tar.gz"}]}`
+
+	if rc := sourceAndCheckReleaseInstallable(t, good, version, "darwin", "arm64"); rc != 0 {
+		t.Fatalf("expected latest release with platform tarball and checksums.txt to be installable, got rc=%d", rc)
+	}
+	if rc := sourceAndCheckReleaseInstallable(t, missingPlatform, version, "darwin", "arm64"); rc == 0 {
+		t.Fatal("latest release without this platform tarball must not be treated as installable")
+	}
+	if rc := sourceAndCheckReleaseInstallable(t, missingChecksums, version, "darwin", "arm64"); rc == 0 {
+		t.Fatal("latest release without checksums.txt must not be treated as installable")
 	}
 }
 

@@ -65,6 +65,27 @@ verify_download_checksum() {
     [[ -n "$actual" && "$expected" == "$actual" ]]
 }
 
+groundskeeper_release_asset_name() {
+    local version_num="${1#v}" os="$2" arch="$3"
+    printf 'groundskeeper_%s_%s_%s.tar.gz\n' "$version_num" "$os" "$arch"
+}
+
+release_json_has_asset() {
+    local release_json="$1" asset="$2"
+    printf '%s\n' "$release_json" |
+        tr ',' '\n' |
+        sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+        grep -Fxq "$asset"
+}
+
+release_json_has_install_assets() {
+    local release_json="$1" version="$2" os="$3" arch="$4"
+    local asset
+    asset="$(groundskeeper_release_asset_name "$version" "$os" "$arch")"
+    release_json_has_asset "$release_json" "$asset" &&
+        release_json_has_asset "$release_json" "checksums.txt"
+}
+
 # Wrap in main() so the entire script is read before execution.
 # Without this, `curl | bash` can fail because `read` commands
 # consume script bytes from stdin, or hit EOF with set -e.
@@ -108,6 +129,7 @@ SETUP_MODEL=""
 VERIFY_MODEL=false
 LATEST_RELEASE_CHECKED=false
 LATEST_RELEASE_TAG=""
+LATEST_RELEASE_JSON=""
 SOURCE_BUILD_MIN_GO_VERSION="1.25.11"
 # macOS package manager configuration
 MACOS_SUPPORTED_PKG_MGRS=("brew" "port")  # Order matters for preference
@@ -396,9 +418,24 @@ print_macos_manual_install_help() {
 
 fetch_latest_release_tag() {
     if [[ "$LATEST_RELEASE_CHECKED" != "true" ]]; then
-        LATEST_RELEASE_TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+        LATEST_RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
+        LATEST_RELEASE_TAG=$(printf '%s\n' "$LATEST_RELEASE_JSON" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
         LATEST_RELEASE_CHECKED=true
     fi
+}
+
+latest_release_installable() {
+    fetch_latest_release_tag
+    [[ -n "$LATEST_RELEASE_TAG" ]] || return 1
+    release_json_has_install_assets "$LATEST_RELEASE_JSON" "$LATEST_RELEASE_TAG" "$OS" "$ARCH"
+}
+
+latest_release_unavailable_reason() {
+    if [[ -z "$LATEST_RELEASE_TAG" ]]; then
+        echo "No latest release found"
+        return
+    fi
+    echo "Latest release ${LATEST_RELEASE_TAG} is missing $(groundskeeper_release_asset_name "$LATEST_RELEASE_TAG" "$OS" "$ARCH") or checksums.txt"
 }
 
 print_source_build_go_help() {
@@ -471,17 +508,17 @@ preflight_source_build_prereq() {
     [[ "$VERSION" == "latest" ]] || return 0
 
     fetch_latest_release_tag
-    [[ -n "$LATEST_RELEASE_TAG" ]] && return 0
+    latest_release_installable && return 0
 
     local go_version
     if go_version=$(installed_go_version); then
         if go_version_at_least "$go_version" "$SOURCE_BUILD_MIN_GO_VERSION"; then
             return 0
         fi
-        echo -e "${RED}Error: No Groundskeeper release binary is published yet, and Go ${go_version} is too old.${NC}"
+        echo -e "${RED}Error: $(latest_release_unavailable_reason), and Go ${go_version} is too old.${NC}"
         echo "Groundskeeper source builds require Go ${SOURCE_BUILD_MIN_GO_VERSION} or newer."
     else
-        echo -e "${RED}Error: No Groundskeeper release binary is published yet, and Go is not installed.${NC}"
+        echo -e "${RED}Error: $(latest_release_unavailable_reason), and Go is not installed.${NC}"
     fi
     print_source_build_go_help
     exit 1
@@ -640,17 +677,22 @@ INSTALLED_FROM_SOURCE=false
 if [[ "$VERSION" == "latest" ]]; then
     echo -e "Fetching latest version..."
     fetch_latest_release_tag
-    VERSION="$LATEST_RELEASE_TAG"
+    if latest_release_installable; then
+        VERSION="$LATEST_RELEASE_TAG"
+    else
+        VERSION=""
+    fi
     if [[ -z "$VERSION" ]]; then
+        latest_reason="$(latest_release_unavailable_reason)"
         if [[ -f "go.mod" && -d "cmd/groundskeeper" ]] && source_build_go_ok; then
-            echo -e "${YELLOW}No latest release found; building from local source checkout.${NC}"
+            echo -e "${YELLOW}${latest_reason}; building from local source checkout.${NC}"
             mkdir -p "$INSTALL_DIR"
             echo -e "Installing to ${GREEN}${INSTALL_DIR}/${BINARY_NAME}${NC}"
             go build -o "$INSTALL_DIR/$BINARY_NAME" ./cmd/groundskeeper
             chmod +x "$INSTALL_DIR/$BINARY_NAME"
             INSTALLED_FROM_SOURCE=true
         elif source_build_go_ok; then
-            echo -e "${YELLOW}No latest release found; building from public source module.${NC}"
+            echo -e "${YELLOW}${latest_reason}; building from public source module.${NC}"
             mkdir -p "$INSTALL_DIR"
             echo -e "Installing to ${GREEN}${INSTALL_DIR}/${BINARY_NAME}${NC}"
             GOPROXY=direct GOBIN="$INSTALL_DIR" go install "github.com/${REPO}/cmd/groundskeeper@main"

@@ -75,7 +75,13 @@ release:
 
     ### Installation
 
-    **Full Stack Install:**
+    **Binary Install (no provider key required):**
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh |
+      bash -s -- --non-interactive --skip-setup
+    ```
+
+    **Full Stack Install with OMP, Espalier, and model verification:**
     ```bash
     export OLLAMA_CLOUD_API_KEY='<your ollama cloud key>'
     curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh |

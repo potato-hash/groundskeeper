@@ -97,21 +97,58 @@ func TestPublicInstallCopyReflectsReleaseBinaryPath(t *testing.T) {
 	for _, want := range []string{
 		"Public installs prefer the latest release binary.",
 		"Go 1.25.11 or\nnewer is required only for prerelease/source-fallback testing.",
+		"Public binary install from GitHub, no provider key required:",
+		"bash -s -- --non-interactive --skip-setup",
+		"Full-stack install with OMP, Espalier, and model verification:",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Fatalf("README missing current release install copy %q", want)
 		}
 	}
 	for _, want := range []string{
+		"Binary Install (no provider key required):",
+		"bash -s -- --non-interactive --skip-setup",
+		"Full Stack Install with OMP, Espalier, and model verification:",
 		"export OLLAMA_CLOUD_API_KEY='<your ollama cloud key>'",
 		"bash -s -- --non-interactive --run-setup --model ollama-cloud/glm-5.2 --verify-model",
 	} {
 		if !strings.Contains(goreleaser, want) {
-			t.Fatalf("GoReleaser release notes must advertise full-stack install command; missing %q", want)
+			t.Fatalf("GoReleaser release notes must advertise public install command; missing %q", want)
 		}
 	}
-	if strings.Contains(goreleaser, "curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh | bash") {
-		t.Fatal("GoReleaser release notes must not advertise binary-only quick install as the primary path")
+}
+
+func TestReleaseAssetNamingStaysAligned(t *testing.T) {
+	installer := readRepoFile(t, "install.sh")
+	goreleaser := readRepoFile(t, ".goreleaser.yml")
+	workflow := readRepoFile(t, ".github/workflows/release.yml")
+
+	if !strings.Contains(installer, `groundskeeper_${VERSION_NUM}_${OS}_${ARCH}.tar.gz`) {
+		t.Fatal("installer must download groundskeeper_<version>_<os>_<arch>.tar.gz release assets")
+	}
+	for _, want := range []string{
+		"project_name: groundskeeper",
+		"{{ .ProjectName }}_",
+		"{{- .Version }}_",
+		"{{- .Os }}_",
+		"{{- .Arch }}",
+		"binary: groundskeeper",
+		"name_template: 'checksums.txt'",
+	} {
+		if !strings.Contains(goreleaser, want) {
+			t.Fatalf("GoReleaser asset naming must stay aligned with installer; missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"groundskeeper_${VERSION}_darwin_amd64.tar.gz",
+		"groundskeeper_${VERSION}_darwin_arm64.tar.gz",
+		"groundskeeper_${VERSION}_linux_amd64.tar.gz",
+		"groundskeeper_${VERSION}_linux_arm64.tar.gz",
+		"checksums.txt",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Fatalf("release workflow expected assets must stay aligned with installer; missing %q", want)
+		}
 	}
 }
 

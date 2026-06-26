@@ -646,7 +646,7 @@ func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 		`if [[ "$SETUP_MODE" == "run" ]]; then`,
 		"GOPROXY=direct",
 		"preflight_source_build_prereq",
-		"No Groundskeeper release binary is published yet",
+		"latest_release_unavailable_reason",
 		"SOURCE_BUILD_MIN_GO_VERSION=\"1.25.11\"",
 		"ensure_bun_for_first_run_setup",
 		"run_without_sensitive_env bash -o pipefail -c 'curl -fsSL https://bun.sh/install | bash'",
@@ -694,7 +694,7 @@ func TestInstallScriptPreflightsGoWhenNoRelease(t *testing.T) {
 	}
 	body := string(out)
 	for _, want := range []string{
-		"No Groundskeeper release binary is published yet",
+		"No latest release found",
 		"Pre-release installs fall back to building github.com/potato-hash/groundskeeper/cmd/groundskeeper@main",
 		"Install Go 1.25.11 or newer, then re-run the same install command.",
 	} {
@@ -736,7 +736,7 @@ exit 1
 	}
 	body := string(out)
 	for _, want := range []string{
-		"No Groundskeeper release binary is published yet",
+		"No latest release found",
 		"Go 1.24.13 is too old",
 		"Groundskeeper source builds require Go 1.25.11 or newer.",
 		"Install Go 1.25.11 or newer, then re-run the same install command.",

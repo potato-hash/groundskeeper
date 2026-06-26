@@ -37,7 +37,14 @@ This is an early public release. The bubbletea TUI shows Groundskeeper threads a
 
 ## Quick Start
 
-Public one-command install from GitHub:
+Public binary install from GitHub, no provider key required:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh |
+  bash -s -- --non-interactive --skip-setup
+```
+
+Full-stack install with OMP, Espalier, and model verification:
 
 ```sh
 export OLLAMA_CLOUD_API_KEY='<your ollama cloud key>'
