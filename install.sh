@@ -420,9 +420,18 @@ print_macos_manual_install_help() {
     done
 }
 
+github_api_curl() {
+    local url="$1"
+    local curl_args=(-fsSL)
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    fi
+    curl "${curl_args[@]}" "$url"
+}
+
 fetch_latest_release_tag() {
     if [[ "$LATEST_RELEASE_CHECKED" != "true" ]]; then
-        LATEST_RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
+        LATEST_RELEASE_JSON=$(github_api_curl "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
         LATEST_RELEASE_TAG=$(printf '%s\n' "$LATEST_RELEASE_JSON" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
         LATEST_RELEASE_CHECKED=true
     fi
@@ -736,7 +745,7 @@ if [[ "$INSTALLED_FROM_SOURCE" != "true" ]]; then
     echo ""
 
     # Check if the release exists but has no assets (common when GoReleaser hasn't completed yet)
-    RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/${VERSION}" 2>/dev/null || true)
+    RELEASE_JSON=$(github_api_curl "https://api.github.com/repos/${REPO}/releases/tags/${VERSION}" 2>/dev/null || true)
 
     # Parse asset list: prefer jq for reliability, fall back to grep
     if command -v jq &> /dev/null && [[ -n "$RELEASE_JSON" ]]; then

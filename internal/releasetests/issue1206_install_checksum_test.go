@@ -116,6 +116,8 @@ func TestInstallScript_PreflightsSupportedGoForSourceFallback(t *testing.T) {
 
 	for _, want := range []string{
 		`SOURCE_BUILD_MIN_GO_VERSION="1.25.11"`,
+		"github_api_curl()",
+		`-H "Authorization: Bearer ${GITHUB_TOKEN}"`,
 		"installed_go_version()",
 		"go_version_at_least()",
 		"source_build_go_ok()",
@@ -130,6 +132,19 @@ func TestInstallScript_PreflightsSupportedGoForSourceFallback(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("install.sh should preflight a supported Go version before source fallback; missing %q", want)
+		}
+	}
+}
+
+func TestInstallScript_AuthenticatesGitHubReleaseAPIWhenTokenIsAvailable(t *testing.T) {
+	body := installScriptBody(t)
+
+	for _, want := range []string{
+		`github_api_curl "https://api.github.com/repos/${REPO}/releases/latest"`,
+		`github_api_curl "https://api.github.com/repos/${REPO}/releases/tags/${VERSION}"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install.sh should use authenticated GitHub API helper for release metadata; missing %q", want)
 		}
 	}
 }
