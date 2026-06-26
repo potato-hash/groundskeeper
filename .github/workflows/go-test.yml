@@ -25,7 +25,20 @@ on:
       - '**.go'
       - 'go.mod'
       - 'go.sum'
+      - 'Makefile'
+      - 'README.md'
+      - '.goreleaser.yml'
+      - '.github/workflows/README.md'
       - '.github/workflows/go-test.yml'
+      - '.github/workflows/homebrew-verify.yml'
+      - '.github/workflows/public-install-smoke.yml'
+      - '.github/workflows/release-snapshot.yml'
+      - 'install.sh'
+      - 'uninstall.sh'
+      - 'scripts/run-public-install-smoke-workflow.sh'
+      - 'scripts/smoke-public-install.sh'
+      - 'scripts/verify-homebrew-install.sh'
+      - 'scripts/verify-install-state.sh'
   push:
     branches:
       - main
@@ -33,7 +46,20 @@ on:
       - '**.go'
       - 'go.mod'
       - 'go.sum'
+      - 'Makefile'
+      - 'README.md'
+      - '.goreleaser.yml'
+      - '.github/workflows/README.md'
       - '.github/workflows/go-test.yml'
+      - '.github/workflows/homebrew-verify.yml'
+      - '.github/workflows/public-install-smoke.yml'
+      - '.github/workflows/release-snapshot.yml'
+      - 'install.sh'
+      - 'uninstall.sh'
+      - 'scripts/run-public-install-smoke-workflow.sh'
+      - 'scripts/smoke-public-install.sh'
+      - 'scripts/verify-homebrew-install.sh'
+      - 'scripts/verify-install-state.sh'
 
 # One in-flight run per PR (or per branch on push). Rapid follow-up pushes
 # cancel the stale run instead of stacking 20-minute jobs.

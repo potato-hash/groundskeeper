@@ -198,6 +198,31 @@ func TestPublicInstallSmokeWorkflowRunsMacOSSecretBackedSmoke(t *testing.T) {
 	}
 }
 
+func TestGoTestWorkflowCoversInstallerFixtures(t *testing.T) {
+	workflow := readRepoFile(t, ".github/workflows/go-test.yml")
+
+	for _, want := range []string{
+		"'Makefile'",
+		"'README.md'",
+		"'.goreleaser.yml'",
+		"'.github/workflows/README.md'",
+		"'.github/workflows/go-test.yml'",
+		"'.github/workflows/homebrew-verify.yml'",
+		"'.github/workflows/public-install-smoke.yml'",
+		"'.github/workflows/release-snapshot.yml'",
+		"'install.sh'",
+		"'uninstall.sh'",
+		"'scripts/run-public-install-smoke-workflow.sh'",
+		"'scripts/smoke-public-install.sh'",
+		"'scripts/verify-homebrew-install.sh'",
+		"'scripts/verify-install-state.sh'",
+	} {
+		if count := strings.Count(workflow, want); count < 2 {
+			t.Fatalf("Go test workflow path filters should include %s for pull_request and push; found %d", want, count)
+		}
+	}
+}
+
 func readRepoFile(t *testing.T, rel string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(repoRoot(t), rel))
