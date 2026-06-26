@@ -1138,8 +1138,8 @@ maybe_run_first_run_setup() {
 }
 
 # Verify installation
-if "$INSTALL_DIR/$BINARY_NAME" version &> /dev/null; then
-    INSTALLED_VERSION=$("$INSTALL_DIR/$BINARY_NAME" version 2>&1 || echo "unknown")
+if env GROUNDSKEEPER_SUPPRESS_TMUX_WARNING=1 AGENTDECK_SUPPRESS_TMUX_WARNING=1 "$INSTALL_DIR/$BINARY_NAME" version &> /dev/null; then
+    INSTALLED_VERSION=$(env GROUNDSKEEPER_SUPPRESS_TMUX_WARNING=1 AGENTDECK_SUPPRESS_TMUX_WARNING=1 "$INSTALL_DIR/$BINARY_NAME" version 2>&1 || echo "unknown")
     echo ""
     echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║     Groundskeeper binary installed     ║${NC}"

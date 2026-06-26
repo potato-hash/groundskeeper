@@ -157,6 +157,19 @@ func TestInstallScript_UsesGroundskeeperInstallerCopy(t *testing.T) {
 	}
 }
 
+func TestInstallScript_SuppressesTmuxWarningDuringVersionProbe(t *testing.T) {
+	body := installScriptBody(t)
+
+	for _, want := range []string{
+		`env GROUNDSKEEPER_SUPPRESS_TMUX_WARNING=1 AGENTDECK_SUPPRESS_TMUX_WARNING=1 "$INSTALL_DIR/$BINARY_NAME" version &> /dev/null`,
+		`INSTALLED_VERSION=$(env GROUNDSKEEPER_SUPPRESS_TMUX_WARNING=1 AGENTDECK_SUPPRESS_TMUX_WARNING=1 "$INSTALL_DIR/$BINARY_NAME" version 2>&1 || echo "unknown")`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install.sh should keep its final version probe output clean; missing %q", want)
+		}
+	}
+}
+
 func sourceAndCheckReleaseInstallable(t *testing.T, releaseJSON, version, goos, goarch string) int {
 	t.Helper()
 	script := installScriptPath(t)
