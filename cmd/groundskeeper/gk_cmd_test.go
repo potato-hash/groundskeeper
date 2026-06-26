@@ -973,6 +973,11 @@ func TestShellUninstallUsesGroundskeeperPathsAndMarkers(t *testing.T) {
 		"raw.githubusercontent.com/potato-hash/groundskeeper",
 		"XDG config/data/cache",
 		"$(xdg_path XDG_DATA_HOME .local/share)",
+		"prompt_read()",
+		"</dev/tty",
+		`[[ -z "${HOME:-}" || "${HOME:0:1}" != "/" ]]`,
+		`[[ -z "$base" || "${base:0:1}" != "/" ]]`,
+		"prompt_read -n 1 -r",
 		"# Groundskeeper configuration",
 		"# End Groundskeeper configuration",
 		"groundskeeper-backup-",
@@ -983,6 +988,9 @@ func TestShellUninstallUsesGroundskeeperPathsAndMarkers(t *testing.T) {
 			t.Fatalf("uninstall.sh missing %q", want)
 		}
 	}
+	if strings.Contains(script, "read -p") {
+		t.Fatal("uninstall.sh must not use bare read -p; prompts need prompt_read for curl|bash use")
+	}
 	for _, stale := range []string{
 		"asheshgoplani/groundskeeper",
 		"~/.groundskeeper",
@@ -992,6 +1000,58 @@ func TestShellUninstallUsesGroundskeeperPathsAndMarkers(t *testing.T) {
 	} {
 		if strings.Contains(script, stale) {
 			t.Fatalf("uninstall.sh still contains stale text %q", stale)
+		}
+	}
+}
+
+func TestShellUninstallRejectsMissingHome(t *testing.T) {
+	bashPath := testBashPath(t)
+	cmd := exec.Command(bashPath, "../../uninstall.sh", "--dry-run")
+	cmd.Env = []string{
+		"HOME=",
+		"PATH=/usr/bin:/bin",
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("uninstall.sh unexpectedly succeeded without HOME\n%s", out)
+	}
+	if !strings.Contains(string(out), "cannot resolve an absolute HOME") {
+		t.Fatalf("uninstall.sh missing HOME guard error\n--- output ---\n%s", out)
+	}
+}
+
+func TestShellUninstallIgnoresRelativeXDGHome(t *testing.T) {
+	bashPath := testBashPath(t)
+	home := t.TempDir()
+	cmd := exec.Command(bashPath, "../../uninstall.sh", "--dry-run")
+	cmd.Env = []string{
+		"HOME=" + home,
+		"PATH=/usr/bin:/bin",
+		"XDG_CONFIG_HOME=relative-config",
+		"XDG_DATA_HOME=relative-data",
+		"XDG_CACHE_HOME=relative-cache",
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("uninstall.sh dry-run failed: %v\n%s", err, out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		filepath.Join(home, ".config", "groundskeeper"),
+		filepath.Join(home, ".local", "share", "groundskeeper"),
+		filepath.Join(home, ".cache", "groundskeeper"),
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("uninstall.sh missing fallback path %q\n--- output ---\n%s", want, body)
+		}
+	}
+	for _, forbidden := range []string{
+		"relative-config/groundskeeper",
+		"relative-data/groundskeeper",
+		"relative-cache/groundskeeper",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("uninstall.sh used relative XDG path %q\n--- output ---\n%s", forbidden, body)
 		}
 	}
 }

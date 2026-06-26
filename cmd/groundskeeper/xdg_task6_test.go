@@ -311,6 +311,8 @@ func TestXDGTask6HelperProcess(t *testing.T) {
 		// path when the home directory cannot be resolved. Caller clears
 		// HOME so os.UserHomeDir() fails on Linux.
 		handleUninstall([]string{"-y", "--keep-tmux-config"})
+	case "uninstall-self-delete":
+		handleUninstall([]string{"-y", "--keep-data", "--keep-tmux-config"})
 	default:
 		os.Exit(2)
 	}
@@ -358,6 +360,31 @@ func TestXDGTask6_UninstallAbortsWhenHomeUnresolvable(t *testing.T) {
 	// "Found:" / "will be removed" collection output must be absent.
 	if strings.Contains(string(out), "The following will be removed") {
 		t.Fatalf("uninstall collected/removed items despite unresolvable home:\n%s", out)
+	}
+}
+
+func TestXDGTask6_UninstallRemovesCurrentBinary(t *testing.T) {
+	home, _, _, _ := setupTask6XDGEnv(t)
+	binPath := filepath.Join(home, ".local", "bin", "groundskeeper")
+	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
+		t.Fatalf("mkdir bin dir: %v", err)
+	}
+	raw, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatalf("read test binary: %v", err)
+	}
+	if err := os.WriteFile(binPath, raw, 0o755); err != nil {
+		t.Fatalf("copy test binary: %v", err)
+	}
+
+	cmd := exec.Command(binPath, "-test.run=TestXDGTask6HelperProcess", "--", "uninstall-self-delete")
+	cmd.Env = append(os.Environ(), "AGENT_DECK_TASK6_HELPER_PROCESS=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper process failed: %v\n%s", err, string(out))
+	}
+	if _, err := os.Lstat(binPath); !os.IsNotExist(err) {
+		t.Fatalf("uninstall should remove the running groundskeeper binary path, lstat err=%v\n%s", err, out)
 	}
 }
 

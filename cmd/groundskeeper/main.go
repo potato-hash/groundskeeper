@@ -3460,10 +3460,6 @@ func handleUninstall(args []string) {
 	fmt.Println("Uninstalling...")
 	fmt.Println()
 
-	// Track the current binary path for self-deletion at the end
-	currentBinary, _ := os.Executable()
-	currentBinary, _ = filepath.EvalSymlinks(currentBinary)
-
 	// 1. Homebrew
 	if homebrewInstalled {
 		fmt.Println("Removing Homebrew package...")
@@ -3485,9 +3481,6 @@ func handleUninstall(args []string) {
 
 		fmt.Printf("Removing binary at %s...\n", item.path)
 
-		// Resolve symlink to check if it points to current binary
-		realPath, _ := filepath.EvalSymlinks(item.path)
-
 		// Check if we need sudo
 		dir := filepath.Dir(item.path)
 		testFile := filepath.Join(dir, ".groundskeeper-write-test")
@@ -3508,11 +3501,6 @@ func handleUninstall(args []string) {
 		} else {
 			f.Close()
 			os.Remove(testFile)
-
-			// Skip if this is our own binary (delete last)
-			if realPath == currentBinary {
-				continue
-			}
 
 			if err := os.Remove(item.path); err != nil {
 				fmt.Printf("Warning: failed to remove %s: %v\n", item.path, err)

@@ -111,7 +111,7 @@ func tarGzMembers(t *testing.T, archive string) []string {
 // chain of want (tar stores relative paths, so we match on suffix).
 func tarContains(members []string, want string) bool {
 	// Match on the deepest unique components to be robust to the archive's
-	// relative-path rooting (e.g. ".config/agent-deck/...").
+	// relative-path rooting (e.g. ".config/groundskeeper/...").
 	wantSuffix := want
 	if idx := strings.Index(want, string(filepath.Separator)+".config"); idx >= 0 {
 		wantSuffix = want[idx+1:]

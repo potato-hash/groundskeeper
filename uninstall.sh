@@ -15,6 +15,14 @@
 
 set -e
 
+prompt_read() {
+    if [[ -t 0 ]]; then
+        read "$@"
+    else
+        read "$@" </dev/tty || true
+    fi
+}
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -78,11 +86,16 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo ""
 fi
 
+if [[ -z "${HOME:-}" || "${HOME:0:1}" != "/" ]]; then
+    echo -e "${RED}Error: cannot resolve an absolute HOME; refusing to uninstall with invalid paths${NC}" >&2
+    exit 1
+fi
+
 xdg_path() {
     local env_name="$1"
     local fallback="$2"
     local base="${!env_name:-}"
-    if [[ -z "$base" ]]; then
+    if [[ -z "$base" || "${base:0:1}" != "/" ]]; then
         base="$HOME/$fallback"
     fi
     echo "$base/groundskeeper"
@@ -200,7 +213,8 @@ echo ""
 
 # Confirm unless non-interactive
 if [[ "$NON_INTERACTIVE" != "true" && "$DRY_RUN" != "true" ]]; then
-    read -p "Proceed with uninstall? [y/N] " -n 1 -r
+    printf "Proceed with uninstall? [y/N] "
+    prompt_read -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         echo "Uninstall cancelled."
@@ -281,7 +295,8 @@ if [[ "$KEEP_DATA" != "true" ]]; then
 
         # Offer backup for interactive runs.
         if [[ "$NON_INTERACTIVE" != "true" ]]; then
-            read -p "Create backup of data before removing? [Y/n] " -n 1 -r
+            printf "Create backup of data before removing? [Y/n] "
+            prompt_read -n 1 -r
             echo
             if [[ ! $REPLY =~ ^[Nn]$ ]]; then
                 BACKUP_FILE="$HOME/groundskeeper-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
