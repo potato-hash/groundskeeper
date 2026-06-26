@@ -899,10 +899,6 @@ func handleSetup(args []string) {
 	ompPath := lookupOMP()
 	if ompPath != "" {
 		fmt.Printf("  [OK] omp found at %s\n", ompPath)
-		out, vErr := exec.Command(ompPath, "--version").Output()
-		if vErr == nil {
-			fmt.Printf("  [OK] version: %s", string(out))
-		}
 	} else {
 		fmt.Println("  [MISSING] omp is not on PATH.")
 		if *installMissing || confirm("  Install OMP now?") {

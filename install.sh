@@ -1080,7 +1080,7 @@ if "$INSTALL_DIR/$BINARY_NAME" version &> /dev/null; then
         echo -e "  ${YELLOW}○ jj (needed for Espalier self-edit gates)${NC}"
     fi
     if command -v omp &> /dev/null; then
-        echo -e "  ✓ omp $(omp --version 2>/dev/null | head -1)"
+        echo -e "  ✓ omp found"
     else
         echo -e "  ${YELLOW}○ omp (installed by first-run setup if requested)${NC}"
     fi

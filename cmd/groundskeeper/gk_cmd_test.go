@@ -408,6 +408,40 @@ func TestSetupReportsAuthBrokerWithoutPrintingValue(t *testing.T) {
 	}
 }
 
+func TestSetupDoesNotRunOmpVersion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	value := "version-output-sentinel"
+	t.Setenv("GK_OMP_VERSION_OUTPUT", value)
+	marker := filepath.Join(home, "omp-version-called")
+	t.Setenv("GK_OMP_VERSION_MARKER", marker)
+	prependStubTool(t, "omp", "#!/usr/bin/env sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' \"$GK_OMP_VERSION_OUTPUT\"; touch \"$GK_OMP_VERSION_MARKER\"; exit 0; fi\nexit 0\n")
+	prependStubTool(t, "tmux", "#!/bin/sh\nexit 0\n")
+	prependStubTool(t, "git", "#!/bin/sh\nexit 0\n")
+
+	espalierDir := filepath.Join(home, "espalier")
+	entrypoint := filepath.Join(espalierDir, "dist", "extensions", "index.js")
+	if err := os.MkdirAll(filepath.Dir(entrypoint), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(entrypoint, []byte("export default function() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() {
+		handleSetup([]string{"--non-interactive", "--model", "openai/gpt-5.2", "--espalier-path", espalierDir})
+	})
+	if strings.Contains(out, value) {
+		t.Fatalf("setup printed output from omp --version\n--- output ---\n%s", out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("setup invoked omp --version, marker stat err=%v\n--- output ---\n%s", err, out)
+	}
+}
+
 func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 	cmd := exec.Command("bash", "-n", "../../install.sh")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -438,6 +472,20 @@ func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Fatalf("install.sh missing %q", want)
 		}
+	}
+}
+
+func TestInstallScriptDoesNotRunOmpVersionInDependencySummary(t *testing.T) {
+	body, err := os.ReadFile("../../install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+	if strings.Contains(script, "omp --version") {
+		t.Fatal("install.sh dependency summary must not run omp --version")
+	}
+	if !strings.Contains(script, "✓ omp found") {
+		t.Fatal("install.sh should report discovered omp without printing subprocess output")
 	}
 }
 
