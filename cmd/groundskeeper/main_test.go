@@ -108,6 +108,34 @@ func TestNestedSessionAllowsCLICommands(t *testing.T) {
 	})
 }
 
+func TestHelpAndVersionInvocationsSkipStartupTmuxWarning(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"no_args_tui_warns", nil, false},
+		{"root_help", []string{"--help"}, true},
+		{"root_help_short", []string{"-h"}, true},
+		{"help_command", []string{"help"}, true},
+		{"version_command", []string{"version"}, true},
+		{"version_flag", []string{"--version"}, true},
+		{"setup_help", []string{"setup", "--help"}, true},
+		{"setup_help_short", []string{"setup", "-h"}, true},
+		{"profile_setup_help", []string{"-p", "work", "setup", "--help"}, true},
+		{"real_setup_warns", []string{"setup", "--non-interactive"}, false},
+		{"real_command_warns", []string{"session", "list"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, args := extractProfileFlag(tc.args)
+			if got := isHelpOrVersionInvocation(args); got != tc.want {
+				t.Fatalf("isHelpOrVersionInvocation(%v) = %v, want %v", args, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestOuterTmuxGuard verifies the generic-tmux TUI guard added for issue #560.
 // When a user runs the interactive TUI inside a non-agentdeck tmux session,
 // detach semantics get surprising (Ctrl+Q returns to the outer tmux). The

@@ -622,6 +622,26 @@ func TestSetupDoesNotRunOmpVersion(t *testing.T) {
 	}
 }
 
+func TestSetupHelpMatchesHermesPolishSurface(t *testing.T) {
+	body, err := os.ReadFile("gk_cmd.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	for _, want := range []string{
+		`Usage: groundskeeper setup [options]`,
+		`Configure the full Groundskeeper stack: OMP, Espalier Core,`,
+		`Safe to re-run: existing installs, Espalier checkouts, and`,
+		`Options:`,
+		`Examples:`,
+		`groundskeeper setup --non-interactive --install-missing --model ollama-cloud/glm-5.2 --verify-model`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("setup help missing Hermes-polish copy %q", want)
+		}
+	}
+}
+
 func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 	cmd := exec.Command("bash", "-n", "../../install.sh")
 	if out, err := cmd.CombinedOutput(); err != nil {

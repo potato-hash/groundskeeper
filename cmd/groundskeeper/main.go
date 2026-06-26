@@ -236,7 +236,9 @@ func main() {
 	// Nudge macOS users whose tmux predates the upstream fix for the
 	// control-mode NULL-deref (tmux #4980, issue #737). Once per process,
 	// no-op on non-macOS, suppressible via GROUNDSKEEPER_SUPPRESS_TMUX_WARNING.
-	tmux.WarnIfVulnerableTmux()
+	if !isHelpOrVersionInvocation(args) {
+		tmux.WarnIfVulnerableTmux()
+	}
 
 	var webEnabled bool
 	var webArgs []string
@@ -948,6 +950,22 @@ func extractProfileFlag(args []string) (string, []string) {
 	}
 
 	return profile, remaining
+}
+
+func isHelpOrVersionInvocation(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "help", "--help", "-h", "version", "--version", "-v":
+		return true
+	}
+	for _, arg := range args[1:] {
+		if arg == "--help" || arg == "-h" {
+			return true
+		}
+	}
+	return false
 }
 
 // extractGroupFlag extracts -g or --group from args, returning the group path and remaining args.
