@@ -1444,7 +1444,7 @@ func TestPublicInstallSmokeScriptRejectsLeakedSecretOutput(t *testing.T) {
 	cmd = exec.Command("bash", "../../scripts/smoke-public-install.sh")
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
-		"OLLAMA_CLOUD_API_KEY=smoke-fixture-value",
+		"OLLAMA_CLOUD_API_KEY=k9xQz",
 		"GK_SMOKE_ALLOW_UNTRUSTED=1",
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
 		"GK_SMOKE_VERIFY_URL=file://"+filepath.Join(home, "verify-unused.sh"),
@@ -1454,7 +1454,7 @@ func TestPublicInstallSmokeScriptRejectsLeakedSecretOutput(t *testing.T) {
 		t.Fatalf("smoke-public-install.sh unexpectedly succeeded when installer output leaked a secret\n%s", out)
 	}
 	body := string(out)
-	if strings.Contains(body, "smoke-fixture-value") {
+	if strings.Contains(body, "k9xQz") {
 		t.Fatalf("smoke-public-install.sh printed leaked secret\n--- output ---\n%s", body)
 	}
 	if !strings.Contains(body, "sensitive value from OLLAMA_CLOUD_API_KEY appeared in install output") {
@@ -2146,6 +2146,7 @@ esac
 		"GK_SMOKE_INSTALL_URL=",
 		"GK_SMOKE_VERIFY_URL=",
 		"GK_SMOKE_USE_API_RAW=1",
+		"GITHUB_TOKEN=github-token-fixture",
 		"OLLAMA_CLOUD_API_KEY=smoke-fixture-value",
 		"OLLAMA_API_KEY=",
 		"OMP_AUTH_BROKER_TOKEN=",
@@ -2179,6 +2180,9 @@ esac
 	argLog := string(args)
 	if got := strings.Count(argLog, "Accept: application/vnd.github.raw"); got != 2 {
 		t.Fatalf("curl args should include GitHub raw Accept header twice, got %d\n--- args ---\n%s", got, argLog)
+	}
+	if got := strings.Count(argLog, "Authorization: Bearer github-token-fixture"); got != 2 {
+		t.Fatalf("curl args should include GitHub token Authorization header twice, got %d\n--- args ---\n%s", got, argLog)
 	}
 	for _, want := range []string{
 		"https://api.github.com/repos/potato-hash/groundskeeper/contents/install.sh?ref=" + ref,

@@ -22,6 +22,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     env:
+      GITHUB_TOKEN: ${{ github.token }}
       OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
       GK_SMOKE_REF: ${{ github.sha }}
       GK_SMOKE_USE_API_RAW: '1'
@@ -55,6 +56,8 @@ jobs:
           export XDG_DATA_HOME="$smoke_root/data"
           export XDG_CONFIG_HOME="$smoke_root/config"
           export XDG_CACHE_HOME="$smoke_root/cache"
-          curl -fsSL -H 'Accept: application/vnd.github.raw' \
+          curl -fsSL \
+            -H 'Accept: application/vnd.github.raw' \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/scripts/smoke-public-install.sh?ref=${GK_SMOKE_REF}" |
             bash

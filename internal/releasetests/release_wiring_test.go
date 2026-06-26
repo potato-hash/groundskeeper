@@ -165,11 +165,13 @@ func TestPublicInstallSmokeWorkflowRunsMacOSSecretBackedSmoke(t *testing.T) {
 		"runs-on: macos-latest",
 		"Require trusted workflow ref",
 		`if [[ "${GITHUB_REF_NAME}" != "main" ]]; then`,
+		"GITHUB_TOKEN: ${{ github.token }}",
 		"OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}",
 		"GK_SMOKE_REF: ${{ github.sha }}",
 		"GK_SMOKE_USE_API_RAW: '1'",
 		"GK_SMOKE_INSTALL_DIR",
 		"XDG_DATA_HOME",
+		`-H "Authorization: Bearer ${GITHUB_TOKEN}"`,
 		"contents/scripts/smoke-public-install.sh?ref=${GK_SMOKE_REF}",
 	} {
 		if !strings.Contains(workflow, want) {

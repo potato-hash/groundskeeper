@@ -100,7 +100,11 @@ fetch_script() {
   local url="$1"
   case "$url" in
     https://api.github.com/repos/*/contents/*)
-      curl -fsSL -H 'Accept: application/vnd.github.raw' "$url"
+      local curl_args=(-fsSL -H 'Accept: application/vnd.github.raw')
+      if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+      fi
+      curl "${curl_args[@]}" "$url"
       ;;
     *)
       curl -fsSL "$url"
