@@ -89,7 +89,7 @@ scan_secret_values() {
       hits="$(
         find "$dir" \
           \( -path '*/.git/*' -o -path '*/node_modules/*' \) -prune -o \
-          -type f -exec grep -IlF -- "$value" {} + 2>/dev/null || true
+          -type f -exec grep -lF -- "$value" {} + 2>/dev/null || true
       )"
       if [[ -n "$hits" ]]; then
         found=1

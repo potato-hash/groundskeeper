@@ -1101,7 +1101,7 @@ func handleSetup(args []string) {
 	fmt.Println("── 5/5 · Dependencies ────────────────────")
 	fmt.Println()
 	if _, err := exec.LookPath("tmux"); err != nil {
-		fmt.Println("  [MISSING] tmux (required for Agent Deck session management)")
+		fmt.Println("  [MISSING] tmux (required for Groundskeeper session management)")
 		fmt.Println("  Install: brew install tmux  (macOS)  or  apt install tmux  (Linux)")
 		addSetupProblem("tmux is required but not installed", "Install tmux, then re-run: groundskeeper setup --install-missing")
 	} else {

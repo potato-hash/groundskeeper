@@ -710,7 +710,7 @@ func TestInstallStateVerifierScansWithoutPrintingSecretValues(t *testing.T) {
 		"dist/extensions/index.js",
 		"$data_dir/gk.db",
 		"$HOME/.omp",
-		"grep -IlF -- \"$value\"",
+		"grep -lF -- \"$value\"",
 		"sensitive value from $name persisted in $hit",
 		"Summary:",
 		"Next commands:",
@@ -793,6 +793,66 @@ func TestInstallStateVerifierPrintsSummaryWithoutSecretValues(t *testing.T) {
 		}
 	}
 	if strings.Contains(body, "summary-fixture-secret") {
+		t.Fatalf("verify output printed a secret value\n--- output ---\n%s", body)
+	}
+}
+
+func TestInstallStateVerifierScansBinaryStateFiles(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, "bin")
+	data := filepath.Join(home, "data")
+	config := filepath.Join(home, "config")
+	cache := filepath.Join(home, "cache")
+	espalier := filepath.Join(data, "groundskeeper", "espalier")
+	ompAgent := filepath.Join(home, ".omp", "agent")
+	sensitiveName := "OLLAMA_CLOUD_" + "API" + "_KEY"
+	for _, dir := range []string{
+		bin,
+		filepath.Join(data, "groundskeeper"),
+		filepath.Join(config, "groundskeeper"),
+		filepath.Join(cache, "groundskeeper"),
+		filepath.Join(espalier, "node_modules"),
+		filepath.Join(espalier, "dist", "extensions"),
+		ompAgent,
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"groundskeeper", "omp"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, body := range map[string][]byte{
+		filepath.Join(data, "groundskeeper", "gk.db"):             []byte("db"),
+		filepath.Join(espalier, "package.json"):                   []byte(`{"name":"espalier"}` + "\n"),
+		filepath.Join(espalier, "dist", "extensions", "index.js"): []byte("export default {}\n"),
+		filepath.Join(ompAgent, "agent.db"):                       []byte("sqlite\x00binary-state-sentinel-value\x00tail"),
+	} {
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cmd := exec.Command("bash", "../../scripts/verify-install-state.sh")
+	cmd.Env = []string{
+		"HOME=" + home,
+		"PATH=" + bin + string(os.PathListSeparator) + "/usr/bin:/bin:/usr/sbin:/sbin",
+		"XDG_DATA_HOME=" + data,
+		"XDG_CONFIG_HOME=" + config,
+		"XDG_CACHE_HOME=" + cache,
+		sensitiveName + "=binary-state-sentinel-value",
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("verify-install-state.sh unexpectedly passed with secret persisted in binary state\n%s", out)
+	}
+	body := string(out)
+	if !strings.Contains(body, "sensitive value from "+sensitiveName+" persisted in "+filepath.Join(ompAgent, "agent.db")) {
+		t.Fatalf("verify output missing binary persistence failure\n--- output ---\n%s", body)
+	}
+	if strings.Contains(body, "binary-state-sentinel-value") {
 		t.Fatalf("verify output printed a secret value\n--- output ---\n%s", body)
 	}
 }
