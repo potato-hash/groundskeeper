@@ -685,10 +685,12 @@ func TestPublicInstallSmokeScriptRunsVerifierAfterCleanInstall(t *testing.T) {
 	home := t.TempDir()
 	installDir := filepath.Join(home, "bin")
 	argsPath := filepath.Join(home, "install-args.txt")
+	espalierPathLog := filepath.Join(home, "espalier-path.txt")
 	installStub := filepath.Join(home, "install.sh")
 	verifyStub := filepath.Join(home, "verify.sh")
 	installBody := `#!/usr/bin/env sh
 printf '%s\n' "$@" > "$HOME/install-args.txt"
+printf '%s\n' "$GK_ESPALIER_PATH" > "$HOME/espalier-path.txt"
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--dir" ]; then
     mkdir -p "$2"
@@ -711,6 +713,8 @@ printf 'install clean\n'
 	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
+		"XDG_DATA_HOME=",
+		"GK_ESPALIER_PATH=",
 		"GK_SMOKE_VERIFY_MODEL=0",
 		"GK_SMOKE_INSTALL_DIR="+installDir,
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
@@ -737,6 +741,14 @@ printf 'install clean\n'
 	}
 	if !strings.Contains(string(args), "--dir\n"+installDir+"\n") {
 		t.Fatalf("smoke installer args missing custom --dir %q\n--- args ---\n%s", installDir, args)
+	}
+	espalierPath, err := os.ReadFile(espalierPathLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEspalierPath := filepath.Join(home, ".local", "share", "groundskeeper", "espalier")
+	if strings.TrimSpace(string(espalierPath)) != wantEspalierPath {
+		t.Fatalf("smoke did not default GK_ESPALIER_PATH to managed data dir: got %q want %q", strings.TrimSpace(string(espalierPath)), wantEspalierPath)
 	}
 }
 
