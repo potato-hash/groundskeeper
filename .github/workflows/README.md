@@ -41,6 +41,12 @@ anything — they can fail silently without affecting merges.
 |---|---|---|
 | `weekly-regression.yml` | Sunday 00:00 UTC cron, or `workflow_dispatch` | Runs the Playwright visual-regression suite (`tests/e2e/pw-visual-regression.config.ts`) and Lighthouse CI (`.lighthouserc.json`) against a freshly built `agent-deck web` server. On failure, opens or appends to a single `Weekly regression check: … [date]` issue labelled `regression,automated` (idempotent — no duplicate issues on back-to-back failures). **Alert-only** — does not block any PR. |
 
+## Manual verification
+
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `public-install-smoke.yml` | `workflow_dispatch` | Runs the public `scripts/smoke-public-install.sh` path on `macos-latest` with temporary XDG/install dirs and `secrets.OLLAMA_CLOUD_API_KEY`. It fetches scripts through the GitHub Contents API raw endpoint for fresh-ref testing, and defaults the smoke script ref to the workflow ref. This is the clean macOS full-stack install smoke; it is manual so the repo can stay green until the smoke secret is configured. |
+
 > **Note on the v1.7.70 fix:** the bubbletea cancel-reader failure that broke
 > `agent-deck web` on headless CI (`error creating cancelreader: bubbletea:
 > error creating cancel reader: add reader to epoll interest list`) is fixed

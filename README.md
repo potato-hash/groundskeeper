@@ -81,6 +81,19 @@ adds it to `PATH` for verification.
 Set `GK_SMOKE_USE_API_RAW=1` to fetch the installer and verifier through the
 GitHub Contents API raw endpoint when testing a freshly pushed `main`.
 
+Clean macOS runner smoke in GitHub Actions:
+
+```sh
+gh secret set OLLAMA_CLOUD_API_KEY --repo potato-hash/groundskeeper
+gh workflow run public-install-smoke.yml --repo potato-hash/groundskeeper --ref main -f ref=main
+```
+
+That workflow runs the same public smoke wrapper on `macos-latest` with
+temporary install, config, data, and cache directories. It uses the GitHub
+Contents API raw endpoint so freshly pushed refs are not hidden by
+`raw.githubusercontent.com` cache lag; when `ref` is omitted, it fetches scripts
+from the workflow ref.
+
 Local development:
 
 ```sh

@@ -951,7 +951,12 @@ func handleSetup(args []string) {
 			if espalierDirIsEmpty(espalierPath) {
 				fmt.Printf("  [PARTIAL] %s exists but is empty\n", espalierPath)
 				if *installMissing || confirm("  Replace it with a fresh Espalier checkout now?") {
-					if err := os.Remove(espalierPath); err != nil {
+					if err := ensureBunForEspalierBuild(*installMissing, confirm); err != nil {
+						fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
+						if *installMissing {
+							os.Exit(1)
+						}
+					} else if err := os.Remove(espalierPath); err != nil {
 						fmt.Fprintf(os.Stderr, "  [ERROR] remove empty Espalier directory: %v\n", err)
 						if *installMissing {
 							os.Exit(1)
@@ -976,7 +981,12 @@ func handleSetup(args []string) {
 		default:
 			fmt.Printf("  [PARTIAL] %s exists but dist/ is not built\n", espalierPath)
 			if *installMissing || confirm("  Build Espalier now? (requires bun)") {
-				if err := buildEspalier(espalierPath); err != nil {
+				if err := ensureBunForEspalierBuild(*installMissing, confirm); err != nil {
+					fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
+					if *installMissing {
+						os.Exit(1)
+					}
+				} else if err := buildEspalier(espalierPath); err != nil {
 					fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
 					if *installMissing {
 						os.Exit(1)
@@ -989,7 +999,12 @@ func handleSetup(args []string) {
 	} else {
 		fmt.Printf("  [MISSING] Espalier not found at %s\n", espalierPath)
 		if *installMissing || confirm("  Clone and build Espalier now?") {
-			if err := installEspalier(espalierPath); err != nil {
+			if err := ensureBunForEspalierBuild(*installMissing, confirm); err != nil {
+				fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
+				if *installMissing {
+					os.Exit(1)
+				}
+			} else if err := installEspalier(espalierPath); err != nil {
 				fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
 				if *installMissing {
 					os.Exit(1)
@@ -1109,10 +1124,10 @@ func handleSetup(args []string) {
 	} else {
 		fmt.Println("  [OK] git found")
 	}
-	if _, err := exec.LookPath("bun"); err != nil {
+	if bunPath := lookupBun(); bunPath == "" {
 		fmt.Println("  [OPTIONAL] bun not found (needed to build Espalier)")
 	} else {
-		fmt.Println("  [OK] bun found")
+		fmt.Printf("  [OK] bun found at %s\n", bunPath)
 	}
 	if _, err := exec.LookPath("jj"); err != nil {
 		fmt.Println("  [OPTIONAL] jj not found (needed for Espalier self-edit gates)")
@@ -1180,6 +1195,16 @@ func installOMP() error {
 	return cmd.Run()
 }
 
+func installBun() error {
+	fmt.Println("  Installing Bun for Espalier builds...")
+	cmd := exec.Command("bash", "-o", "pipefail", "-c", "curl -fsSL https://bun.sh/install | bash")
+	cmd.Env = setupBaseEnv()
+	cmd.Stdout = newSetupRedactingWriter(os.Stdout)
+	cmd.Stderr = newSetupRedactingWriter(os.Stderr)
+	cmd.Stdin = os.Stdin
+	return cmd.Run()
+}
+
 func lookupOMP() string {
 	if p, err := exec.LookPath("omp"); err == nil {
 		return p
@@ -1194,6 +1219,43 @@ func lookupOMP() string {
 		}
 	}
 	return ""
+}
+
+func lookupBun() string {
+	if p, err := exec.LookPath("bun"); err == nil {
+		return p
+	}
+	home := os.Getenv("HOME")
+	if bunInstall := os.Getenv("BUN_INSTALL"); bunInstall != "" {
+		candidate := filepath.Join(bunInstall, "bin", "bun")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
+			return candidate
+		}
+	}
+	if home == "" {
+		return ""
+	}
+	candidate := filepath.Join(home, ".bun", "bin", "bun")
+	if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
+		return candidate
+	}
+	return ""
+}
+
+func ensureBunForEspalierBuild(installMissing bool, confirm func(string) bool) error {
+	if lookupBun() != "" {
+		return nil
+	}
+	if !installMissing && !confirm("  Install Bun now? (required to build Espalier)") {
+		return fmt.Errorf("bun is required to build Espalier: install from https://bun.sh")
+	}
+	if err := installBun(); err != nil {
+		return err
+	}
+	if lookupBun() == "" {
+		return fmt.Errorf("Bun installer completed but bun is still not discoverable")
+	}
+	return nil
 }
 
 func hasModelEnvCredential(model string) bool {
@@ -1368,14 +1430,15 @@ func installEspalier(path string) error {
 
 // buildEspalier runs bun install + bun build in the espalier directory.
 func buildEspalier(path string) error {
-	if _, err := exec.LookPath("bun"); err != nil {
+	bunPath := lookupBun()
+	if bunPath == "" {
 		return fmt.Errorf("bun is required to build Espalier: install from https://bun.sh")
 	}
 	if !espalierHasPackageManifest(path) {
 		return fmt.Errorf("Espalier checkout is incomplete: missing %s", filepath.Join(path, "package.json"))
 	}
 	fmt.Println("  Installing Espalier dependencies (bun install)...")
-	cmd := exec.Command("bun", "install")
+	cmd := exec.Command(bunPath, "install")
 	cmd.Dir = path
 	cmd.Env = setupBaseEnv()
 	cmd.Stdout = newSetupRedactingWriter(os.Stdout)
@@ -1384,7 +1447,7 @@ func buildEspalier(path string) error {
 		return fmt.Errorf("bun install: %w", err)
 	}
 	fmt.Println("  Building Espalier (bun build)...")
-	cmd = exec.Command("bun", "run", "build")
+	cmd = exec.Command(bunPath, "run", "build")
 	cmd.Dir = path
 	cmd.Env = setupBaseEnv()
 	cmd.Stdout = newSetupRedactingWriter(os.Stdout)

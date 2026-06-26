@@ -281,6 +281,121 @@ func TestSetupInstallMissingReplacesEmptyEspalierDir(t *testing.T) {
 	}
 }
 
+func TestLookupBunFindsHomeBunBin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("BUN_INSTALL", "")
+	t.Setenv("PATH", filepath.Join(home, "empty-bin"))
+	bunPath := filepath.Join(home, ".bun", "bin", "bun")
+	if err := os.MkdirAll(filepath.Dir(bunPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bunPath, []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := lookupBun(); got != bunPath {
+		t.Fatalf("lookupBun() = %q, want %q", got, bunPath)
+	}
+}
+
+func TestLookupBunFindsBunInstallBin(t *testing.T) {
+	home := t.TempDir()
+	bunInstall := filepath.Join(home, "custom-bun")
+	t.Setenv("HOME", filepath.Join(home, "unused-home"))
+	t.Setenv("BUN_INSTALL", bunInstall)
+	t.Setenv("PATH", filepath.Join(home, "empty-bin"))
+	bunPath := filepath.Join(bunInstall, "bin", "bun")
+	if err := os.MkdirAll(filepath.Dir(bunPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bunPath, []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := lookupBun(); got != bunPath {
+		t.Fatalf("lookupBun() = %q, want %q", got, bunPath)
+	}
+}
+
+func TestInstallBunUsesPipefail(t *testing.T) {
+	body, err := os.ReadFile("gk_cmd.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `exec.Command("bash", "-o", "pipefail", "-c", "curl -fsSL https://bun.sh/install | bash")`
+	if !strings.Contains(string(body), want) {
+		t.Fatalf("installBun must use pipefail so curl failures abort the installer")
+	}
+}
+
+func TestSetupInstallMissingInstallsBunForEspalierBuild(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeStub := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("write %s stub: %v", name, err)
+		}
+	}
+	writeStub("omp", "#!/usr/bin/env sh\nexit 0\n")
+	writeStub("tmux", "#!/usr/bin/env sh\nexit 0\n")
+	writeStub("git", "#!/usr/bin/env sh\nif [ \"$1\" = \"clone\" ]; then mkdir -p \"$3\"; printf '{\"scripts\":{\"build\":\"bun build\"}}\\n' > \"$3/package.json\"; exit 0; fi\nexit 1\n")
+	writeStub("curl", `#!/usr/bin/env sh
+cat <<'INSTALL_BUN'
+mkdir -p "$HOME/.bun/bin"
+cat > "$HOME/.bun/bin/bun" <<'BUN'
+#!/usr/bin/env sh
+if [ "$1" = "install" ]; then
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "build" ]; then
+  mkdir -p dist/extensions
+  printf 'export default function() {}\n' > dist/extensions/index.js
+  exit 0
+fi
+if [ "$1" = "--version" ]; then
+  printf '1.3.14\n'
+  exit 0
+fi
+exit 1
+BUN
+chmod +x "$HOME/.bun/bin/bun"
+INSTALL_BUN
+`)
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+	t.Setenv("BUN_INSTALL", "")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+"/bin"+string(os.PathListSeparator)+"/usr/bin")
+
+	espalierDir := filepath.Join(home, "espalier")
+	out := captureStdout(t, func() {
+		handleSetup([]string{"--non-interactive", "--install-missing", "--espalier-path", espalierDir})
+	})
+	for _, want := range []string{
+		"Installing Bun for Espalier builds",
+		"Cloning Espalier to " + espalierDir,
+		"[OK] Espalier installed and built",
+		"Setup complete!",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(home, ".bun", "bin", "bun")); err != nil {
+		t.Fatalf("expected setup to install bun stub: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(espalierDir, "dist", "extensions", "index.js")); err != nil {
+		t.Fatalf("expected setup to build Espalier with installed bun: %v", err)
+	}
+}
+
 func TestSetupRefusesNonEmptyNonEspalierDir(t *testing.T) {
 	if os.Getenv("GK_SETUP_BAD_ESPALIER_HELPER") == "1" {
 		home := os.Getenv("GK_TEST_HOME")
@@ -469,6 +584,11 @@ func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 		"preflight_source_build_prereq",
 		"No Groundskeeper release binary is published yet",
 		"SOURCE_BUILD_MIN_GO_VERSION=\"1.25.11\"",
+		"ensure_bun_for_first_run_setup",
+		"run_without_sensitive_env bash -o pipefail -c 'curl -fsSL https://bun.sh/install | bash'",
+		"$HOME/.bun/bin/bun",
+		"if ! ensure_bun_for_first_run_setup; then",
+		"return 1\n    fi\n\n    if [[ \"$SKIP_OPTIONAL_DEPS\" == \"true\" ]]; then",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("install.sh missing %q", want)
@@ -613,7 +733,7 @@ esac
 	}
 }
 
-func TestInstallScriptDoesNotClaimFullSuccessBeforeRunSetup(t *testing.T) {
+func TestInstallScriptAbortsRunSetupWhenBunInstallFails(t *testing.T) {
 	bashPath := testBashPath(t)
 	home := t.TempDir()
 	bin := t.TempDir()
@@ -624,16 +744,16 @@ if [ "$1" = "env" ] && [ "$2" = "GOVERSION" ]; then
   printf 'go1.25.11\n'
   exit 0
 fi
-if [ "$1" = "install" ]; then
-  mkdir -p "$GOBIN"
-  cat > "$GOBIN/groundskeeper" <<'GK'
-#!/bin/sh
-case "$1" in
-  version) printf 'groundskeeper test\n'; exit 0 ;;
-  setup) printf 'setup failed intentionally\n'; exit 42 ;;
-esac
-exit 0
-GK
+	if [ "$1" = "install" ]; then
+	  mkdir -p "$GOBIN"
+	  cat > "$GOBIN/groundskeeper" <<-'GK'
+	#!/bin/sh
+	case "$1" in
+	  version) printf 'groundskeeper test\n'; exit 0 ;;
+	  setup) printf 'setup should not run\n'; exit 42 ;;
+	esac
+	exit 0
+	GK
   chmod +x "$GOBIN/groundskeeper"
   exit 0
 fi
@@ -648,10 +768,11 @@ exit 1
 	}
 
 	cmd := exec.Command(bashPath, "../../install.sh", "--non-interactive", "--run-setup", "--model", "test/provider")
-	cmd.Env = append(os.Environ(),
-		"HOME="+home,
-		"PATH="+bin+string(os.PathListSeparator)+"/usr/bin:/bin:/usr/sbin:/sbin",
-	)
+	cmd.Env = []string{
+		"HOME=" + home,
+		"PATH=" + bin + string(os.PathListSeparator) + "/usr/bin:/bin:/usr/sbin:/sbin",
+		"TMPDIR=" + t.TempDir(),
+	}
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("install.sh unexpectedly succeeded when --run-setup failed\n%s", out)
@@ -659,15 +780,104 @@ exit 1
 	body := string(out)
 	for _, want := range []string{
 		"Groundskeeper binary installed",
-		"setup failed intentionally",
+		"Bun is required to build Espalier during first-run setup.",
+		"Error: Bun install failed.",
 		"First-run setup did not complete.",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("install output missing %q\n--- output ---\n%s", want, body)
 		}
 	}
+	if strings.Contains(body, "setup should not run") {
+		t.Fatalf("install.sh ran setup after Bun install failed\n--- output ---\n%s", body)
+	}
 	if strings.Contains(body, "Installation successful!") {
 		t.Fatalf("install.sh claimed full success before setup completed\n--- output ---\n%s", body)
+	}
+}
+
+func TestInstallScriptExportsHomeBunBinForRunSetup(t *testing.T) {
+	bashPath := testBashPath(t)
+	home := t.TempDir()
+	bin := t.TempDir()
+	setupMarker := filepath.Join(home, "setup-called")
+	stubs := map[string]string{
+		"curl": `#!/bin/sh
+case "$*" in
+  *bun.sh/install*)
+    cat <<'INSTALL_BUN'
+mkdir -p "$HOME/.bun/bin"
+cat > "$HOME/.bun/bin/bun" <<'BUN'
+#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '1.3.14\n'
+  exit 0
+fi
+exit 0
+BUN
+chmod +x "$HOME/.bun/bin/bun"
+INSTALL_BUN
+    exit 0
+    ;;
+esac
+exit 22
+`,
+		"go": fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "env" ] && [ "$2" = "GOVERSION" ]; then
+  printf 'go1.25.11\n'
+  exit 0
+fi
+if [ "$1" = "install" ]; then
+  mkdir -p "$GOBIN"
+	  cat > "$GOBIN/groundskeeper" <<-'GK'
+#!/bin/sh
+case "$1" in
+  version) printf 'groundskeeper test\n'; exit 0 ;;
+  setup)
+    command -v bun >/dev/null || { printf 'bun missing from setup PATH\n'; exit 43; }
+    bun --version
+    printf 'setup saw bun\n'
+    touch %q
+    exit 0
+    ;;
+esac
+exit 0
+GK
+  chmod +x "$GOBIN/groundskeeper"
+  exit 0
+fi
+exit 1
+`, setupMarker),
+		"tmux": "#!/bin/sh\nif [ \"$1\" = \"-V\" ]; then printf 'tmux test\\n'; fi\nexit 0\n",
+	}
+	for name, body := range stubs {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cmd := exec.Command(bashPath, "../../install.sh", "--non-interactive", "--run-setup", "--model", "test/provider")
+	cmd.Env = []string{
+		"HOME=" + home,
+		"PATH=" + bin + string(os.PathListSeparator) + "/usr/bin:/bin:/usr/sbin:/sbin",
+		"TMPDIR=" + t.TempDir(),
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install.sh failed even though Bun install succeeded: %v\n%s", err, out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"Bun available at " + filepath.Join(home, ".bun", "bin", "bun"),
+		"setup saw bun",
+		"Get started:",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install output missing %q\n--- output ---\n%s", want, body)
+		}
+	}
+	if _, err := os.Stat(setupMarker); err != nil {
+		t.Fatalf("setup stub did not run successfully: %v\n--- output ---\n%s", err, body)
 	}
 }
 

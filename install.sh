@@ -975,6 +975,63 @@ setup_command_display() {
     fi
 }
 
+find_bun() {
+    if command -v bun >/dev/null 2>&1; then
+        command -v bun
+        return 0
+    fi
+    if [[ -n "${BUN_INSTALL:-}" && -x "$BUN_INSTALL/bin/bun" ]]; then
+        echo "$BUN_INSTALL/bin/bun"
+        return 0
+    fi
+    if [[ -x "$HOME/.bun/bin/bun" ]]; then
+        echo "$HOME/.bun/bin/bun"
+        return 0
+    fi
+    return 1
+}
+
+run_without_sensitive_env() {
+    local env_args=()
+    local name value upper
+    while IFS='=' read -r name value; do
+        [[ -n "$name" ]] || continue
+        upper="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
+        case "$upper" in
+            *API_KEY*|*TOKEN*|*SECRET*|*PASSWORD*|*PRIVATE_KEY*|*ACCESS_KEY*)
+                env_args+=("-u" "$name")
+                ;;
+        esac
+    done < <(env)
+    env "${env_args[@]}" "$@"
+}
+
+ensure_bun_for_first_run_setup() {
+    local bun_path
+    if bun_path="$(find_bun)"; then
+        export PATH="$(dirname "$bun_path"):$PATH"
+        return 0
+    fi
+
+    echo "Bun is required to build Espalier during first-run setup."
+    echo "Installing Bun from https://bun.sh/install ..."
+    if ! run_without_sensitive_env bash -o pipefail -c 'curl -fsSL https://bun.sh/install | bash'; then
+        echo -e "${RED}Error: Bun install failed.${NC}"
+        echo "Install Bun manually from https://bun.sh, then re-run: $(setup_command_display) --install-missing"
+        return 1
+    fi
+
+    export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
+    export PATH="$BUN_INSTALL/bin:$PATH"
+    if ! bun_path="$(find_bun)"; then
+        echo -e "${RED}Error: Bun installer completed but bun is still not discoverable.${NC}"
+        echo "Add $HOME/.bun/bin to PATH, then re-run: $(setup_command_display) --install-missing"
+        return 1
+    fi
+    export PATH="$(dirname "$bun_path"):$PATH"
+    echo -e "${GREEN}Bun available at $bun_path${NC}"
+}
+
 run_first_run_setup() {
     local installed_binary="${INSTALL_DIR}/${BINARY_NAME}"
     local setup_args=()
@@ -983,6 +1040,9 @@ run_first_run_setup() {
     fi
     if [[ "$VERIFY_MODEL" == "true" ]]; then
         setup_args+=(--verify-model)
+    fi
+    if ! ensure_bun_for_first_run_setup; then
+        return 1
     fi
 
     if [[ "$SKIP_OPTIONAL_DEPS" == "true" ]]; then
@@ -1065,8 +1125,8 @@ if "$INSTALL_DIR/$BINARY_NAME" version &> /dev/null; then
     else
         echo -e "  ${RED}✗ git (required for Espalier clone/worktrees)${NC}"
     fi
-    if command -v bun &> /dev/null; then
-        echo -e "  ✓ bun $(bun --version 2>/dev/null | head -1)"
+    if BUN_PATH="$(find_bun)"; then
+        echo -e "  ✓ bun $("${BUN_PATH}" --version 2>/dev/null | head -1)"
     else
         echo -e "  ${YELLOW}○ bun (needed to build Espalier from source)${NC}"
     fi

@@ -1,0 +1,50 @@
+name: public-install-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref for public scripts to fetch (defaults to the workflow ref)'
+        required: false
+        type: string
+
+concurrency:
+  group: public-install-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  macos-public-install:
+    name: macOS public install smoke
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
+      GK_SMOKE_REF: ${{ inputs.ref || github.ref_name }}
+      GK_SMOKE_USE_API_RAW: '1'
+    steps:
+      - name: Require Ollama Cloud smoke secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${OLLAMA_CLOUD_API_KEY:-}" ]]; then
+            echo "::error title=Missing OLLAMA_CLOUD_API_KEY secret::Set the repository secret, then rerun this workflow."
+            exit 1
+          fi
+
+      - name: Run public install smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_root="$(mktemp -d "${TMPDIR:-/tmp}/groundskeeper-public-smoke.XXXXXX")"
+          mkdir -p "$smoke_root/bin" "$smoke_root/data" "$smoke_root/config" "$smoke_root/cache"
+          export GK_SMOKE_INSTALL_DIR="$smoke_root/bin"
+          export GK_ESPALIER_PATH="$smoke_root/data/groundskeeper/espalier"
+          export XDG_DATA_HOME="$smoke_root/data"
+          export XDG_CONFIG_HOME="$smoke_root/config"
+          export XDG_CACHE_HOME="$smoke_root/cache"
+          curl -fsSL -H 'Accept: application/vnd.github.raw' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/scripts/smoke-public-install.sh?ref=${GK_SMOKE_REF}" |
+            bash

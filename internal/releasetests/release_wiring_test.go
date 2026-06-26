@@ -115,6 +115,54 @@ func TestPublicInstallCopyReflectsReleaseBinaryPath(t *testing.T) {
 	}
 }
 
+func TestPublicInstallSmokeWorkflowRunsMacOSSecretBackedSmoke(t *testing.T) {
+	workflow := readRepoFile(t, ".github/workflows/public-install-smoke.yml")
+	readme := readRepoFile(t, "README.md")
+	workflowReadme := readRepoFile(t, ".github/workflows/README.md")
+
+	for _, want := range []string{
+		"workflow_dispatch:",
+		"runs-on: macos-latest",
+		"OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}",
+		"GK_SMOKE_REF: ${{ inputs.ref || github.ref_name }}",
+		"GK_SMOKE_USE_API_RAW: '1'",
+		"GK_SMOKE_INSTALL_DIR",
+		"XDG_DATA_HOME",
+		"contents/scripts/smoke-public-install.sh?ref=${GK_SMOKE_REF}",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Fatalf("public install smoke workflow missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"GK_SMOKE_VERIFY_MODEL=0", "GK_SMOKE_VERIFY_MODEL:"} {
+		if strings.Contains(workflow, forbidden) {
+			t.Fatalf("public install smoke workflow must not skip model verification with %q", forbidden)
+		}
+	}
+	if !strings.Contains(workflow, "api.github.com/repos/${GITHUB_REPOSITORY}/contents/scripts/smoke-public-install.sh?ref=${GK_SMOKE_REF}") {
+		t.Fatal("public install smoke workflow must fetch the smoke wrapper from the selected API raw ref")
+	}
+	if strings.Contains(workflow, "raw.githubusercontent.com") {
+		t.Fatal("public install smoke workflow should use the API raw endpoint for fresh-ref testing")
+	}
+	for _, want := range []string{
+		"gh secret set OLLAMA_CLOUD_API_KEY --repo potato-hash/groundskeeper",
+		"gh workflow run public-install-smoke.yml --repo potato-hash/groundskeeper --ref main -f ref=main",
+		"GitHub Contents API raw endpoint",
+		"when `ref` is omitted, it fetches scripts\nfrom the workflow ref",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README missing public smoke workflow command %q", want)
+		}
+	}
+	if !strings.Contains(workflowReadme, "public-install-smoke.yml") ||
+		!strings.Contains(workflowReadme, "secrets.OLLAMA_CLOUD_API_KEY") ||
+		!strings.Contains(workflowReadme, "GitHub Contents API raw endpoint") ||
+		!strings.Contains(workflowReadme, "defaults the smoke script ref to the workflow ref") {
+		t.Fatal("workflow README must document the manual public install smoke")
+	}
+}
+
 func readRepoFile(t *testing.T, rel string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(repoRoot(t), rel))
