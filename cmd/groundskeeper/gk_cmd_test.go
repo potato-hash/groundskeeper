@@ -561,6 +561,64 @@ esac
 	}
 }
 
+func TestInstallScriptDoesNotClaimFullSuccessBeforeRunSetup(t *testing.T) {
+	bashPath := testBashPath(t)
+	home := t.TempDir()
+	bin := t.TempDir()
+	stubs := map[string]string{
+		"curl": "#!/bin/sh\nexit 22\n",
+		"go": `#!/bin/sh
+if [ "$1" = "env" ] && [ "$2" = "GOVERSION" ]; then
+  printf 'go1.25.11\n'
+  exit 0
+fi
+if [ "$1" = "install" ]; then
+  mkdir -p "$GOBIN"
+  cat > "$GOBIN/groundskeeper" <<'GK'
+#!/bin/sh
+case "$1" in
+  version) printf 'groundskeeper test\n'; exit 0 ;;
+  setup) printf 'setup failed intentionally\n'; exit 42 ;;
+esac
+exit 0
+GK
+  chmod +x "$GOBIN/groundskeeper"
+  exit 0
+fi
+exit 1
+`,
+		"tmux": "#!/bin/sh\nif [ \"$1\" = \"-V\" ]; then printf 'tmux test\\n'; fi\nexit 0\n",
+	}
+	for name, body := range stubs {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cmd := exec.Command(bashPath, "../../install.sh", "--non-interactive", "--run-setup", "--model", "test/provider")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"PATH="+bin+string(os.PathListSeparator)+"/usr/bin:/bin:/usr/sbin:/sbin",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("install.sh unexpectedly succeeded when --run-setup failed\n%s", out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"Groundskeeper binary installed",
+		"setup failed intentionally",
+		"First-run setup did not complete.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install output missing %q\n--- output ---\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "Installation successful!") {
+		t.Fatalf("install.sh claimed full success before setup completed\n--- output ---\n%s", body)
+	}
+}
+
 func testBashPath(t *testing.T) string {
 	t.Helper()
 	bashPath := "/bin/bash"

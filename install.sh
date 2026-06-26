@@ -1044,7 +1044,7 @@ if "$INSTALL_DIR/$BINARY_NAME" version &> /dev/null; then
     INSTALLED_VERSION=$("$INSTALL_DIR/$BINARY_NAME" version 2>&1 || echo "unknown")
     echo ""
     echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║     Installation successful!           ║${NC}"
+    echo -e "${GREEN}║     Groundskeeper binary installed     ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "Version:  ${GREEN}${INSTALLED_VERSION}${NC}"
