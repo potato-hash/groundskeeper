@@ -127,7 +127,7 @@ func TestSetupNonInteractiveReportsEspalierEntrypoint(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	t.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+	t.Setenv("GROUNDSKEEPER_SUPPRESS_TMUX_WARNING", "1")
 	prependStubOMP(t)
 
 	espalierDir := filepath.Join(home, "espalier")
@@ -161,7 +161,7 @@ func TestSetupNonInteractiveDoesNotWriteOmpConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	t.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+	t.Setenv("GROUNDSKEEPER_SUPPRESS_TMUX_WARNING", "1")
 	prependStubOMP(t)
 
 	espalierDir := filepath.Join(home, "espalier")
@@ -190,7 +190,7 @@ func TestSetupNonInteractiveWritesOmpConfigWhenFlagSet(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	t.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+	t.Setenv("GROUNDSKEEPER_SUPPRESS_TMUX_WARNING", "1")
 	prependStubOMP(t)
 
 	espalierDir := filepath.Join(home, "espalier")
@@ -254,7 +254,7 @@ func TestSetupInstallMissingReplacesEmptyEspalierDir(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	t.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+	t.Setenv("GROUNDSKEEPER_SUPPRESS_TMUX_WARNING", "1")
 	prependStubOMP(t)
 	prependStubGitAndBun(t)
 
@@ -288,7 +288,7 @@ func TestSetupInstallMissingRepairsInterruptedManagedEspalierCheckout(t *testing
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	t.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+	t.Setenv("GROUNDSKEEPER_SUPPRESS_TMUX_WARNING", "1")
 	prependStubOMP(t)
 	prependStubGitAndBun(t)
 
@@ -431,7 +431,7 @@ INSTALL_BUN
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	t.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+	t.Setenv("GROUNDSKEEPER_SUPPRESS_TMUX_WARNING", "1")
 	t.Setenv("BUN_INSTALL", "")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+"/bin"+string(os.PathListSeparator)+"/usr/bin")
 
@@ -464,7 +464,7 @@ func TestSetupRefusesNonEmptyNonEspalierDir(t *testing.T) {
 		os.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 		os.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 		os.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-		os.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+		os.Setenv("GROUNDSKEEPER_SUPPRESS_TMUX_WARNING", "1")
 		prependStubOMP(t)
 		handleSetup([]string{"--non-interactive", "--install-missing", "--espalier-path", filepath.Join(home, "not-espalier")})
 		return

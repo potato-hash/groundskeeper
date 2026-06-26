@@ -268,6 +268,52 @@ func TestUninstallCopyUsesCurrentGroundskeeperState(t *testing.T) {
 	}
 }
 
+func TestRootHelpAndTmuxWarningUseGroundskeeperBranding(t *testing.T) {
+	mainGo := readRepoFile(t, "cmd/groundskeeper/main.go")
+	versionWarning := readRepoFile(t, "internal/tmux/version_warning.go")
+
+	for _, want := range []string{
+		"Session Manager Commands:",
+		"Switch focus between session and Groundskeeper sections",
+		"Groundskeeper requires tmux. Install with:",
+		"GROUNDSKEEPER_ALLOW_OUTER_TMUX=1 groundskeeper",
+		"GROUNDSKEEPER_COLOR",
+	} {
+		if !strings.Contains(mainGo, want) {
+			t.Fatalf("root help/TUI copy missing current Groundskeeper branding %q", want)
+		}
+	}
+	for _, stale := range []string{
+		"Session Manager Commands (Agent Deck):",
+		"Switch focus between Agent Deck and Groundskeeper sections",
+		"Agent Deck requires tmux.",
+		"AGENT_DECK_ALLOW_OUTER_TMUX=1 agent-deck",
+		"Cannot launch the agent-deck TUI",
+		"The agent-deck TUI is designed",
+	} {
+		if strings.Contains(mainGo, stale) {
+			t.Fatalf("root help/TUI copy still contains stale branding %q", stale)
+		}
+	}
+
+	for _, want := range []string{
+		"groundskeeper: heads-up",
+		"GROUNDSKEEPER_SUPPRESS_TMUX_WARNING=1",
+	} {
+		if !strings.Contains(versionWarning, want) {
+			t.Fatalf("tmux warning missing current Groundskeeper branding %q", want)
+		}
+	}
+	for _, stale := range []string{
+		"agent-deck: heads-up",
+		"Set AGENTDECK_SUPPRESS_TMUX_WARNING=1",
+	} {
+		if strings.Contains(versionWarning, stale) {
+			t.Fatalf("tmux warning still contains stale branding %q", stale)
+		}
+	}
+}
+
 func TestWorkflowReadmeUsesGroundskeeperReleaseCopy(t *testing.T) {
 	body := readRepoFile(t, ".github/workflows/README.md")
 

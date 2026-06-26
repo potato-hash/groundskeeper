@@ -17,13 +17,20 @@ type VersionProbe func() (string, error)
 
 var versionWarningOnce sync.Once
 
+const (
+	groundskeeperSuppressTmuxWarningEnv = "GROUNDSKEEPER_SUPPRESS_TMUX_WARNING"
+	legacySuppressTmuxWarningEnv        = "AGENTDECK_SUPPRESS_TMUX_WARNING"
+)
+
 // WarnIfVulnerableTmux prints a one-time stderr warning when the host tmux
 // is known-vulnerable to the CONTROL_SHOULD_NOTIFY_CLIENT NULL-deref
 // (tmux #4980, stability row S14, issue #737). No-op on non-macOS, no-op
-// when AGENTDECK_SUPPRESS_TMUX_WARNING=1/true. Safe to call from main()
-// unconditionally; gated by sync.Once so repeat invocations are free.
+// when GROUNDSKEEPER_SUPPRESS_TMUX_WARNING=1/true. The legacy
+// AGENTDECK_SUPPRESS_TMUX_WARNING name remains a compatibility alias. Safe to
+// call from main() unconditionally; gated by sync.Once so repeat invocations
+// are free.
 func WarnIfVulnerableTmux() {
-	checkAndWarnTmuxVersion(defaultTmuxVersionProbe, os.Stderr, runtime.GOOS, os.Getenv("AGENTDECK_SUPPRESS_TMUX_WARNING"))
+	checkAndWarnTmuxVersion(defaultTmuxVersionProbe, os.Stderr, runtime.GOOS, tmuxWarningSuppressValue())
 }
 
 // ResetVersionWarningOnceForTest clears the sync.Once so tests can exercise
@@ -54,10 +61,17 @@ func doCheckAndWarnTmuxVersion(probe VersionProbe, w io.Writer, goos, suppress s
 		return
 	}
 	fmt.Fprintf(w,
-		"agent-deck: heads-up — your tmux (%s) has an unfixed control-mode NULL deref (tmux #4980) that can crash the server. "+
+		"groundskeeper: heads-up: your tmux (%s) has an unfixed control-mode NULL deref (tmux #4980) that can crash the server. "+
 			"We apply a SIGTERM+grace mitigation in v1.7.68+, but a patched tmux from Homebrew will close the window entirely. "+
-			"Set AGENTDECK_SUPPRESS_TMUX_WARNING=1 to silence.\n",
+			"Set GROUNDSKEEPER_SUPPRESS_TMUX_WARNING=1 to silence.\n",
 		ver)
+}
+
+func tmuxWarningSuppressValue() string {
+	if v := os.Getenv(groundskeeperSuppressTmuxWarningEnv); v != "" {
+		return v
+	}
+	return os.Getenv(legacySuppressTmuxWarningEnv)
 }
 
 func defaultTmuxVersionProbe() (string, error) {

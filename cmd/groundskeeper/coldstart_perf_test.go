@@ -13,7 +13,7 @@ import (
 	"github.com/potato-hash/groundskeeper/tests/eval/harness"
 )
 
-// Cold-start regression tests for the agent-deck CLI.
+// Cold-start regression tests for the Groundskeeper CLI.
 //
 // Both tests build the binary once via the eval harness's buildOnce machinery
 // and exec it with `--help` / `--version`. The timed window covers everything
@@ -28,7 +28,7 @@ import (
 // for the full convention.
 //
 // Track B mandate (docs/perf-budget-suite.md): TestPerf_* must not invoke real tmux.
-// AGENTDECK_SUPPRESS_TMUX_WARNING=1 keeps WarnIfVulnerableTmux from shelling
+// GROUNDSKEEPER_SUPPRESS_TMUX_WARNING=1 keeps WarnIfVulnerableTmux from shelling
 // out to `tmux -V` on macOS dev hosts (no-op on Linux but set unconditionally
 // for parity).
 
@@ -40,7 +40,7 @@ const (
 	coldStartVersionBase = 8 * time.Millisecond // → ColdBudget = 40ms locally, 80ms in CI
 )
 
-// TestPerf_ColdStart_Help measures `agent-deck --help` end-to-end walltime.
+// TestPerf_ColdStart_Help measures `groundskeeper --help` end-to-end walltime.
 // Catches regressions in package init (initColorProfile, initUpdateSettings)
 // and the pre-dispatch tmux probes (SetDefaultSocketName, WarnIfVulnerableTmux).
 func TestPerf_ColdStart_Help(t *testing.T) {
@@ -54,12 +54,12 @@ func TestPerf_ColdStart_Help(t *testing.T) {
 	})
 
 	if got > budget {
-		t.Fatalf("agent-deck --help cold start trimmed mean = %v, budget = %v (regression in package init or pre-dispatch tmux probes)", got, budget)
+		t.Fatalf("groundskeeper --help cold start trimmed mean = %v, budget = %v (regression in package init or pre-dispatch tmux probes)", got, budget)
 	}
-	t.Logf("agent-deck --help trimmed mean = %v (budget = %v)", got, budget)
+	t.Logf("groundskeeper --help trimmed mean = %v (budget = %v)", got, budget)
 }
 
-// TestPerf_ColdStart_Version measures `agent-deck --version`. Independent
+// TestPerf_ColdStart_Version measures `groundskeeper --version`. Independent
 // signal from --help: skips printHelp's formatting work but exercises the
 // same init path.
 func TestPerf_ColdStart_Version(t *testing.T) {
@@ -73,18 +73,18 @@ func TestPerf_ColdStart_Version(t *testing.T) {
 	})
 
 	if got > budget {
-		t.Fatalf("agent-deck --version cold start trimmed mean = %v, budget = %v", got, budget)
+		t.Fatalf("groundskeeper --version cold start trimmed mean = %v, budget = %v", got, budget)
 	}
-	t.Logf("agent-deck --version trimmed mean = %v (budget = %v)", got, budget)
+	t.Logf("groundskeeper --version trimmed mean = %v (budget = %v)", got, budget)
 }
 
-// perfEnv returns the harness sandbox env with AGENTDECK_SUPPRESS_TMUX_WARNING=1
+// perfEnv returns the harness sandbox env with GROUNDSKEEPER_SUPPRESS_TMUX_WARNING=1
 // appended. Track B mandate (CLAUDE.md) requires TestPerf_* not invoke real
 // tmux; on macOS the binary's WarnIfVulnerableTmux otherwise shells out to
 // `tmux -V`. Suppressing it is a no-op on Linux (early return) but keeps the
 // macOS dev experience identical to CI.
 func perfEnv(sb *harness.Sandbox) []string {
-	return append(sb.Env(), "AGENTDECK_SUPPRESS_TMUX_WARNING=1")
+	return append(sb.Env(), "GROUNDSKEEPER_SUPPRESS_TMUX_WARNING=1")
 }
 
 func runColdStart(t *testing.T, bin string, env []string, arg string) {
@@ -125,8 +125,8 @@ func BenchmarkColdStart_Help(b *testing.B) {
 		"HOME="+home,
 		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
 		"XDG_STATE_HOME="+filepath.Join(home, ".local", "state"),
-		"AGENTDECK_COLOR=none",
-		"AGENTDECK_SUPPRESS_TMUX_WARNING=1",
+		"GROUNDSKEEPER_COLOR=none",
+		"GROUNDSKEEPER_SUPPRESS_TMUX_WARNING=1",
 	)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -135,7 +135,7 @@ func BenchmarkColdStart_Help(b *testing.B) {
 		cmd.Env = env
 		if out, err := cmd.CombinedOutput(); err != nil {
 			cancel()
-			b.Fatalf("agent-deck --help failed: %v\n%s", err, string(out))
+			b.Fatalf("groundskeeper --help failed: %v\n%s", err, string(out))
 		}
 		cancel()
 	}

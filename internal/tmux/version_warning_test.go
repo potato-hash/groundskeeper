@@ -64,8 +64,14 @@ func TestDoCheckAndWarnTmuxVersion_WarnsOnVulnerableDarwin(t *testing.T) {
 	if !strings.Contains(out, "tmux") {
 		t.Errorf("expected warning to mention tmux, got: %q", out)
 	}
-	if !strings.Contains(out, "AGENTDECK_SUPPRESS_TMUX_WARNING") {
+	if !strings.Contains(out, "groundskeeper:") {
+		t.Errorf("expected warning to use Groundskeeper prefix, got: %q", out)
+	}
+	if !strings.Contains(out, "GROUNDSKEEPER_SUPPRESS_TMUX_WARNING") {
 		t.Errorf("expected warning to mention suppression env var, got: %q", out)
+	}
+	if strings.Contains(out, "agent-deck:") || strings.Contains(out, "AGENTDECK_SUPPRESS_TMUX_WARNING") {
+		t.Errorf("warning still exposes stale Agent Deck branding: %q", out)
 	}
 }
 
@@ -98,6 +104,26 @@ func TestDoCheckAndWarnTmuxVersion_SuppressEnv(t *testing.T) {
 	}
 }
 
+func TestTmuxWarningSuppressValueUsesGroundskeeperEnvWithLegacyAlias(t *testing.T) {
+	t.Setenv(groundskeeperSuppressTmuxWarningEnv, "1")
+	t.Setenv(legacySuppressTmuxWarningEnv, "")
+	if got := tmuxWarningSuppressValue(); got != "1" {
+		t.Fatalf("tmuxWarningSuppressValue() = %q, want Groundskeeper env value", got)
+	}
+
+	t.Setenv(groundskeeperSuppressTmuxWarningEnv, "")
+	t.Setenv(legacySuppressTmuxWarningEnv, "true")
+	if got := tmuxWarningSuppressValue(); got != "true" {
+		t.Fatalf("tmuxWarningSuppressValue() = %q, want legacy env alias value", got)
+	}
+
+	t.Setenv(groundskeeperSuppressTmuxWarningEnv, "0")
+	t.Setenv(legacySuppressTmuxWarningEnv, "true")
+	if got := tmuxWarningSuppressValue(); got != "0" {
+		t.Fatalf("tmuxWarningSuppressValue() = %q, want Groundskeeper env to take precedence", got)
+	}
+}
+
 func TestDoCheckAndWarnTmuxVersion_SilentOnProbeError(t *testing.T) {
 	var buf bytes.Buffer
 	probe := func() (string, error) { return "", assertAnyErr{} }
@@ -119,7 +145,7 @@ func TestCheckAndWarnTmuxVersion_PrintsAtMostOnce(t *testing.T) {
 	checkAndWarnTmuxVersion(probe, &buf, "darwin", "")
 	checkAndWarnTmuxVersion(probe, &buf, "darwin", "")
 	out := buf.String()
-	count := strings.Count(out, "agent-deck:")
+	count := strings.Count(out, "groundskeeper:")
 	if count != 1 {
 		t.Errorf("expected exactly 1 warning line, got %d. Output: %q", count, out)
 	}

@@ -111,7 +111,7 @@ func TestNestedSessionAllowsCLICommands(t *testing.T) {
 // TestOuterTmuxGuard verifies the generic-tmux TUI guard added for issue #560.
 // When a user runs the interactive TUI inside a non-agentdeck tmux session,
 // detach semantics get surprising (Ctrl+Q returns to the outer tmux). The
-// guard warns and exits unless the user opts in via AGENT_DECK_ALLOW_OUTER_TMUX=1.
+// guard warns and exits unless the user opts in via GROUNDSKEEPER_ALLOW_OUTER_TMUX=1.
 func TestOuterTmuxGuard(t *testing.T) {
 	// Setup: snapshot env, restore on exit
 	fakeBin := t.TempDir()
@@ -122,23 +122,34 @@ func TestOuterTmuxGuard(t *testing.T) {
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	origTmux := os.Getenv("TMUX")
-	origOptIn := os.Getenv("AGENT_DECK_ALLOW_OUTER_TMUX")
+	origGroundskeeperOptIn := os.Getenv(groundskeeperAllowOuterTmuxEnv)
+	origLegacyOptIn := os.Getenv(legacyAllowOuterTmuxEnv)
 	t.Cleanup(func() {
 		if origTmux == "" {
 			os.Unsetenv("TMUX")
 		} else {
 			os.Setenv("TMUX", origTmux)
 		}
-		if origOptIn == "" {
-			os.Unsetenv("AGENT_DECK_ALLOW_OUTER_TMUX")
+		if origGroundskeeperOptIn == "" {
+			os.Unsetenv(groundskeeperAllowOuterTmuxEnv)
 		} else {
-			os.Setenv("AGENT_DECK_ALLOW_OUTER_TMUX", origOptIn)
+			os.Setenv(groundskeeperAllowOuterTmuxEnv, origGroundskeeperOptIn)
+		}
+		if origLegacyOptIn == "" {
+			os.Unsetenv(legacyAllowOuterTmuxEnv)
+		} else {
+			os.Setenv(legacyAllowOuterTmuxEnv, origLegacyOptIn)
 		}
 	})
 
+	clearOptIns := func() {
+		os.Unsetenv(groundskeeperAllowOuterTmuxEnv)
+		os.Unsetenv(legacyAllowOuterTmuxEnv)
+	}
+
 	t.Run("outer_tmux_no_optin_blocks", func(t *testing.T) {
 		os.Setenv("TMUX", "/tmp/tmux-501/default,12345,0")
-		os.Unsetenv("AGENT_DECK_ALLOW_OUTER_TMUX")
+		clearOptIns()
 		if !isOuterTmuxWithoutOptIn() {
 			t.Error("expected guard to fire when TMUX set and no opt-in")
 		}
@@ -146,15 +157,25 @@ func TestOuterTmuxGuard(t *testing.T) {
 
 	t.Run("outer_tmux_with_optin_passes", func(t *testing.T) {
 		os.Setenv("TMUX", "/tmp/tmux-501/default,12345,0")
-		os.Setenv("AGENT_DECK_ALLOW_OUTER_TMUX", "1")
+		clearOptIns()
+		os.Setenv(groundskeeperAllowOuterTmuxEnv, "1")
 		if isOuterTmuxWithoutOptIn() {
 			t.Error("expected guard NOT to fire when opt-in env is set")
 		}
 	})
 
+	t.Run("outer_tmux_with_legacy_optin_passes", func(t *testing.T) {
+		os.Setenv("TMUX", "/tmp/tmux-501/default,12345,0")
+		clearOptIns()
+		os.Setenv(legacyAllowOuterTmuxEnv, "1")
+		if isOuterTmuxWithoutOptIn() {
+			t.Error("expected guard NOT to fire when legacy opt-in env is set")
+		}
+	})
+
 	t.Run("no_tmux_passes", func(t *testing.T) {
 		os.Unsetenv("TMUX")
-		os.Unsetenv("AGENT_DECK_ALLOW_OUTER_TMUX")
+		clearOptIns()
 		if isOuterTmuxWithoutOptIn() {
 			t.Error("expected guard NOT to fire when TMUX is unset")
 		}
@@ -164,11 +185,32 @@ func TestOuterTmuxGuard(t *testing.T) {
 		// Only "1" is the accepted opt-in value — defensively narrow so typos
 		// like "true"/"yes" don't silently bypass the guard.
 		os.Setenv("TMUX", "/tmp/tmux-501/default,12345,0")
-		os.Setenv("AGENT_DECK_ALLOW_OUTER_TMUX", "true")
+		clearOptIns()
+		os.Setenv(groundskeeperAllowOuterTmuxEnv, "true")
 		if !isOuterTmuxWithoutOptIn() {
 			t.Error("expected guard to fire when opt-in is not exactly \"1\"")
 		}
 	})
+}
+
+func TestGroundskeeperColorEnvUsesGroundskeeperNameWithLegacyAlias(t *testing.T) {
+	t.Setenv("GROUNDSKEEPER_COLOR", "none")
+	t.Setenv("AGENTDECK_COLOR", "")
+	if got := groundskeeperColorEnv(); got != "none" {
+		t.Fatalf("groundskeeperColorEnv() = %q, want Groundskeeper env value", got)
+	}
+
+	t.Setenv("GROUNDSKEEPER_COLOR", "")
+	t.Setenv("AGENTDECK_COLOR", "256")
+	if got := groundskeeperColorEnv(); got != "256" {
+		t.Fatalf("groundskeeperColorEnv() = %q, want legacy env alias value", got)
+	}
+
+	t.Setenv("GROUNDSKEEPER_COLOR", "16")
+	t.Setenv("AGENTDECK_COLOR", "256")
+	if got := groundskeeperColorEnv(); got != "16" {
+		t.Fatalf("groundskeeperColorEnv() = %q, want Groundskeeper env to take precedence", got)
+	}
 }
 
 func TestExtractGroupFlag(t *testing.T) {

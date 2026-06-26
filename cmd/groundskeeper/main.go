@@ -143,8 +143,9 @@ func promptForUpdate() bool {
 // Prefers TrueColor for best visuals, falls back to ANSI256 for compatibility.
 func initColorProfile() {
 	// Allow user override via environment variable
-	// AGENTDECK_COLOR: truecolor, 256, 16, none
-	if colorEnv := os.Getenv("AGENTDECK_COLOR"); colorEnv != "" {
+	// GROUNDSKEEPER_COLOR: truecolor, 256, 16, none
+	// AGENTDECK_COLOR remains a compatibility alias.
+	if colorEnv := groundskeeperColorEnv(); colorEnv != "" {
 		switch strings.ToLower(colorEnv) {
 		case "truecolor", "true", "24bit":
 			lipgloss.SetColorProfile(termenv.TrueColor)
@@ -207,6 +208,13 @@ func initColorProfile() {
 	lipgloss.SetColorProfile(termenv.ANSI256)
 }
 
+func groundskeeperColorEnv() string {
+	if colorEnv := os.Getenv("GROUNDSKEEPER_COLOR"); colorEnv != "" {
+		return colorEnv
+	}
+	return os.Getenv("AGENTDECK_COLOR")
+}
+
 func main() {
 	// Extract global -p/--profile flag before subcommand dispatch
 	profile, args := extractProfileFlag(os.Args[1:])
@@ -227,7 +235,7 @@ func main() {
 
 	// Nudge macOS users whose tmux predates the upstream fix for the
 	// control-mode NULL-deref (tmux #4980, issue #737). Once per process,
-	// no-op on non-macOS, suppressible via AGENTDECK_SUPPRESS_TMUX_WARNING.
+	// no-op on non-macOS, suppressible via GROUNDSKEEPER_SUPPRESS_TMUX_WARNING.
 	tmux.WarnIfVulnerableTmux()
 
 	var webEnabled bool
@@ -429,14 +437,14 @@ func main() {
 	// CLI commands (add, session start/stop, mcp attach, etc.) still work fine.
 	// In headless web mode (--no-tui), no TUI launches, so this guard is skipped.
 	if !webHeadless && isNestedSession() {
-		fmt.Fprintln(os.Stderr, "Error: Cannot launch the agent-deck TUI inside an agent-deck session.")
+		fmt.Fprintln(os.Stderr, "Error: Cannot launch the Groundskeeper TUI inside a managed session.")
 		fmt.Fprintln(os.Stderr, "This would create a recursive nested session.")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "CLI commands work inside sessions. For example:")
-		fmt.Fprintln(os.Stderr, "  agent-deck add /path -t \"Title\"    # Add a new session")
-		fmt.Fprintln(os.Stderr, "  agent-deck session start <id>      # Start a session")
-		fmt.Fprintln(os.Stderr, "  agent-deck mcp attach <id> <mcp>   # Attach MCP")
-		fmt.Fprintln(os.Stderr, "  agent-deck list                    # List sessions")
+		fmt.Fprintln(os.Stderr, "  groundskeeper add /path -t \"Title\"    # Add a new session")
+		fmt.Fprintln(os.Stderr, "  groundskeeper session start <id>      # Start a session")
+		fmt.Fprintln(os.Stderr, "  groundskeeper mcp attach <id> <mcp>   # Attach MCP")
+		fmt.Fprintln(os.Stderr, "  groundskeeper list                    # List sessions")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "To open the TUI, detach first with Ctrl+Q.")
 		os.Exit(1)
@@ -448,19 +456,19 @@ func main() {
 	// this guard only fires on the interactive TUI path. Headless web mode
 	// (--no-tui) skips it for the same reason: no TUI, no detach surprise.
 	if !webHeadless && isOuterTmuxWithoutOptIn() {
-		fmt.Fprintln(os.Stderr, "Error: The agent-deck TUI is designed to run OUTSIDE of tmux.")
+		fmt.Fprintln(os.Stderr, "Error: The Groundskeeper TUI is designed to run outside of tmux.")
 		fmt.Fprintln(os.Stderr, "You are inside a tmux session, so Ctrl+Q detach and nested")
-		fmt.Fprintln(os.Stderr, "tmux behavior will be surprising. agent-deck manages its own")
+		fmt.Fprintln(os.Stderr, "tmux behavior will be surprising. Groundskeeper manages its own")
 		fmt.Fprintln(os.Stderr, "tmux sessions internally.")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Options:")
-		fmt.Fprintln(os.Stderr, "  • Detach from tmux (Ctrl+B d) and run agent-deck from a clean shell.")
+		fmt.Fprintln(os.Stderr, "  • Detach from tmux (Ctrl+B d) and run groundskeeper from a clean shell.")
 		fmt.Fprintln(os.Stderr, "  • Run CLI subcommands — they work fine inside tmux:")
-		fmt.Fprintln(os.Stderr, "      agent-deck list                    # List sessions")
-		fmt.Fprintln(os.Stderr, "      agent-deck add /path -t \"Title\"  # Add a new session")
-		fmt.Fprintln(os.Stderr, "      agent-deck session start <id>      # Start a session")
+		fmt.Fprintln(os.Stderr, "      groundskeeper list                    # List sessions")
+		fmt.Fprintln(os.Stderr, "      groundskeeper add /path -t \"Title\"  # Add a new session")
+		fmt.Fprintln(os.Stderr, "      groundskeeper session start <id>      # Start a session")
 		fmt.Fprintln(os.Stderr, "  • If you really want to run the TUI anyway, set:")
-		fmt.Fprintln(os.Stderr, "      AGENT_DECK_ALLOW_OUTER_TMUX=1 agent-deck")
+		fmt.Fprintln(os.Stderr, "      GROUNDSKEEPER_ALLOW_OUTER_TMUX=1 groundskeeper")
 		os.Exit(1)
 	}
 
@@ -485,7 +493,7 @@ func main() {
 	if err := ensureTmuxInPath(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error: tmux not found")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Agent Deck requires tmux. Install with:")
+		fmt.Fprintln(os.Stderr, "Groundskeeper requires tmux. Install with:")
 		switch runtime.GOOS {
 		case "darwin":
 			fmt.Fprintln(os.Stderr, "  brew install tmux")
@@ -3112,7 +3120,7 @@ func printHelp() {
 	fmt.Println("  auth, omp          Show provider auth status (managed by OMP)")
 	fmt.Println("  espalier           Show Espalier Core readiness status")
 	fmt.Println()
-	fmt.Println("Session Manager Commands (Agent Deck):")
+	fmt.Println("Session Manager Commands:")
 	fmt.Println("  (none)           Start the TUI")
 	fmt.Println("  add <path>       Add a new session")
 	fmt.Println("  launch [path]    Add, start, and optionally send a message in one step")
@@ -3183,7 +3191,7 @@ func printHelp() {
 	fmt.Println("  n          New session")
 	fmt.Println("  g          New group")
 	fmt.Println("  Enter      Attach to session")
-	fmt.Println("  tab        Switch focus between Agent Deck and Groundskeeper sections")
+	fmt.Println("  tab        Switch focus between session and Groundskeeper sections")
 	fmt.Println("  p          Prompt a Groundskeeper thread (when GK focused)")
 	fmt.Println("  f          Fork a Groundskeeper thread (when GK focused)")
 	fmt.Println("  a          Archive a Groundskeeper thread (when GK focused)")
@@ -3639,18 +3647,24 @@ func handleUninstall(args []string) {
 	fmt.Println("Feedback: https://github.com/potato-hash/groundskeeper/issues")
 }
 
-// isNestedSession returns true if we're running inside an agent-deck managed tmux session.
+// isNestedSession returns true if we're running inside a managed tmux session.
 // Uses GetCurrentSessionID() which checks if the current tmux session name matches agentdeck_*.
 func isNestedSession() bool {
 	return GetCurrentSessionID() != ""
 }
 
+const (
+	groundskeeperAllowOuterTmuxEnv = "GROUNDSKEEPER_ALLOW_OUTER_TMUX"
+	legacyAllowOuterTmuxEnv        = "AGENT_DECK_ALLOW_OUTER_TMUX"
+)
+
 // isOuterTmuxWithoutOptIn reports true when the user is launching the
 // interactive TUI from inside a NON-agentdeck tmux session without the
-// AGENT_DECK_ALLOW_OUTER_TMUX=1 opt-in. See issue #560: nesting the TUI
-// inside an outer tmux leads to confusing detach semantics (Ctrl+Q returns
-// to the outer tmux, not a clean shell). The guard fires only on the TUI
-// path — CLI subcommands remain usable inside tmux.
+// GROUNDSKEEPER_ALLOW_OUTER_TMUX=1 opt-in. The legacy
+// AGENT_DECK_ALLOW_OUTER_TMUX name remains a compatibility alias. See issue
+// #560: nesting the TUI inside an outer tmux leads to confusing detach
+// semantics (Ctrl+Q returns to the outer tmux, not a clean shell). The guard
+// fires only on the TUI path — CLI subcommands remain usable inside tmux.
 func isOuterTmuxWithoutOptIn() bool {
 	if os.Getenv("TMUX") == "" {
 		return false
@@ -3658,10 +3672,17 @@ func isOuterTmuxWithoutOptIn() bool {
 	if isNestedSession() {
 		return false
 	}
-	if os.Getenv("AGENT_DECK_ALLOW_OUTER_TMUX") == "1" {
+	if outerTmuxOptInValue() == "1" {
 		return false
 	}
 	return true
+}
+
+func outerTmuxOptInValue() string {
+	if v := os.Getenv(groundskeeperAllowOuterTmuxEnv); v != "" {
+		return v
+	}
+	return os.Getenv(legacyAllowOuterTmuxEnv)
 }
 
 // ensureTmuxInPath checks that tmux is reachable. If exec.LookPath fails
