@@ -1254,6 +1254,62 @@ printf '[OK] OMP model smoke test passed\n'
 	}
 }
 
+func TestPublicInstallSmokeScriptAllowsOmpCredentialStoreForOllamaCloudSmoke(t *testing.T) {
+	home := t.TempDir()
+	installDir := filepath.Join(home, "bin")
+	installStub := filepath.Join(home, "install.sh")
+	verifyStub := filepath.Join(home, "verify.sh")
+	if err := os.MkdirAll(filepath.Join(home, ".omp", "agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".omp", "agent", "agent.db"), []byte("sqlite fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	installBody := `#!/usr/bin/env sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--dir" ]; then
+    mkdir -p "$2"
+    printf '#!/usr/bin/env sh\nprintf groundskeeper\n' > "$2/groundskeeper"
+    chmod +x "$2/groundskeeper"
+    break
+  fi
+  shift
+done
+printf '[OK] OMP model smoke test passed\n'
+`
+	if err := os.WriteFile(installStub, []byte(installBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify store\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"OLLAMA_CLOUD_API_KEY=",
+		"OLLAMA_API_KEY=",
+		"OMP_AUTH_BROKER_TOKEN=",
+		"GK_SMOKE_INSTALL_DIR="+installDir,
+		"GK_SMOKE_INSTALL_URL=file://"+installStub,
+		"GK_SMOKE_VERIFY_URL=file://"+verifyStub,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("smoke-public-install.sh rejected OMP credential store for ollama-cloud smoke: %v\n%s", err, out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"[OK] OMP model smoke test passed",
+		"verify store",
+		"public install smoke completed",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("smoke output missing %q\n--- output ---\n%s", want, body)
+		}
+	}
+}
+
 func TestPublicInstallSmokeScriptCanFetchThroughGitHubContentsAPI(t *testing.T) {
 	home := t.TempDir()
 	installDir := filepath.Join(home, "bin")

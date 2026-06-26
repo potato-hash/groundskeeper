@@ -82,8 +82,8 @@ fetch_script() {
 if [[ "$VERIFY_MODEL" != "0" ]]; then
   case "$MODEL" in
     ollama-cloud/*)
-      if [[ -z "${OLLAMA_CLOUD_API_KEY:-${OLLAMA_API_KEY:-}}" && -z "${OMP_AUTH_BROKER_TOKEN:-}" ]]; then
-        fail "set OLLAMA_CLOUD_API_KEY or OMP_AUTH_BROKER_TOKEN in the environment, or set GK_SMOKE_VERIFY_MODEL=0 to skip model verification"
+      if [[ -z "${OLLAMA_CLOUD_API_KEY:-${OLLAMA_API_KEY:-}}" && -z "${OMP_AUTH_BROKER_TOKEN:-}" && ! -f "$HOME/.omp/agent/agent.db" ]]; then
+        fail "set OLLAMA_CLOUD_API_KEY or OMP_AUTH_BROKER_TOKEN, log in with OMP, or set GK_SMOKE_VERIFY_MODEL=0 to skip model verification"
       fi
       ;;
   esac
