@@ -75,4 +75,15 @@ func TestUninstallDataCandidates_IncludesXDGDirs(t *testing.T) {
 	if byType["config"] == byType["legacy"] {
 		t.Errorf("config candidate (%q) unexpectedly equals legacy candidate (%q)", byType["config"], byType["legacy"])
 	}
+
+	byLabel := make(map[string]string, len(candidates))
+	for _, c := range candidates {
+		byLabel[c.itemType] = c.label
+	}
+	if got := byLabel["data"]; got != "Data directory (gk.db and managed Espalier checkout)" {
+		t.Fatalf("data candidate label = %q, want current Groundskeeper/Espalier state copy", got)
+	}
+	if got := byLabel["legacy"]; got != "Legacy pre-XDG data directory" {
+		t.Fatalf("legacy candidate label = %q, want migration-era copy rather than old product branding", got)
+	}
 }

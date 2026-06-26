@@ -7,7 +7,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/uninstall.sh | bash
 #
 # Options:
-#   --keep-data         Keep XDG config/data/cache and legacy ~/.agent-deck/
+#   --keep-data         Keep Groundskeeper XDG state and legacy pre-XDG data
 #   --keep-tmux-config  Keep tmux configuration
 #   --non-interactive   Skip all prompts (removes everything)
 #   --dry-run           Show what would be removed without removing
@@ -62,7 +62,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: uninstall.sh [options]"
             echo ""
             echo "Options:"
-            echo "  --keep-data         Keep XDG config/data/cache and legacy ~/.agent-deck/"
+            echo "  --keep-data         Keep Groundskeeper XDG state and legacy pre-XDG data"
             echo "  --keep-tmux-config  Keep tmux configuration in ~/.tmux.conf"
             echo "  --non-interactive   Skip all prompts (removes everything)"
             echo "  --dry-run           Show what would be removed without removing"
@@ -134,9 +134,9 @@ done
 
 DATA_LOCATIONS=(
     "config:Config directory:$(xdg_path XDG_CONFIG_HOME .config)"
-    "data:Data directory:$(xdg_path XDG_DATA_HOME .local/share)"
+    "data:Data directory (gk.db and managed Espalier checkout):$(xdg_path XDG_DATA_HOME .local/share)"
     "cache:Cache directory:$(xdg_path XDG_CACHE_HOME .cache)"
-    "legacy:Legacy directory:$HOME/.agent-deck"
+    "legacy:Legacy pre-XDG data directory:$HOME/.agent-deck"
 )
 
 for data_item in "${DATA_LOCATIONS[@]}"; do
@@ -145,7 +145,7 @@ for data_item in "${DATA_LOCATIONS[@]}"; do
     label="${rest%%:*}"
     loc="${rest#*:}"
     if [[ -e "$loc" ]] || [[ -L "$loc" ]]; then
-        FOUND_ITEMS+=("data:$kind:$loc")
+        FOUND_ITEMS+=("data:$kind:$label:$loc")
         DATA_SIZE=$(du -sh "$loc" 2>/dev/null | cut -f1 || true)
         echo -e "Found: ${GREEN}${label}${NC} at $loc"
         [[ -n "$DATA_SIZE" ]] && echo -e "       ${DIM}${DATA_SIZE} total${NC}"
@@ -170,7 +170,10 @@ if [[ ${#FOUND_ITEMS[@]} -eq 0 ]]; then
         echo "  - $loc"
     done
     for data_item in "${DATA_LOCATIONS[@]}"; do
-        echo "  - ${data_item##*:}"
+        rest="${data_item#*:}"
+        label="${rest%%:*}"
+        loc="${rest#*:}"
+        echo "  - $loc ($label)"
     done
     echo "  - $TMUX_CONF (for Groundskeeper config)"
     exit 0
@@ -190,13 +193,15 @@ for item in "${FOUND_ITEMS[@]}"; do
             echo -e "  ${RED}•${NC} Binary: $loc"
             ;;
         data:*)
-            kind="${item#data:}"
-            kind="${kind%%:*}"
-            loc="${item#data:$kind:}"
+            rest="${item#data:}"
+            kind="${rest%%:*}"
+            rest="${rest#*:}"
+            label="${rest%%:*}"
+            loc="${rest#*:}"
             if [[ "$KEEP_DATA" == "true" ]]; then
-                echo -e "  ${GREEN}•${NC} $kind directory: $loc ${YELLOW}(keeping)${NC}"
+                echo -e "  ${GREEN}•${NC} $label: $loc ${YELLOW}(keeping)${NC}"
             else
-                echo -e "  ${RED}•${NC} $kind directory: $loc"
+                echo -e "  ${RED}•${NC} $label: $loc"
             fi
             ;;
         tmux)
@@ -291,11 +296,11 @@ if [[ "$KEEP_DATA" != "true" ]]; then
     done
 
     if [[ ${#DATA_ITEMS[@]} -gt 0 ]]; then
-        echo -e "Removing data directories..."
+        echo -e "Removing Groundskeeper XDG state and legacy pre-XDG data..."
 
         # Offer backup for interactive runs.
         if [[ "$NON_INTERACTIVE" != "true" ]]; then
-            printf "Create backup of data before removing? [Y/n] "
+            printf "Create backup of Groundskeeper XDG state and legacy pre-XDG data before removing it? [Y/n] "
             prompt_read -n 1 -r
             echo
             if [[ ! $REPLY =~ ^[Nn]$ ]]; then
@@ -303,6 +308,7 @@ if [[ "$KEEP_DATA" != "true" ]]; then
                 TAR_ARGS=(-czf "$BACKUP_FILE" -C /)
                 for item in "${DATA_ITEMS[@]}"; do
                     loc="${item#data:}"
+                    loc="${loc#*:}"
                     loc="${loc#*:}"
                     [[ -L "$loc" ]] && continue
                     TAR_ARGS+=("${loc#/}")
@@ -318,6 +324,7 @@ if [[ "$KEEP_DATA" != "true" ]]; then
         for item in "${DATA_ITEMS[@]}"; do
             loc="${item#data:}"
             loc="${loc#*:}"
+            loc="${loc#*:}"
             rm -rf "$loc"
             echo -e "${GREEN}✓${NC} Removed: $loc"
         done
@@ -331,7 +338,7 @@ echo -e "${GREEN}╚════════════════════
 echo ""
 
 if [[ "$KEEP_DATA" == "true" ]]; then
-    echo -e "${YELLOW}Note:${NC} XDG config/data/cache and legacy ~/.agent-deck/ were preserved."
+    echo -e "${YELLOW}Note:${NC} Groundskeeper XDG state and legacy pre-XDG data were preserved."
     echo "      Remove manually after reviewing their contents."
 fi
 

@@ -223,6 +223,51 @@ func TestGoTestWorkflowCoversInstallerFixtures(t *testing.T) {
 	}
 }
 
+func TestUninstallCopyUsesCurrentGroundskeeperState(t *testing.T) {
+	shellUninstall := readRepoFile(t, "uninstall.sh")
+	goUninstall := readRepoFile(t, "cmd/groundskeeper/main.go")
+	goPaths := readRepoFile(t, "cmd/groundskeeper/uninstall_paths.go")
+
+	for name, body := range map[string]string{
+		"uninstall.sh":              shellUninstall,
+		"cmd/groundskeeper/main.go": goUninstall,
+	} {
+		for _, want := range []string{
+			"Keep Groundskeeper XDG state and legacy pre-XDG data",
+			"Groundskeeper XDG state and legacy pre-XDG data were preserved.",
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("%s missing current uninstall copy %q", name, want)
+			}
+		}
+		for _, stale := range []string{
+			"XDG config/data/cache and legacy ~/.agent-deck",
+			"XDG config/data/cache + legacy",
+		} {
+			if strings.Contains(body, stale) {
+				t.Fatalf("%s still uses stale legacy Agent Deck uninstall copy %q", name, stale)
+			}
+		}
+		if strings.Contains(body, "Keep Groundskeeper XDG data and legacy pre-XDG data") {
+			t.Fatalf("%s still uses stale legacy Agent Deck uninstall copy", name)
+		}
+	}
+
+	for _, body := range []string{shellUninstall, goPaths} {
+		for _, want := range []string{
+			"Data directory (gk.db and managed Espalier checkout)",
+			"Legacy pre-XDG data directory",
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("uninstall path labels missing %q", want)
+			}
+		}
+	}
+	if !strings.Contains(goUninstall, "Including: gk.db, managed Espalier checkout, sessions, runtime state") {
+		t.Fatal("Go uninstaller summary should describe current Groundskeeper data contents")
+	}
+}
+
 func TestWorkflowReadmeUsesGroundskeeperReleaseCopy(t *testing.T) {
 	body := readRepoFile(t, ".github/workflows/README.md")
 

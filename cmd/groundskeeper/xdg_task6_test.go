@@ -408,11 +408,11 @@ func TestXDGTask6_UninstallDryRunListsExistingXDGAndLegacyLocations(t *testing.T
 	for _, want := range []string{
 		"Config directory",
 		filepath.Join(xdgConfigHome, "groundskeeper"),
-		"Data directory",
+		"Data directory (gk.db and managed Espalier checkout)",
 		filepath.Join(xdgDataHome, "groundskeeper"),
 		"Cache directory",
 		filepath.Join(xdgCacheHome, "groundskeeper"),
-		"Legacy directory",
+		"Legacy pre-XDG data directory",
 		filepath.Join(home, ".agent-deck"),
 	} {
 		if !strings.Contains(out, want) {

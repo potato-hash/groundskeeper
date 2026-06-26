@@ -991,7 +991,9 @@ func TestShellUninstallUsesGroundskeeperPathsAndMarkers(t *testing.T) {
 	for _, want := range []string{
 		"https://github.com/potato-hash/groundskeeper",
 		"raw.githubusercontent.com/potato-hash/groundskeeper",
-		"XDG config/data/cache",
+		"Keep Groundskeeper XDG state and legacy pre-XDG data",
+		"Data directory (gk.db and managed Espalier checkout)",
+		"Legacy pre-XDG data directory",
 		"$(xdg_path XDG_DATA_HOME .local/share)",
 		"prompt_read()",
 		"</dev/tty",
@@ -1072,6 +1074,71 @@ func TestShellUninstallIgnoresRelativeXDGHome(t *testing.T) {
 	} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("uninstall.sh used relative XDG path %q\n--- output ---\n%s", forbidden, body)
+		}
+	}
+}
+
+func TestShellUninstallDryRunAndRemovalUseCurrentDataLabels(t *testing.T) {
+	bashPath := testBashPath(t)
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	xdgConfig := filepath.Join(root, "xdg-config")
+	xdgData := filepath.Join(root, "xdg-data")
+	xdgCache := filepath.Join(root, "xdg-cache")
+	locations := []string{
+		filepath.Join(xdgConfig, "groundskeeper"),
+		filepath.Join(xdgData, "groundskeeper"),
+		filepath.Join(xdgCache, "groundskeeper"),
+		filepath.Join(home, ".agent-deck"),
+	}
+	for _, dir := range locations {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	env := []string{
+		"HOME=" + home,
+		"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+		"XDG_CONFIG_HOME=" + xdgConfig,
+		"XDG_DATA_HOME=" + xdgData,
+		"XDG_CACHE_HOME=" + xdgCache,
+	}
+
+	dryRun := exec.Command(bashPath, "../../uninstall.sh", "--dry-run", "--keep-tmux-config")
+	dryRun.Env = env
+	out, err := dryRun.CombinedOutput()
+	if err != nil {
+		t.Fatalf("uninstall.sh dry-run failed: %v\n%s", err, out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"Config directory",
+		"Data directory (gk.db and managed Espalier checkout)",
+		"Cache directory",
+		"Legacy pre-XDG data directory",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("uninstall.sh dry-run missing label %q\n--- output ---\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "legacy directory:") {
+		t.Fatalf("uninstall.sh dry-run still uses generic legacy label\n--- output ---\n%s", body)
+	}
+	for _, dir := range locations {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("dry-run should preserve %s: %v", dir, err)
+		}
+	}
+
+	remove := exec.Command(bashPath, "../../uninstall.sh", "--non-interactive", "--keep-tmux-config")
+	remove.Env = env
+	if out, err := remove.CombinedOutput(); err != nil {
+		t.Fatalf("uninstall.sh non-interactive removal failed: %v\n%s", err, out)
+	}
+	for _, dir := range locations {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("uninstall.sh should remove %s, stat err=%v", dir, err)
 		}
 	}
 }

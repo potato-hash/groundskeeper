@@ -3263,7 +3263,7 @@ func handleDebugDump() {
 // handleUninstall removes Groundskeeper from the system.
 func handleUninstall(args []string) {
 	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
-	keepData := fs.Bool("keep-data", false, "Keep XDG config/data/cache locations and legacy ~/.agent-deck/")
+	keepData := fs.Bool("keep-data", false, "Keep Groundskeeper XDG state and legacy pre-XDG data")
 	keepTmuxConfig := fs.Bool("keep-tmux-config", false, "Keep tmux configuration")
 	dryRun := fs.Bool("dry-run", false, "Show what would be removed without removing")
 	yes := fs.Bool("y", false, "Skip confirmation prompts")
@@ -3275,14 +3275,14 @@ func handleUninstall(args []string) {
 		fmt.Println()
 		fmt.Println("Options:")
 		fmt.Println("  --dry-run           Show what would be removed without removing")
-		fmt.Println("  --keep-data         Keep XDG config/data/cache locations and legacy ~/.agent-deck/")
+		fmt.Println("  --keep-data         Keep Groundskeeper XDG state and legacy pre-XDG data")
 		fmt.Println("  --keep-tmux-config  Keep tmux configuration")
 		fmt.Println("  -y                  Skip confirmation prompts")
 		fmt.Println()
 		fmt.Println("Examples:")
 		fmt.Println("  groundskeeper uninstall              # Interactive uninstall")
 		fmt.Println("  groundskeeper uninstall --dry-run    # Preview what would be removed")
-		fmt.Println("  groundskeeper uninstall --keep-data  # Remove binary only, keep data")
+		fmt.Println("  groundskeeper uninstall --keep-data  # Remove binary only, keep state")
 		fmt.Println("  groundskeeper uninstall -y           # Uninstall without prompts")
 	}
 
@@ -3322,7 +3322,7 @@ func handleUninstall(args []string) {
 		cmd := exec.Command("brew", "list", "groundskeeper")
 		if cmd.Run() == nil {
 			homebrewInstalled = true
-			foundItems = append(foundItems, uninstallFoundItem{"homebrew", "", "Homebrew package: groundskeeper"})
+			foundItems = append(foundItems, uninstallFoundItem{itemType: "homebrew", description: "Homebrew package: groundskeeper"})
 			fmt.Println("Found: Homebrew installation")
 		}
 	}
@@ -3344,12 +3344,12 @@ func handleUninstall(args []string) {
 			target, _ := os.Readlink(loc)
 			foundItems = append(
 				foundItems,
-				uninstallFoundItem{"binary-symlink", loc, fmt.Sprintf("Binary (symlink) → %s", target)},
+				uninstallFoundItem{itemType: "binary-symlink", path: loc, description: fmt.Sprintf("Binary (symlink) → %s", target)},
 			)
 			fmt.Printf("Found: Binary (symlink) at %s\n", loc)
 			fmt.Printf("       → %s\n", target)
 		} else {
-			foundItems = append(foundItems, uninstallFoundItem{"binary", loc, "Binary"})
+			foundItems = append(foundItems, uninstallFoundItem{itemType: "binary", path: loc, description: "Binary"})
 			fmt.Printf("Found: Binary at %s\n", loc)
 		}
 	}
@@ -3360,7 +3360,7 @@ func handleUninstall(args []string) {
 	tmuxConf := filepath.Join(homeDir, ".tmux.conf")
 	if data, err := os.ReadFile(tmuxConf); err == nil {
 		if strings.Contains(string(data), "# Groundskeeper configuration") {
-			foundItems = append(foundItems, uninstallFoundItem{"tmux", tmuxConf, "tmux configuration block"})
+			foundItems = append(foundItems, uninstallFoundItem{itemType: "tmux", path: tmuxConf, description: "tmux configuration block"})
 			fmt.Println("Found: tmux configuration in ~/.tmux.conf")
 		}
 	}
@@ -3404,28 +3404,28 @@ func handleUninstall(args []string) {
 			fmt.Printf("  • Binary: %s\n", item.path)
 		case "config":
 			if *keepData {
-				fmt.Printf("  ○ Config directory: %s (keeping)\n", item.path)
+				fmt.Printf("  ○ %s: %s (keeping)\n", item.label, item.path)
 			} else {
-				fmt.Printf("  • Config directory: %s\n", item.path)
+				fmt.Printf("  • %s: %s\n", item.label, item.path)
 			}
 		case "data":
 			if *keepData {
-				fmt.Printf("  ○ Data directory: %s (keeping)\n", item.path)
+				fmt.Printf("  ○ %s: %s (keeping)\n", item.label, item.path)
 			} else {
-				fmt.Printf("  • Data directory: %s\n", item.path)
-				fmt.Println("    Including: sessions, logs, runtime state")
+				fmt.Printf("  • %s: %s\n", item.label, item.path)
+				fmt.Println("    Including: gk.db, managed Espalier checkout, sessions, runtime state")
 			}
 		case "cache":
 			if *keepData {
-				fmt.Printf("  ○ Cache directory: %s (keeping)\n", item.path)
+				fmt.Printf("  ○ %s: %s (keeping)\n", item.label, item.path)
 			} else {
-				fmt.Printf("  • Cache directory: %s\n", item.path)
+				fmt.Printf("  • %s: %s\n", item.label, item.path)
 			}
 		case "legacy":
 			if *keepData {
-				fmt.Printf("  ○ Legacy directory: %s (keeping)\n", item.path)
+				fmt.Printf("  ○ %s: %s (keeping)\n", item.label, item.path)
 			} else {
-				fmt.Printf("  • Legacy directory: %s\n", item.path)
+				fmt.Printf("  • %s: %s\n", item.label, item.path)
 				fmt.Println("    Including: pre-XDG sessions, config, logs, cache")
 			}
 		case "tmux":
@@ -3571,11 +3571,11 @@ func handleUninstall(args []string) {
 		// location.
 		backupCreated := false
 		if !*yes {
-			fmt.Print("Create a backup of ALL data locations (XDG config/data/cache + legacy) before removing them? [Y/n] ")
+			fmt.Print("Create a backup of all Groundskeeper XDG state and legacy pre-XDG data before removing it? [Y/n] ")
 			var response string
 			_, _ = fmt.Scanln(&response)
 			if strings.ToLower(response) != "n" {
-				fmt.Println("Creating backup of all data locations...")
+				fmt.Println("Creating backup of all Groundskeeper XDG state and legacy pre-XDG data...")
 				backupFile, err := backupUninstallDataLocations(foundItems, homeDir)
 				if err != nil {
 					// Backup failed: do NOT delete data we couldn't archive.
@@ -3625,7 +3625,7 @@ func handleUninstall(args []string) {
 	fmt.Println()
 
 	if *keepData {
-		fmt.Println("Note: XDG config/data/cache locations and legacy ~/.agent-deck/ were preserved.")
+		fmt.Println("Note: Groundskeeper XDG state and legacy pre-XDG data were preserved.")
 		fmt.Println("      Remove them manually with trash after reviewing their contents.")
 	}
 

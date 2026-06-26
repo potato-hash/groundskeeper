@@ -14,6 +14,7 @@ import (
 type uninstallFoundItem struct {
 	itemType    string
 	path        string
+	label       string
 	description string
 }
 
@@ -38,13 +39,13 @@ func uninstallDataCandidates() []uninstallDataCandidate {
 		candidates = append(candidates, uninstallDataCandidate{itemType: "config", label: "Config directory", path: path})
 	}
 	if path, err := agentpaths.DataDir(); err == nil {
-		candidates = append(candidates, uninstallDataCandidate{itemType: "data", label: "Data directory", path: path})
+		candidates = append(candidates, uninstallDataCandidate{itemType: "data", label: "Data directory (gk.db and managed Espalier checkout)", path: path})
 	}
 	if path, err := agentpaths.CacheDir(); err == nil {
 		candidates = append(candidates, uninstallDataCandidate{itemType: "cache", label: "Cache directory", path: path})
 	}
 	if path, err := agentpaths.LegacyDir(); err == nil {
-		candidates = append(candidates, uninstallDataCandidate{itemType: "legacy", label: "Legacy directory", path: path})
+		candidates = append(candidates, uninstallDataCandidate{itemType: "legacy", label: "Legacy pre-XDG data directory", path: path})
 	}
 	return candidates
 }
@@ -69,6 +70,7 @@ func collectUninstallDataLocations() []uninstallFoundItem {
 		items = append(items, uninstallFoundItem{
 			itemType:    c.itemType,
 			path:        cleanPath,
+			label:       c.label,
 			description: desc,
 		})
 		fmt.Printf("Found: %s at %s\n", c.label, cleanPath)
