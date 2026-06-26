@@ -8,7 +8,7 @@
 #
 # Usage: bash scripts/verify-select-flag.sh
 # Env:
-#   AGENT_DECK_BIN  — path to binary (default: ./agent-deck)
+#   AGENT_DECK_BIN  — path to binary (default: ./groundskeeper)
 #   KEEP_SESSION=1  — leave tmux session after success for manual inspection
 set -euo pipefail
 
@@ -19,7 +19,7 @@ skip() { printf "${C_YELLOW}[SKIP]${C_RESET} %s\n" "$*"; }
 log()  { printf "    %s\n" "$*"; }
 
 FAILED=0
-BIN="${AGENT_DECK_BIN:-./agent-deck}"
+BIN="${AGENT_DECK_BIN:-./groundskeeper}"
 TSESS="adeck-select-$$"
 TMPHOME="$(mktemp -d -t adeck-select.XXXXXX)"
 
@@ -36,7 +36,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 command -v tmux >/dev/null || { skip "tmux not installed"; exit 0; }
-[[ -x "$BIN" ]] || { fail "binary not found at $BIN (run: go build -o agent-deck ./cmd/agent-deck)"; exit 1; }
+[[ -x "$BIN" ]] || { fail "binary not found at $BIN (run: go build -o groundskeeper ./cmd/groundskeeper)"; exit 1; }
 
 # ---- seed three sessions in three groups so we can verify all groups remain visible
 export XDG_CONFIG_HOME="$TMPHOME/.config"

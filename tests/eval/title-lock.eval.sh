@@ -20,10 +20,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BIN="${AGENT_DECK_BIN:-$REPO_ROOT/agent-deck}"
+BIN="${AGENT_DECK_BIN:-$REPO_ROOT/groundskeeper}"
 
 if [[ ! -x "$BIN" ]]; then
-  echo "FAIL: binary not built at $BIN (set AGENT_DECK_BIN or run 'go build -o agent-deck ./cmd/agent-deck')" >&2
+  echo "FAIL: binary not built at $BIN (set AGENT_DECK_BIN or run 'go build -o groundskeeper ./cmd/groundskeeper')" >&2
   exit 1
 fi
 

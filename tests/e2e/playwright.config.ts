@@ -14,7 +14,7 @@ export default defineConfig({
     { name: 'chromium', use: { browserName: 'chromium' } },
   ],
   webServer: {
-    command: 'AGENTDECK_PROFILE=_test go run ../../cmd/agent-deck --web --port 19999',
+    command: 'AGENTDECK_PROFILE=_test go run ../../cmd/groundskeeper web --no-tui --listen 127.0.0.1:19999 --token test',
     url: 'http://localhost:19999/healthz',
     reuseExistingServer: !process.env.CI,
     timeout: 30000,

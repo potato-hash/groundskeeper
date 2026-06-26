@@ -16,7 +16,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-BINARY="./build/agent-deck"
+BINARY="./build/groundskeeper"
 PORT=19999
 SERVER_URL="http://127.0.0.1:${PORT}"
 CONFIG=".lighthouserc.json"

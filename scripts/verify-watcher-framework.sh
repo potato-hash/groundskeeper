@@ -53,11 +53,11 @@ fi
 # --------------------------------------------------------------------------
 # Step 3: CLI watcher tests (includes drift-check, health fields, import)
 # --------------------------------------------------------------------------
-step "Tests: cmd/agent-deck watcher tests (-race)"
-if go test ./cmd/agent-deck/... -run "Watcher" -race -count=1 -timeout 60s 2>&1; then
-  pass "go test ./cmd/agent-deck/... -run Watcher -race"
+step "Tests: cmd/groundskeeper watcher tests (-race)"
+if go test ./cmd/groundskeeper/... -run "Watcher" -race -count=1 -timeout 60s 2>&1; then
+  pass "go test ./cmd/groundskeeper/... -run Watcher -race"
 else
-  fail "go test ./cmd/agent-deck/... -run Watcher -race"
+  fail "go test ./cmd/groundskeeper/... -run Watcher -race"
 fi
 
 # --------------------------------------------------------------------------
@@ -85,9 +85,9 @@ REQUIRED_FILES=(
   "internal/watcher/engine.go"
   "internal/watcher/webhook.go"
   "internal/watcher/router.go"
-  "cmd/agent-deck/watcher_cmd.go"
-  "cmd/agent-deck/watcher_cmd_test.go"
-  "cmd/agent-deck/assets/skills/watcher-creator/SKILL.md"
+  "cmd/groundskeeper/watcher_cmd.go"
+  "cmd/groundskeeper/watcher_cmd_test.go"
+  "cmd/groundskeeper/assets/skills/watcher-creator/SKILL.md"
   "assets/watcher-templates/CLAUDE.md"
   "assets/watcher-templates/POLICY.md"
   "assets/watcher-templates/LEARNINGS.md"
@@ -108,7 +108,7 @@ fi
 # --------------------------------------------------------------------------
 step "Drift: embedded SKILL.md has no stale watchers/ paths"
 
-SKILL_PATH="cmd/agent-deck/assets/skills/watcher-creator/SKILL.md"
+SKILL_PATH="cmd/groundskeeper/assets/skills/watcher-creator/SKILL.md"
 STALE=$(grep -n "watchers/" "$SKILL_PATH" | grep -v -E "legacy|migration|renamed|symlink" || true)
 if [ -z "$STALE" ]; then
   pass "SKILL.md contains no stale watchers/ references"

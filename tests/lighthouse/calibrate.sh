@@ -10,7 +10,7 @@
 #   ./tests/lighthouse/calibrate.sh
 #
 # Prerequisites:
-#   - make build (Go binary at ./build/agent-deck)
+#   - make build (Go binary at ./build/groundskeeper)
 #   - Node.js >= 18 with npx
 #   - Chrome/Chromium installed
 
@@ -19,7 +19,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-BINARY="./build/agent-deck"
+BINARY="./build/groundskeeper"
 PORT=19998
 SERVER_URL="http://127.0.0.1:${PORT}"
 LHCI_VERSION="0.15.1"

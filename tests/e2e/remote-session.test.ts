@@ -5,7 +5,7 @@ import { test, describe } from "repterm";
 // on the remote, and that the session is created, started, and attachable.
 
 const remoteHost = process.env.AGENTDECK_E2E_REMOTE_HOST;
-const remoteAgentDeckPath = process.env.AGENTDECK_E2E_REMOTE_AGENT_DECK_PATH || "agent-deck";
+const remoteAgentDeckPath = process.env.AGENTDECK_E2E_REMOTE_AGENT_DECK_PATH || "groundskeeper";
 const sshBin = process.env.AGENTDECK_E2E_SSH_BIN || "/usr/bin/ssh";
 
 function remoteCmd(agentDeckArgs: string): string {

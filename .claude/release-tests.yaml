@@ -353,7 +353,7 @@ tests:
   source: .planning/fix-issue-616/PLAN.md
   manual: true
   run:
-    command: "for i in 1..10; do agent-deck add /tmp/t616-$i -t t-$i -c claude; agent-deck session start t-$i; agent-deck session send t-$i 'Say OK_$i' --no-wait; sleep 30; tmux capture-pane -t agentdeck_t-$i* -p | grep -q '\u25CF OK_$i' && echo PASS_$i || echo FAIL_$i; agent-deck remove t-$i; done"
+    command: "for i in 1..10; do groundskeeper add /tmp/t616-$i -t t-$i -c claude; groundskeeper session start t-$i; groundskeeper session send t-$i 'Say OK_$i' --no-wait; sleep 30; tmux capture-pane -t agentdeck_t-$i* -p | grep -q '\u25CF OK_$i' && echo PASS_$i || echo FAIL_$i; groundskeeper remove t-$i; done"
     expected: 10 PASS lines
 - id: issue-604-rename-session-cursor-at-end
   added: '2026-04-17'

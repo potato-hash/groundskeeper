@@ -13,7 +13,7 @@
 #   ./scripts/verify-command-override.sh           # Run all scenarios
 #   SCENARIO=3 ./scripts/verify-command-override.sh  # Run only scenario 3
 #
-# Requires: agent-deck binary on PATH (or built at ./agent-deck), tmux.
+# Requires: groundskeeper binary on PATH (or built at ./groundskeeper), tmux.
 # Uses fake tool stubs — no real AI binaries needed.
 set -euo pipefail
 
@@ -53,12 +53,12 @@ trap cleanup EXIT INT TERM
 
 # ---------- preflight ----------
 AGENT_DECK_BIN=""
-if [[ -x "./agent-deck" ]]; then
-  AGENT_DECK_BIN="$(pwd)/agent-deck"
-elif command -v agent-deck >/dev/null 2>&1; then
-  AGENT_DECK_BIN="$(command -v agent-deck)"
+if [[ -x "./groundskeeper" ]]; then
+  AGENT_DECK_BIN="$(pwd)/groundskeeper"
+elif command -v groundskeeper >/dev/null 2>&1; then
+  AGENT_DECK_BIN="$(command -v groundskeeper)"
 else
-  printf "${C_RED}ERROR${C_RESET}: agent-deck binary not found (./agent-deck or PATH).\n" >&2
+  printf "${C_RED}ERROR${C_RESET}: groundskeeper binary not found (./groundskeeper or PATH).\n" >&2
   exit 2
 fi
 if ! command -v tmux >/dev/null 2>&1; then
@@ -66,7 +66,7 @@ if ! command -v tmux >/dev/null 2>&1; then
   exit 2
 fi
 
-log "agent-deck: ${AGENT_DECK_BIN}"
+log "groundskeeper: ${AGENT_DECK_BIN}"
 log "tmux socket: ${TMUX_SOCKET}"
 log "test home: ${TEST_HOME}"
 
@@ -80,8 +80,8 @@ mkdir -p "${TMPROOT}/project"
 for tool in hermes gemini opencode codex copilot claude gemini-nightly codex-experimental gh; do
   ln -sf "${STUB_DIR}/fake-tool.sh" "${TMPROOT}/bin/${tool}"
 done
-# Also symlink agent-deck into our bin dir
-ln -sf "${AGENT_DECK_BIN}" "${TMPROOT}/bin/agent-deck"
+# Also symlink groundskeeper into our bin dir
+ln -sf "${AGENT_DECK_BIN}" "${TMPROOT}/bin/groundskeeper"
 
 # ---------- helpers ----------
 write_config() {
@@ -97,7 +97,7 @@ EOF
 ad() {
   HOME="${TEST_HOME}" PATH="${TMPROOT}/bin:${PATH}" \
     TERM=dumb NO_COLOR=1 AGENTDECK_COLOR=none \
-    agent-deck "$@"
+    groundskeeper "$@"
 }
 
 # Create a session, start it, wait, capture argv.

@@ -4,7 +4,7 @@
 # Usage:
 #   ./scripts/visual-verify.sh [output-dir]
 #
-# Requires: tmux, freeze (charmbracelet), agent-deck binary at ./build/agent-deck
+# Requires: tmux, freeze (charmbracelet), groundskeeper binary at ./build/groundskeeper
 #
 # Captures screenshots at key TUI states:
 #   1. Main screen (empty state)
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 OUTPUT_DIR="${1:-/tmp/visual-verify}"
-BINARY="./build/agent-deck"
+BINARY="./build/groundskeeper"
 SESSION="visual_verify_$$"
 PROFILE="_visual_verify"
 CAPTURE_DELAY=1.5  # seconds to wait after each action

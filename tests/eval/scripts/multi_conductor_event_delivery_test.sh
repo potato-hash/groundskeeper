@@ -33,7 +33,7 @@ TS="$(date +%Y%m%d-%H%M%S)"
 REPORT="$REPORT_DIR/multi_conductor_event_delivery_$TS.md"
 mkdir -p "$REPORT_DIR"
 
-BIN="${AGENT_DECK_BIN:-$(command -v agent-deck || true)}"
+BIN="${AGENT_DECK_BIN:-$(command -v groundskeeper || true)}"
 PROFILE="${AGENT_DECK_PROFILE:-personal}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-90}"
 DELIVERY_GRACE_SECS="${DELIVERY_GRACE_SECS:-30}"
@@ -46,7 +46,7 @@ MISSED_LOG="$LOG_DIR/notifier-missed.log"
 # --- preflight ---------------------------------------------------------------
 
 if [[ -z "$BIN" || ! -x "$BIN" ]]; then
-  echo "FAIL: agent-deck binary not found (set AGENT_DECK_BIN)" >&2
+  echo "FAIL: groundskeeper binary not found (set AGENT_DECK_BIN)" >&2
   exit 1
 fi
 for dep in jq sha256sum; do

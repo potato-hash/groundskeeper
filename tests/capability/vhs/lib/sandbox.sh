@@ -46,7 +46,7 @@ _capvid_bin="${CAPVID_BIN:-$_capvid_repo/tests/capability/vhs/.bin/agent-deck}"
 if [ ! -x "$_capvid_bin" ]; then
   echo "capability-vhs sandbox: building agent-deck (no prebuilt binary at $_capvid_bin)..." >&2
   mkdir -p "$(dirname "$_capvid_bin")"
-  ( cd "$_capvid_repo" && go build -o "$_capvid_bin" ./cmd/agent-deck ) || {
+  ( cd "$_capvid_repo" && go build -o "$_capvid_bin" ./cmd/groundskeeper ) || {
     echo "capability-vhs sandbox: build failed" >&2
     return 1 2>/dev/null || exit 1
   }

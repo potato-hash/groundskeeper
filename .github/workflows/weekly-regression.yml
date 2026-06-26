@@ -30,7 +30,7 @@
 # Artifacts:
 #   After each run, screenshots and Lighthouse reports are uploaded as
 #   GitHub Actions artifacts with 30-day retention. Find them at:
-#   https://github.com/asheshgoplani/agent-deck/actions/workflows/weekly-regression.yml
+#   https://github.com/potato-hash/groundskeeper/actions/workflows/weekly-regression.yml
 #
 # Dependencies:
 #   - Visual regression config from Plan 10-01 (pw-visual-regression.config.ts)
@@ -86,13 +86,13 @@ jobs:
           GOTOOLCHAIN: go1.25.11
 
       - name: Build headless test server
-        # The main `agent-deck web` subcommand falls through to a Bubble Tea
+        # The main `groundskeeper web` subcommand falls through to a Bubble Tea
         # TUI launch, which under `&` background + no-TTY fails with
         # "cancelreader: add reader to epoll interest list" and kills the
-        # process before /healthz can respond. `agent-deck-test-server` is
+        # process before /healthz can respond. `groundskeeper-test-server` is
         # the TUI-less entry point built for exactly this case.
-        # See cmd/agent-deck-test-server/main.go and issue #943.
-        run: go build -o ./build/agent-deck-test-server ./cmd/agent-deck-test-server
+        # See cmd/groundskeeper-test-server/main.go and issue #943.
+        run: go build -o ./build/groundskeeper-test-server ./cmd/groundskeeper-test-server
         env:
           GOTOOLCHAIN: go1.25.11
 
@@ -113,7 +113,7 @@ jobs:
       - name: Start test server
         run: |
           AGENTDECK_PROFILE=_ci_weekly \
-            ./build/agent-deck web --no-tui --listen 127.0.0.1:18420 --token test &
+            ./build/groundskeeper web --no-tui --listen 127.0.0.1:18420 --token test &
           SERVER_PID=$!
           echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
           # Wait for /healthz (up to 30 seconds)

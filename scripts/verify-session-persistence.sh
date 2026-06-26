@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # verify-session-persistence.sh — human-watchable end-to-end verification for
 # v1.5.2 session persistence. Exits 0 if every scenario prints [PASS] or [SKIP];
-# exits 1 on any [FAIL]; exits 2 on missing agent-deck/tmux. CI uses the stub
+# exits 1 on any [FAIL]; exits 2 on missing groundskeeper/tmux. CI uses the stub
 # scripts/verify-session-persistence.d/fake-claude.sh (captures claude argv).
 # Env: AGENT_DECK_VERIFY_USE_STUB=1, AGENT_DECK_VERIFY_DESTRUCTIVE=1, SCENARIO=N.
 set -euo pipefail
@@ -27,6 +27,9 @@ banner_pass() { printf "${C_GREEN}[PASS]${C_RESET} %s\n" "$*"; }
 banner_fail() { printf "${C_RED}[FAIL]${C_RESET} %s\n" "$*" >&2; FAILED=1; }
 banner_skip() { printf "${C_YELLOW}[SKIP]${C_RESET} %s\n" "$*"; }
 log() { printf '    %s\n' "$*"; }
+
+AGENT_DECK_CMD="${AGENT_DECK_BIN:-groundskeeper}"
+agent-deck() { "$AGENT_DECK_CMD" "$@"; }
 
 # make_run_id returns a per-invocation identifier that is NOT a bare (OS-
 # reusable) PID. SESSION_PREFIX is built from it, so a unique RUN_ID guarantees
@@ -59,16 +62,14 @@ cleanup() {
   # that created nothing — both data-loss risks (review B1 + B2). Trade-off: a
   # hard-killed run's sessions are no longer swept by a later run; we accept
   # that for collision-safety. Empty array => no-op (bash 3.2 set -u safe).
-  if command -v agent-deck >/dev/null 2>&1; then
-    # `${arr[@]+"${arr[@]}"}` is bash 3.2 + set -u safe for an unset OR empty
-    # array (expands to nothing -> no-op); avoids the `${#arr[@]}` unbound crash.
-    local n
-    for n in ${CREATED_SESSIONS[@]+"${CREATED_SESSIONS[@]}"}; do
-      [[ -n "${n}" ]] || continue
-      agent-deck session stop "$n" >/dev/null 2>&1 || true
-      agent-deck remove "$n" >/dev/null 2>&1 || true
-    done
-  fi
+  # `${arr[@]+"${arr[@]}"}` is bash 3.2 + set -u safe for an unset OR empty
+  # array (expands to nothing -> no-op); avoids the `${#arr[@]}` unbound crash.
+  local n
+  for n in ${CREATED_SESSIONS[@]+"${CREATED_SESSIONS[@]}"}; do
+    [[ -n "${n}" ]] || continue
+    agent-deck session stop "$n" >/dev/null 2>&1 || true
+    agent-deck remove "$n" >/dev/null 2>&1 || true
+  done
   # Tear down any lingering login-sim scope.
   if command -v systemctl >/dev/null 2>&1; then
     systemctl --user stop "${LOGINSIM_SCOPE}.scope" >/dev/null 2>&1 || true
@@ -107,13 +108,13 @@ resolve_tmux_session() {
   json="$(agent-deck session show --json "$1" 2>/dev/null)" || rc=$?
   if [[ "${rc}" -ne 0 ]]; then
     [[ "${rc}" -eq 2 ]] && return 0
-    printf '%sERROR%s: "agent-deck session show --json %s" failed (exit %s)\n' "${C_RED}" "${C_RESET}" "$1" "${rc}" >&2
+    printf '%sERROR%s: "groundskeeper session show --json %s" failed (exit %s)\n' "${C_RED}" "${C_RESET}" "$1" "${rc}" >&2
     return "${rc}"
   fi
   [[ -z "${json}" ]] && return 0
   local tsess
   if ! tsess="$(printf '%s' "${json}" | jq -r '.tmux_session // empty')"; then
-    printf '%sERROR%s: malformed JSON from "agent-deck session show --json %s"\n' "${C_RED}" "${C_RESET}" "$1" >&2
+    printf '%sERROR%s: malformed JSON from "groundskeeper session show --json %s"\n' "${C_RED}" "${C_RESET}" "$1" >&2
     return 3
   fi
   printf '%s\n' "${tsess}"
@@ -474,9 +475,18 @@ main() {
   trap cleanup EXIT INT TERM
 
   # ----- preflight -----
-  if ! command -v agent-deck >/dev/null 2>&1; then
-    printf '%sERROR%s: agent-deck binary not on PATH.\n' "${C_RED}" "${C_RESET}" >&2
-    exit 2
+  if [[ -n "${AGENT_DECK_BIN:-}" ]]; then
+    if [[ ! -x "${AGENT_DECK_BIN}" ]]; then
+      printf '%sERROR%s: AGENT_DECK_BIN is not executable: %s\n' "${C_RED}" "${C_RESET}" "${AGENT_DECK_BIN}" >&2
+      exit 2
+    fi
+    AGENT_DECK_CMD="${AGENT_DECK_BIN}"
+  else
+    if ! command -v groundskeeper >/dev/null 2>&1; then
+      printf '%sERROR%s: groundskeeper binary not on PATH.\n' "${C_RED}" "${C_RESET}" >&2
+      exit 2
+    fi
+    AGENT_DECK_CMD="$(command -v groundskeeper)"
   fi
   if ! command -v tmux >/dev/null 2>&1; then
     printf '%sERROR%s: tmux binary not on PATH.\n' "${C_RED}" "${C_RESET}" >&2

@@ -7,21 +7,21 @@
 #
 # Usage: bash scripts/verify-per-group-claude-config.sh
 #
-# Requires: agent-deck (built from this branch), tmux, bash 4+, trash.
+# Requires: groundskeeper (built from this branch), tmux, bash 4+, trash.
 #
-# The harness auto-detects a local ./build/agent-deck binary and uses it in
-# preference to the system agent-deck, because per-group config injection
+# The harness auto-detects a local ./build/groundskeeper binary and uses it in
+# preference to the system groundskeeper, because per-group config injection
 # requires the v1.5.4 changes from this branch.
 
 set -euo pipefail
 
-# --- Resolve agent-deck binary (prefer local build) ---
+# --- Resolve groundskeeper binary (prefer local build) ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-if [ -x "${REPO_ROOT}/build/agent-deck" ]; then
-    AGENTDECK="${REPO_ROOT}/build/agent-deck"
+if [ -x "${REPO_ROOT}/build/groundskeeper" ]; then
+    AGENTDECK="${REPO_ROOT}/build/groundskeeper"
 else
-    AGENTDECK="agent-deck"
+    AGENTDECK="groundskeeper"
 fi
 
 # Wrapper so all agent-deck calls use the resolved binary.
@@ -65,14 +65,14 @@ unset CLAUDE_CONFIG_DIR
 # --- Preflight ---
 preflight() {
     [ "${BASH_VERSINFO[0]:-0}" -ge 4 ] || { echo "ERROR: bash 4+ required (found ${BASH_VERSION:-unknown})" >&2; exit 2; }
-    [ -x "$AGENTDECK" ] || command -v agent-deck >/dev/null 2>&1 || { echo "ERROR: agent-deck not on PATH and no ./build/agent-deck found" >&2; exit 2; }
+    [ -x "$AGENTDECK" ] || command -v groundskeeper >/dev/null 2>&1 || { echo "ERROR: groundskeeper not on PATH and no ./build/groundskeeper found" >&2; exit 2; }
     command -v tmux       >/dev/null 2>&1 || { echo "ERROR: tmux not on PATH" >&2; exit 2; }
     command -v awk        >/dev/null 2>&1 || { echo "ERROR: awk not on PATH (required for poll deadline arithmetic)" >&2; exit 2; }
     command -v trash      >/dev/null 2>&1 || { echo "ERROR: trash not on PATH (repo mandates trash for cleanup)" >&2; exit 2; }
     [ -f "$CONFIG_FILE" ] || { echo "ERROR: $CONFIG_FILE not found" >&2; exit 2; }
     [ -d "$CONFIG_DIR_A" ] || echo "WARN: $CONFIG_DIR_A does not exist — echo will still return the literal path string" >&2
     [ -d "$CONFIG_DIR_B" ] || echo "WARN: $CONFIG_DIR_B does not exist — echo will still return the literal path string" >&2
-    echo "Using agent-deck: $AGENTDECK ($("$AGENTDECK" --version 2>/dev/null || echo 'unknown version'))"
+    echo "Using groundskeeper: $AGENTDECK ($("$AGENTDECK" --version 2>/dev/null || echo 'unknown version'))"
 }
 
 # --- Best-effort pre-run cleanup (re-runnability on dirty workspace) ---

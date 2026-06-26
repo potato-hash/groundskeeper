@@ -17,7 +17,7 @@
 # Usage:
 #   bash scripts/verify-preview-ansi-bleed.sh
 # Env:
-#   AGENT_DECK_BIN  — path to the binary (default: ./agent-deck). If not
+#   AGENT_DECK_BIN  — path to the binary (default: ./groundskeeper). If not
 #                     present, the script builds it.
 #   KEEP_SESSION=1  — leave the tmux session after success for inspection.
 
@@ -30,7 +30,7 @@ skip() { printf "${C_YELLOW}[SKIP]${C_RESET} %s\n" "$*"; }
 log()  { printf "    %s\n" "$*"; }
 
 FAILED=0
-BIN="${AGENT_DECK_BIN:-./agent-deck}"
+BIN="${AGENT_DECK_BIN:-./groundskeeper}"
 TSESS="adeck-699-$$"
 TMPHOME="$(mktemp -d -t adeck-699.XXXXXX)"
 
@@ -62,12 +62,12 @@ echo
 echo "--- Build ---"
 if [[ ! -x "$BIN" ]]; then
   log "building agent-deck..."
-  GOTOOLCHAIN=go1.25.11 go build -o ./agent-deck ./cmd/agent-deck >/tmp/adeck-699-build.log 2>&1 || {
+  GOTOOLCHAIN=go1.25.11 go build -o ./groundskeeper ./cmd/groundskeeper >/tmp/adeck-699-build.log 2>&1 || {
     fail "go build failed"
     cat /tmp/adeck-699-build.log | tail -20 | sed 's/^/      /'
     exit 1
   }
-  BIN="./agent-deck"
+  BIN="./groundskeeper"
 fi
 pass "binary at $BIN"
 

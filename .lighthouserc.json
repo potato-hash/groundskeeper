@@ -1,7 +1,7 @@
 {
   "ci": {
     "collect": {
-      "startServerCommand": "AGENTDECK_PROFILE=_test ./build/agent-deck web --no-tui --listen 127.0.0.1:19999 --token test",
+      "startServerCommand": "AGENTDECK_PROFILE=_test ./build/groundskeeper web --no-tui --listen 127.0.0.1:19999 --token test",
       "startServerReadyPattern": "Web server: http",
       "url": [
         "http://127.0.0.1:19999/"

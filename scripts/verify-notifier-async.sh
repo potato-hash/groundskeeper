@@ -26,14 +26,14 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="${AGENT_DECK_BIN:-$REPO_ROOT/build/agent-deck}"
+BIN="${AGENT_DECK_BIN:-$REPO_ROOT/build/groundskeeper}"
 
 if ! command -v tmux >/dev/null; then
     echo "[SKIP] tmux not installed; skipping e2e harness." >&2
     exit 0
 fi
 if [[ ! -x "$BIN" ]]; then
-    echo "[FAIL] agent-deck binary not found at $BIN; run 'make build' first." >&2
+    echo "[FAIL] groundskeeper binary not found at $BIN; run 'make build' first." >&2
     exit 1
 fi
 if ! command -v python3 >/dev/null; then

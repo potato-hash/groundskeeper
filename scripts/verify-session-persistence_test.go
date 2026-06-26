@@ -74,9 +74,9 @@ func TestIsOwnTmproot_MatchesMktempOutputAnyParent(t *testing.T) {
 	}
 }
 
-// writeFakeAgentDeck installs a stub `agent-deck` on PATH that answers
+// writeFakeGroundskeeper installs a stub `groundskeeper` on PATH that answers
 // `session show --json <name>` with a fixed payload. Returns the dir to prepend.
-func writeFakeAgentDeck(t *testing.T, tmuxSession string) string {
+func writeFakeGroundskeeper(t *testing.T, tmuxSession string) string {
 	t.Helper()
 	dir := t.TempDir()
 	script := `#!/usr/bin/env bash
@@ -88,9 +88,9 @@ JSON
 fi
 exit 0
 `
-	p := filepath.Join(dir, "agent-deck")
+	p := filepath.Join(dir, "groundskeeper")
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake agent-deck: %v", err)
+		t.Fatalf("write fake groundskeeper: %v", err)
 	}
 	return dir
 }
@@ -100,7 +100,7 @@ func TestResolveTmuxSession_UsesShowJson(t *testing.T) {
 		t.Skip("jq not installed; resolver depends on jq")
 	}
 	const want = "agentdeck_foo_410a3758" // real prefix is agentdeck_, NOT adeck_
-	bin := writeFakeAgentDeck(t, want)
+	bin := writeFakeGroundskeeper(t, want)
 	out, err := sourceAndRun(t,
 		[]string{"PATH=" + bin + ":" + os.Getenv("PATH")},
 		`resolve_tmux_session foo`)
@@ -150,7 +150,7 @@ if [[ "$1" == "session" && "$2" == "show" ]]; then
 fi
 exit 0
 `
-	if err := os.WriteFile(filepath.Join(dir, "agent-deck"), []byte(fake), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "groundskeeper"), []byte(fake), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	out, err := sourceAndRun(t,
@@ -265,7 +265,7 @@ echo "FAILED=${FAILED}"
 }
 
 func TestResolveTmuxSession_NonzeroAgentDeckDoesNotAbortUnderSetE(t *testing.T) {
-	// Regression: agent-deck `session show` exits 2 on not-found. Under the
+	// Regression: groundskeeper `session show` exits 2 on not-found. Under the
 	// harness's `set -euo pipefail`, a bare `tsess="$(resolve_tmux_session ...)"`
 	// in a caller would abort the function instead of degrading to empty/SKIP.
 	// resolve_tmux_session must swallow the nonzero exit and yield empty.
@@ -273,9 +273,9 @@ func TestResolveTmuxSession_NonzeroAgentDeckDoesNotAbortUnderSetE(t *testing.T) 
 		t.Skip("jq not installed; resolver depends on jq")
 	}
 	dir := t.TempDir()
-	// Fake agent-deck that always exits 2 with no output (simulates not-found).
+	// Fake groundskeeper that always exits 2 with no output (simulates not-found).
 	fake := "#!/usr/bin/env bash\nexit 2\n"
-	if err := os.WriteFile(filepath.Join(dir, "agent-deck"), []byte(fake), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "groundskeeper"), []byte(fake), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// Mimic a caller's bare assignment under set -e, then a marker line. If
@@ -458,7 +458,7 @@ if [[ "$1" == "session" && "$2" == "show" ]]; then
 fi
 exit 0
 `
-	if err := os.WriteFile(filepath.Join(dir, "agent-deck"), []byte(fake), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "groundskeeper"), []byte(fake), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	out, err := sourceAndRun(t,
@@ -582,7 +582,7 @@ if [[ "$1" == "session" && "$2" == "show" ]]; then
 fi
 exit 0
 `
-	if err := os.WriteFile(filepath.Join(dir, "agent-deck"), []byte(fake), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "groundskeeper"), []byte(fake), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	out, err := sourceAndRun(t,

@@ -23,9 +23,7 @@ on:
       - 'internal/session/instance.go'
       - 'internal/session/userconfig.go'
       - 'internal/session/storage*.go'
-      - 'cmd/session_cmd.go'
-      - 'cmd/start_cmd.go'
-      - 'cmd/restart_cmd.go'
+      - 'cmd/groundskeeper/session_cmd.go'
       - 'scripts/verify-session-persistence.sh'
       - 'scripts/verify-session-persistence.d/**'
       - 'scripts/verify-session-persistence_test.go'
@@ -79,9 +77,9 @@ jobs:
       - name: Enable user lingering (systemd user scope)
         run: loginctl enable-linger "$USER" || true
 
-      - name: Build groundskeeper compatibility binary
+      - name: Build groundskeeper binary
         run: |
-          go build -o /tmp/agent-deck ./cmd/groundskeeper
+          go build -o /tmp/groundskeeper ./cmd/groundskeeper
           echo "/tmp" >> "$GITHUB_PATH"
 
       - name: Run verification harness (stub claude)

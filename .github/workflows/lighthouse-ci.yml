@@ -19,7 +19,7 @@
 # re-fails the check on the next workflow trigger.
 #
 # Bootstrap note: the PR that first introduces this workflow is also the PR
-# that adds `--no-tui` to `agent-deck web`. The base ref does not have the
+# that adds `--no-tui` to `groundskeeper web`. The base ref does not have the
 # flag yet, so the base lhci collect is `continue-on-error: true` and
 # compare-deltas.mjs skips the delta check (with a logged warning) when no
 # base data is present. Every subsequent PR exercises the full gate.
@@ -136,7 +136,7 @@ jobs:
 
       - name: Stop any lingering test server
         if: always()
-        run: pkill -TERM -f 'agent-deck.*web' || true
+        run: pkill -TERM -f 'groundskeeper.*web' || true
 
       - name: Collect Lighthouse on base (best-effort)
         id: base_collect
@@ -157,7 +157,7 @@ jobs:
 
       - name: Stop any lingering test server
         if: always()
-        run: pkill -TERM -f 'agent-deck.*web' || true
+        run: pkill -TERM -f 'groundskeeper.*web' || true
 
       - name: Assert absolute thresholds (PR head)
         working-directory: pr

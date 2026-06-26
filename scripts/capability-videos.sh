@@ -48,7 +48,7 @@ fi
 mkdir -p "$OUT_DIR" "$(dirname "$BIN")"
 
 echo "capability-videos: building agent-deck binary -> $BIN"
-go build -o "$BIN" ./cmd/agent-deck
+go build -o "$BIN" ./cmd/groundskeeper
 
 # Exported into the tape shell (VHS passes the environment through to ttyd).
 # The tapes source $CAPVID_REPO/tests/capability/vhs/lib/sandbox.sh, which reads

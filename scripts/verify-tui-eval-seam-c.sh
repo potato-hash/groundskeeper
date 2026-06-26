@@ -18,7 +18,7 @@
 #
 # Usage: bash scripts/verify-tui-eval-seam-c.sh
 # Env:
-#   AGENT_DECK_BIN  — path to binary (default: ./agent-deck)
+#   AGENT_DECK_BIN  — path to binary (default: ./groundskeeper)
 #   KEEP_SESSION=1  — leave the tmux session after success for manual inspection
 set -euo pipefail
 
@@ -30,7 +30,7 @@ skip() { printf "${C_YELLOW}[SKIP]${C_RESET} %s\n" "$*"; }
 log()  { printf "    %s\n" "$*"; }
 
 FAILED=0
-BIN="${AGENT_DECK_BIN:-./agent-deck}"
+BIN="${AGENT_DECK_BIN:-./groundskeeper}"
 TSESS="adeck-seamc-$$"
 TMPHOME="$(mktemp -d -t adeck-seamc.XXXXXX)"
 
@@ -48,7 +48,7 @@ trap cleanup EXIT INT TERM
 
 # ---------- preflight ----------
 command -v tmux >/dev/null || { skip "tmux not installed"; exit 0; }
-[[ -x "$BIN" ]] || { fail "binary not found at $BIN (run: go build -o agent-deck ./cmd/agent-deck)"; exit 1; }
+[[ -x "$BIN" ]] || { fail "binary not found at $BIN (run: go build -o groundskeeper ./cmd/groundskeeper)"; exit 1; }
 
 # Isolate state: fresh HOME so we don't touch the user's sessions / config.
 export XDG_CONFIG_HOME="$TMPHOME/.config"
