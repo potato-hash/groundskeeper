@@ -948,16 +948,22 @@ func handleSetup(args []string) {
 		case !info.IsDir():
 			fmt.Printf("  [PARTIAL] %s exists but is not a usable Espalier extension file\n", espalierPath)
 		case !espalierHasPackageManifest(espalierPath):
-			if espalierDirIsEmpty(espalierPath) {
-				fmt.Printf("  [PARTIAL] %s exists but is empty\n", espalierPath)
+			emptyEspalierDir := espalierDirIsEmpty(espalierPath)
+			replaceableManagedCheckout := espalierDirIsRepairableManagedCheckout(espalierPath)
+			if emptyEspalierDir || replaceableManagedCheckout {
+				if emptyEspalierDir {
+					fmt.Printf("  [PARTIAL] %s exists but is empty\n", espalierPath)
+				} else {
+					fmt.Printf("  [PARTIAL] %s looks like an interrupted managed Espalier checkout\n", espalierPath)
+				}
 				if *installMissing || confirm("  Replace it with a fresh Espalier checkout now?") {
 					if err := ensureBunForEspalierBuild(*installMissing, confirm); err != nil {
 						fmt.Fprintf(os.Stderr, "  [ERROR] %v\n", err)
 						if *installMissing {
 							os.Exit(1)
 						}
-					} else if err := os.Remove(espalierPath); err != nil {
-						fmt.Fprintf(os.Stderr, "  [ERROR] remove empty Espalier directory: %v\n", err)
+					} else if err := os.RemoveAll(espalierPath); err != nil {
+						fmt.Fprintf(os.Stderr, "  [ERROR] remove incomplete Espalier directory: %v\n", err)
 						if *installMissing {
 							os.Exit(1)
 						}
@@ -1179,6 +1185,14 @@ func espalierHasPackageManifest(path string) bool {
 func espalierDirIsEmpty(path string) bool {
 	entries, err := os.ReadDir(path)
 	return err == nil && len(entries) == 0
+}
+
+func espalierDirIsRepairableManagedCheckout(path string) bool {
+	if filepath.Clean(path) != filepath.Clean(managedEspalierPath()) {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(path, ".git"))
+	return err == nil && info.IsDir()
 }
 
 // installOMP downloads and installs the omp binary from GitHub releases.

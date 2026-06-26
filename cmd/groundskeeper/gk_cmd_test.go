@@ -281,6 +281,47 @@ func TestSetupInstallMissingReplacesEmptyEspalierDir(t *testing.T) {
 	}
 }
 
+func TestSetupInstallMissingRepairsInterruptedManagedEspalierCheckout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("AGENTDECK_SUPPRESS_TMUX_WARNING", "1")
+	prependStubOMP(t)
+	prependStubGitAndBun(t)
+
+	espalierDir := managedEspalierPath()
+	staleCloneMarker := filepath.Join(espalierDir, ".git", "objects", "partial")
+	if err := os.MkdirAll(filepath.Dir(staleCloneMarker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staleCloneMarker, []byte("interrupted clone\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() {
+		handleSetup([]string{"--non-interactive", "--install-missing", "--espalier-path", espalierDir})
+	})
+	entrypoint := filepath.Join(espalierDir, "dist", "extensions", "index.js")
+	for _, want := range []string{
+		"looks like an interrupted managed Espalier checkout",
+		"Cloning Espalier to " + espalierDir,
+		"[OK] Espalier installed and built",
+		"Setup complete!",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	if _, err := os.Stat(entrypoint); err != nil {
+		t.Fatalf("expected stub build to create Espalier entrypoint: %v", err)
+	}
+	if _, err := os.Stat(staleCloneMarker); !os.IsNotExist(err) {
+		t.Fatalf("expected stale interrupted clone marker to be removed, stat err=%v", err)
+	}
+}
+
 func TestLookupBunFindsHomeBunBin(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -415,6 +456,9 @@ func TestSetupRefusesNonEmptyNonEspalierDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(badDir, "README.md"), []byte("user data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(badDir, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=TestSetupRefusesNonEmptyNonEspalierDir")
