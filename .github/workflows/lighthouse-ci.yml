@@ -86,7 +86,7 @@ jobs:
           output=$(gh label create "$ACK_LABEL" \
             --repo "$GITHUB_REPOSITORY" \
             --color "fbca04" \
-            --description "Maintainer ack: lighthouse-ci delta gate regression is intentional. Removing the label re-fails the check." 2>&1)
+            --description "Maintainer ack for an intentional Lighthouse delta regression." 2>&1)
           rc=$?
           if [ "$rc" -eq 0 ]; then
             echo "Label '$ACK_LABEL' created."
