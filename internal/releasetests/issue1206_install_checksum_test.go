@@ -149,6 +149,23 @@ func TestInstallScript_AuthenticatesGitHubReleaseAPIWhenTokenIsAvailable(t *test
 	}
 }
 
+func TestInstallScript_NormalizesReleaseAssetCountFallback(t *testing.T) {
+	body := installScriptBody(t)
+
+	if strings.Contains(body, `grep -c '"browser_download_url"' || echo "0"`) {
+		t.Fatal("install.sh must not append a second zero after grep -c reports no release assets")
+	}
+	for _, want := range []string{
+		`tr ',' '\n' | grep -c '"browser_download_url"' || true`,
+		`[[ "$ASSET_COUNT" =~ ^[0-9]+$ ]]`,
+		`ASSET_COUNT=0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install.sh should normalize release asset counts before numeric comparison; missing %q", want)
+		}
+	}
+}
+
 func TestInstallScript_UsesGroundskeeperInstallerCopy(t *testing.T) {
 	body := installScriptBody(t)
 

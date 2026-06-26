@@ -749,11 +749,14 @@ if [[ "$INSTALLED_FROM_SOURCE" != "true" ]]; then
 
     # Parse asset list: prefer jq for reliability, fall back to grep
     if command -v jq &> /dev/null && [[ -n "$RELEASE_JSON" ]]; then
-        ASSET_NAMES=$(echo "$RELEASE_JSON" | jq -r '.assets[].name // empty' 2>/dev/null || true)
-        ASSET_COUNT=$(echo "$RELEASE_JSON" | jq '.assets | length' 2>/dev/null || echo "0")
+        ASSET_NAMES=$(printf '%s\n' "$RELEASE_JSON" | jq -r '.assets[]?.name // empty' 2>/dev/null || true)
+        ASSET_COUNT=$(printf '%s\n' "$RELEASE_JSON" | jq '.assets | length' 2>/dev/null || true)
     else
-        ASSET_NAMES=$(echo "$RELEASE_JSON" | grep '"name"' | sed 's/.*"name": *"\([^"]*\)".*/\1/' | grep '\.tar\.gz\|checksums' || true)
-        ASSET_COUNT=$(echo "$RELEASE_JSON" | grep -c '"browser_download_url"' || echo "0")
+        ASSET_NAMES=$(printf '%s\n' "$RELEASE_JSON" | grep '"name"' | sed 's/.*"name": *"\([^"]*\)".*/\1/' | grep '\.tar\.gz\|checksums' || true)
+        ASSET_COUNT=$(printf '%s\n' "$RELEASE_JSON" | tr ',' '\n' | grep -c '"browser_download_url"' || true)
+    fi
+    if ! [[ "$ASSET_COUNT" =~ ^[0-9]+$ ]]; then
+        ASSET_COUNT=0
     fi
 
     if [[ "$ASSET_COUNT" -eq 0 ]]; then
