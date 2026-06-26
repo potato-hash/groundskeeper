@@ -740,6 +740,92 @@ printf 'install clean\n'
 	}
 }
 
+func TestPublicInstallSmokeScriptCanFetchThroughGitHubContentsAPI(t *testing.T) {
+	home := t.TempDir()
+	installDir := filepath.Join(home, "bin")
+	curlLog := filepath.Join(home, "curl-args.txt")
+	curlDir := filepath.Join(home, "curl-bin")
+	if err := os.MkdirAll(curlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	curlStub := `#!/usr/bin/env sh
+for arg in "$@"; do
+  printf '%s\n' "$arg" >> "$HOME/curl-args.txt"
+  url="$arg"
+done
+case "$url" in
+  *install.sh*)
+    cat <<'INSTALL'
+#!/usr/bin/env sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--dir" ]; then
+    mkdir -p "$2"
+    printf '#!/usr/bin/env sh\nprintf groundskeeper\n' > "$2/groundskeeper"
+    chmod +x "$2/groundskeeper"
+    break
+  fi
+  shift
+done
+printf 'install via api\n'
+INSTALL
+    ;;
+  *verify-install-state.sh*)
+    cat <<'VERIFY'
+#!/usr/bin/env sh
+command -v groundskeeper >/dev/null || exit 7
+printf 'verify via api\n'
+VERIFY
+    ;;
+  *)
+    exit 22
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(curlDir, "curl"), []byte(curlStub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"PATH="+curlDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GK_SMOKE_USE_API_RAW=1",
+		"GK_SMOKE_VERIFY_MODEL=0",
+		"GK_SMOKE_INSTALL_DIR="+installDir,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("smoke-public-install.sh failed with API raw stubs: %v\n%s", err, out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"https://api.github.com/repos/potato-hash/groundskeeper/contents/install.sh?ref=main",
+		"https://api.github.com/repos/potato-hash/groundskeeper/contents/scripts/verify-install-state.sh?ref=main",
+		"install via api",
+		"verify via api",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("smoke output missing %q\n--- output ---\n%s", want, body)
+		}
+	}
+	args, err := os.ReadFile(curlLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argLog := string(args)
+	if got := strings.Count(argLog, "Accept: application/vnd.github.raw"); got != 2 {
+		t.Fatalf("curl args should include GitHub raw Accept header twice, got %d\n--- args ---\n%s", got, argLog)
+	}
+	for _, want := range []string{
+		"https://api.github.com/repos/potato-hash/groundskeeper/contents/install.sh?ref=main",
+		"https://api.github.com/repos/potato-hash/groundskeeper/contents/scripts/verify-install-state.sh?ref=main",
+	} {
+		if !strings.Contains(argLog, want) {
+			t.Fatalf("curl args missing %q\n--- args ---\n%s", want, argLog)
+		}
+	}
+}
+
 func TestSetupCommandEnvAliasesOllamaAPIKeyForOllamaCloud(t *testing.T) {
 	t.Setenv("OLLAMA_API_KEY", "temporary-test-key")
 	t.Setenv("OLLAMA_CLOUD_API_KEY", "")

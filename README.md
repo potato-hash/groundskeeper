@@ -78,6 +78,8 @@ curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/scri
 Set `GK_SMOKE_INSTALL_DIR=/tmp/groundskeeper-smoke-bin` to keep a smoke run in
 an isolated install directory; the wrapper passes it through as `--dir` and
 adds it to `PATH` for verification.
+Set `GK_SMOKE_USE_API_RAW=1` to fetch the installer and verifier through the
+GitHub Contents API raw endpoint when testing a freshly pushed `main`.
 
 Local development:
 

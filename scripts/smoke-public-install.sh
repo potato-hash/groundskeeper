@@ -13,8 +13,17 @@ set -euo pipefail
 REPO="${GK_SMOKE_REPO:-potato-hash/groundskeeper}"
 REF="${GK_SMOKE_REF:-main}"
 MODEL="${GK_SMOKE_MODEL:-ollama-cloud/glm-5.2}"
-INSTALL_URL="${GK_SMOKE_INSTALL_URL:-https://raw.githubusercontent.com/${REPO}/${REF}/install.sh}"
-VERIFY_URL="${GK_SMOKE_VERIFY_URL:-https://raw.githubusercontent.com/${REPO}/${REF}/scripts/verify-install-state.sh}"
+RAW_BASE="https://raw.githubusercontent.com/${REPO}/${REF}"
+API_BASE="https://api.github.com/repos/${REPO}/contents"
+if [[ "${GK_SMOKE_USE_API_RAW:-0}" == "1" ]]; then
+  DEFAULT_INSTALL_URL="${API_BASE}/install.sh?ref=${REF}"
+  DEFAULT_VERIFY_URL="${API_BASE}/scripts/verify-install-state.sh?ref=${REF}"
+else
+  DEFAULT_INSTALL_URL="${RAW_BASE}/install.sh"
+  DEFAULT_VERIFY_URL="${RAW_BASE}/scripts/verify-install-state.sh"
+fi
+INSTALL_URL="${GK_SMOKE_INSTALL_URL:-$DEFAULT_INSTALL_URL}"
+VERIFY_URL="${GK_SMOKE_VERIFY_URL:-$DEFAULT_VERIFY_URL}"
 VERIFY_MODEL="${GK_SMOKE_VERIFY_MODEL:-1}"
 INSTALL_DIR="${GK_SMOKE_INSTALL_DIR:-}"
 
@@ -52,6 +61,18 @@ scan_output_for_secret_values() {
   [[ "$found" -eq 0 ]]
 }
 
+fetch_script() {
+  local url="$1"
+  case "$url" in
+    https://api.github.com/repos/*/contents/*)
+      curl -fsSL -H 'Accept: application/vnd.github.raw' "$url"
+      ;;
+    *)
+      curl -fsSL "$url"
+      ;;
+  esac
+}
+
 if [[ "$VERIFY_MODEL" != "0" ]]; then
   case "$MODEL" in
     ollama-cloud/*)
@@ -76,7 +97,7 @@ fi
 
 printf '[INFO] Installing Groundskeeper from %s\n' "$INSTALL_URL"
 set +e
-bash -c 'curl -fsSL "$1" | bash -s -- "${@:2}"' bash "$INSTALL_URL" "${install_args[@]}" >"$log_file" 2>&1
+{ fetch_script "$INSTALL_URL" | bash -s -- "${install_args[@]}"; } >"$log_file" 2>&1
 install_status=$?
 set -e
 
@@ -92,5 +113,5 @@ fi
 ok "installer output did not contain sensitive environment values"
 
 printf '[INFO] Verifying install state from %s\n' "$VERIFY_URL"
-curl -fsSL "$VERIFY_URL" | bash
+fetch_script "$VERIFY_URL" | bash
 ok "public install smoke completed"
