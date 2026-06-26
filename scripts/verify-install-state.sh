@@ -178,6 +178,11 @@ if [[ -d "$ESPALIER_ROOT" ]]; then
 else
   fail "Espalier checkout missing: $ESPALIER_ROOT"
 fi
+if [[ -f "$ESPALIER_ROOT/package.json" ]]; then
+  ok "Espalier package manifest: $ESPALIER_ROOT/package.json"
+else
+  fail "Espalier package manifest missing: $ESPALIER_ROOT/package.json"
+fi
 if [[ -d "$ESPALIER_ROOT/node_modules" ]]; then
   ok "Espalier dependencies: $ESPALIER_ROOT/node_modules"
 else

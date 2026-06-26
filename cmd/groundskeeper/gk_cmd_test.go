@@ -563,6 +563,7 @@ func TestInstallStateVerifierScansWithoutPrintingSecretValues(t *testing.T) {
 		"find_executable",
 		"$HOME/.local/bin/groundskeeper",
 		"$HOME/.local/bin/omp",
+		"$ESPALIER_ROOT/package.json",
 		"dist/extensions/index.js",
 		"$data_dir/gk.db",
 		"$HOME/.omp",
@@ -610,6 +611,9 @@ func TestInstallStateVerifierPrintsSummaryWithoutSecretValues(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(data, "groundskeeper", "gk.db"), []byte("db"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(espalier, "package.json"), []byte(`{"name":"espalier"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(espalier, "dist", "extensions", "index.js"), []byte("export default {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -634,6 +638,7 @@ func TestInstallStateVerifierPrintsSummaryWithoutSecretValues(t *testing.T) {
 		"groundskeeper: " + filepath.Join(bin, "groundskeeper"),
 		"omp: " + filepath.Join(bin, "omp"),
 		"Espalier extension: " + filepath.Join(espalier, "dist", "extensions", "index.js"),
+		"Espalier package manifest: " + filepath.Join(espalier, "package.json"),
 		"Groundskeeper DB: " + filepath.Join(data, "groundskeeper", "gk.db"),
 		"Secret scan roots:",
 		"Next commands:",
@@ -646,6 +651,60 @@ func TestInstallStateVerifierPrintsSummaryWithoutSecretValues(t *testing.T) {
 	}
 	if strings.Contains(body, "summary-fixture-secret") {
 		t.Fatalf("verify output printed a secret value\n--- output ---\n%s", body)
+	}
+}
+
+func TestInstallStateVerifierRequiresEspalierPackageManifest(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, "bin")
+	data := filepath.Join(home, "data")
+	config := filepath.Join(home, "config")
+	cache := filepath.Join(home, "cache")
+	espalier := filepath.Join(data, "groundskeeper", "espalier")
+	for _, dir := range []string{
+		bin,
+		filepath.Join(data, "groundskeeper"),
+		filepath.Join(config, "groundskeeper"),
+		filepath.Join(cache, "groundskeeper"),
+		filepath.Join(espalier, "node_modules"),
+		filepath.Join(espalier, "dist", "extensions"),
+		filepath.Join(home, ".omp"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"groundskeeper", "omp"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(data, "groundskeeper", "gk.db"), []byte("db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(espalier, "dist", "extensions", "index.js"), []byte("export default {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "../../scripts/verify-install-state.sh")
+	cmd.Env = []string{
+		"HOME=" + home,
+		"PATH=" + bin + string(os.PathListSeparator) + "/usr/bin:/bin:/usr/sbin:/sbin",
+		"XDG_DATA_HOME=" + data,
+		"XDG_CONFIG_HOME=" + config,
+		"XDG_CACHE_HOME=" + cache,
+		"GK_SMOKE_MODEL=test/model",
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("verify-install-state.sh unexpectedly passed without Espalier package.json\n%s", out)
+	}
+	body := string(out)
+	if !strings.Contains(body, "Espalier package manifest missing: "+filepath.Join(espalier, "package.json")) {
+		t.Fatalf("verify output missing package manifest failure\n--- output ---\n%s", body)
+	}
+	if !strings.Contains(body, "Install-state verification failed with 1 issue(s).") {
+		t.Fatalf("verify output missing failure summary\n--- output ---\n%s", body)
 	}
 }
 
