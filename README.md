@@ -88,6 +88,12 @@ gh secret set OLLAMA_CLOUD_API_KEY --repo potato-hash/groundskeeper
 gh workflow run public-install-smoke.yml --repo potato-hash/groundskeeper --ref main -f ref=main
 ```
 
+Or dispatch and watch the same workflow with the checked-in helper:
+
+```sh
+scripts/run-public-install-smoke-workflow.sh
+```
+
 That workflow runs the same public smoke wrapper on `macos-latest` with
 temporary install, config, data, and cache directories. It uses the GitHub
 Contents API raw endpoint so freshly pushed refs are not hidden by

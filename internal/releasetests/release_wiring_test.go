@@ -117,11 +117,14 @@ func TestPublicInstallCopyReflectsReleaseBinaryPath(t *testing.T) {
 
 func TestPublicInstallSmokeWorkflowRunsMacOSSecretBackedSmoke(t *testing.T) {
 	workflow := readRepoFile(t, ".github/workflows/public-install-smoke.yml")
+	helper := readRepoFile(t, "scripts/run-public-install-smoke-workflow.sh")
 	readme := readRepoFile(t, "README.md")
 	workflowReadme := readRepoFile(t, ".github/workflows/README.md")
 
 	for _, want := range []string{
 		"workflow_dispatch:",
+		"run-name: public-install-smoke ${{ inputs.ref || github.ref_name }} ${{ inputs.dispatch_id }}",
+		"dispatch_id:",
 		"runs-on: macos-latest",
 		"OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}",
 		"GK_SMOKE_REF: ${{ inputs.ref || github.ref_name }}",
@@ -148,6 +151,7 @@ func TestPublicInstallSmokeWorkflowRunsMacOSSecretBackedSmoke(t *testing.T) {
 	for _, want := range []string{
 		"gh secret set OLLAMA_CLOUD_API_KEY --repo potato-hash/groundskeeper",
 		"gh workflow run public-install-smoke.yml --repo potato-hash/groundskeeper --ref main -f ref=main",
+		"scripts/run-public-install-smoke-workflow.sh",
 		"GitHub Contents API raw endpoint",
 		"when `ref` is omitted, it fetches scripts\nfrom the workflow ref",
 	} {
@@ -158,8 +162,26 @@ func TestPublicInstallSmokeWorkflowRunsMacOSSecretBackedSmoke(t *testing.T) {
 	if !strings.Contains(workflowReadme, "public-install-smoke.yml") ||
 		!strings.Contains(workflowReadme, "secrets.OLLAMA_CLOUD_API_KEY") ||
 		!strings.Contains(workflowReadme, "GitHub Contents API raw endpoint") ||
+		!strings.Contains(workflowReadme, "scripts/run-public-install-smoke-workflow.sh") ||
 		!strings.Contains(workflowReadme, "defaults the smoke script ref to the workflow ref") {
 		t.Fatal("workflow README must document the manual public install smoke")
+	}
+	for _, want := range []string{
+		`gh secret list --repo "$REPO"`,
+		`grep -Fxq OLLAMA_CLOUD_API_KEY`,
+		`dispatch_id="gk-smoke-$(date +%s)-$$"`,
+		`gh workflow run "$WORKFLOW" --repo "$REPO" --ref "$REF" -f "ref=$REF" -f "dispatch_id=$dispatch_id"`,
+		`select(.displayTitle | contains(\"$dispatch_id\"))`,
+		`gh run watch "$run_id" --repo "$REPO" --exit-status`,
+	} {
+		if !strings.Contains(helper, want) {
+			t.Fatalf("public smoke workflow helper missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"--body", "OLLAMA_CLOUD_API_KEY=", "printenv OLLAMA_CLOUD_API_KEY"} {
+		if strings.Contains(helper, forbidden) {
+			t.Fatalf("public smoke workflow helper must not accept or print secret values; found %q", forbidden)
+		}
 	}
 }
 

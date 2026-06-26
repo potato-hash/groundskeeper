@@ -1,10 +1,15 @@
 name: public-install-smoke
+run-name: public-install-smoke ${{ inputs.ref || github.ref_name }} ${{ inputs.dispatch_id }}
 
 on:
   workflow_dispatch:
     inputs:
       ref:
         description: 'Git ref for public scripts to fetch (defaults to the workflow ref)'
+        required: false
+        type: string
+      dispatch_id:
+        description: 'Optional correlation id for dispatch helpers'
         required: false
         type: string
 
