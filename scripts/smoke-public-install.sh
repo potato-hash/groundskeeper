@@ -84,9 +84,9 @@ has_sensitive_env_values() {
 verifier_reports_secret_scan() {
   local log_file="$1"
   if has_sensitive_env_values; then
-    grep -Fq '[OK] secret persistence scan passed across ' "$log_file"
+    grep -Eq '^\[OK\][[:space:]]+secret persistence scan passed across ' "$log_file"
   else
-    grep -Fq '[OK] secret persistence scan passed across ' "$log_file" ||
+    grep -Eq '^\[OK\][[:space:]]+secret persistence scan passed across ' "$log_file" ||
       grep -Fq '[WARN] no sensitive env values available to scan' "$log_file"
   fi
 }

@@ -2121,7 +2121,7 @@ INSTALL
 #!/usr/bin/env sh
 command -v groundskeeper >/dev/null || exit 7
 printf 'verify via api\n'
-printf '[OK] secret persistence scan passed across 3 dirs\n'
+printf '[OK]   secret persistence scan passed across 3 dirs\n'
 VERIFY
     ;;
   *)
