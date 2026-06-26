@@ -1483,6 +1483,7 @@ func TestPublicInstallSmokeScriptRejectsLeakedVerifierOutput(t *testing.T) {
 		"OLLAMA_API_KEY=",
 		"OMP_AUTH_BROKER_TOKEN=",
 		sensitiveName+"="+sensitiveValue,
+		"GK_SMOKE_ALLOW_UNTRUSTED=1",
 		"GK_SMOKE_VERIFY_MODEL=0",
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
 		"GK_SMOKE_VERIFY_URL=file://"+verifyStub,
@@ -1526,7 +1527,7 @@ printf 'install clean\n'
 	if err := os.WriteFile(installStub, []byte(installBody), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	verifyBody := "#!/usr/bin/env sh\nfound=$(command -v groundskeeper) || exit 7\n[ \"$found\" = \"$GK_SMOKE_INSTALL_DIR/groundskeeper\" ] || exit 8\nprintf 'verify clean\\n'\n"
+	verifyBody := "#!/usr/bin/env sh\nfound=$(command -v groundskeeper) || exit 7\n[ \"$found\" = \"$GK_SMOKE_INSTALL_DIR/groundskeeper\" ] || exit 8\nprintf 'verify clean\\n'\nprintf '[OK] secret persistence scan passed across 3 dirs\\n'\n"
 	if err := os.WriteFile(verifyStub, []byte(verifyBody), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1540,6 +1541,7 @@ printf 'install clean\n'
 		"XDG_DATA_HOME=",
 		"GK_ESPALIER_PATH=",
 		"GK_SMOKE_BUN_INSTALL=",
+		"GK_SMOKE_ALLOW_UNTRUSTED=1",
 		"GK_SMOKE_VERIFY_MODEL=0",
 		"GK_SMOKE_INSTALL_DIR="+installDir,
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
@@ -1554,6 +1556,7 @@ printf 'install clean\n'
 		"install clean",
 		"verify clean",
 		"installer output did not contain sensitive environment values",
+		"install-state verifier reported secret persistence scan evidence",
 		"public install smoke completed",
 	} {
 		if !strings.Contains(body, want) {
@@ -1584,7 +1587,42 @@ printf 'install clean\n'
 	}
 }
 
-func TestPublicInstallSmokeScriptRejectsCredentialBackedUntrustedOverrides(t *testing.T) {
+func TestPublicInstallSmokeScriptRequiresVerifierSecretScanEvidence(t *testing.T) {
+	home := t.TempDir()
+	installStub := filepath.Join(home, "install.sh")
+	verifyStub := filepath.Join(home, "verify.sh")
+	if err := os.WriteFile(installStub, []byte("#!/usr/bin/env sh\nprintf 'install clean\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify without evidence\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"OLLAMA_CLOUD_API_KEY=",
+		"OLLAMA_API_KEY=",
+		"OMP_AUTH_BROKER_TOKEN=",
+		"GK_SMOKE_ALLOW_UNTRUSTED=1",
+		"GK_SMOKE_VERIFY_MODEL=0",
+		"GK_SMOKE_INSTALL_URL=file://"+installStub,
+		"GK_SMOKE_VERIFY_URL=file://"+verifyStub,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("smoke-public-install.sh unexpectedly succeeded without verifier scan evidence\n%s", out)
+	}
+	body := string(out)
+	if !strings.Contains(body, "install-state verifier did not report secret persistence scan evidence") {
+		t.Fatalf("smoke output missing verifier evidence failure\n--- output ---\n%s", body)
+	}
+	if strings.Contains(body, "public install smoke completed") {
+		t.Fatalf("smoke reported completion after missing verifier evidence\n--- output ---\n%s", body)
+	}
+}
+
+func TestPublicInstallSmokeScriptRejectsSecretBearingUntrustedOverrides(t *testing.T) {
 	home := t.TempDir()
 	curlDir := filepath.Join(home, "curl-bin")
 	installStub := filepath.Join(home, "install.sh")
@@ -1628,10 +1666,10 @@ func TestPublicInstallSmokeScriptRejectsCredentialBackedUntrustedOverrides(t *te
 			cmd.Env = append(cmd.Env, tc.env...)
 			out, err := cmd.CombinedOutput()
 			if err == nil {
-				t.Fatalf("smoke-public-install.sh unexpectedly allowed untrusted credential-backed source\n%s", out)
+				t.Fatalf("smoke-public-install.sh unexpectedly allowed untrusted secret-bearing source\n%s", out)
 			}
 			body := string(out)
-			if !strings.Contains(body, "credential-backed public smoke only runs trusted Groundskeeper scripts") {
+			if !strings.Contains(body, "secret-bearing public smoke only runs trusted Groundskeeper scripts") {
 				t.Fatalf("smoke output missing untrusted-source failure\n--- output ---\n%s", body)
 			}
 			for _, leaked := range []string{"smoke-fixture-value", "install should not run", "verify should not run", "curl should not run"} {
@@ -1640,6 +1678,91 @@ func TestPublicInstallSmokeScriptRejectsCredentialBackedUntrustedOverrides(t *te
 				}
 			}
 		})
+	}
+}
+
+func TestPublicInstallSmokeScriptRejectsUntrustedOverridesWithUnrelatedSecret(t *testing.T) {
+	home := t.TempDir()
+	installStub := filepath.Join(home, "install.sh")
+	verifyStub := filepath.Join(home, "verify.sh")
+	secretName := "SMOKE_SECRET_TOKEN"
+	secretValue := "unrelated-fixture-secret"
+	if err := os.WriteFile(installStub, []byte("#!/usr/bin/env sh\nprintf 'install should not run\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify should not run\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"OLLAMA_CLOUD_API_KEY=",
+		"OLLAMA_API_KEY=",
+		"OMP_AUTH_BROKER_TOKEN=",
+		secretName+"="+secretValue,
+		"GK_SMOKE_VERIFY_MODEL=0",
+		"GK_SMOKE_INSTALL_URL=file://"+installStub,
+		"GK_SMOKE_VERIFY_URL=file://"+verifyStub,
+		"GK_SMOKE_ALLOW_UNTRUSTED=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("smoke-public-install.sh unexpectedly allowed untrusted overrides with unrelated secret\n%s", out)
+	}
+	body := string(out)
+	if !strings.Contains(body, "secret-bearing public smoke only runs trusted Groundskeeper scripts") {
+		t.Fatalf("smoke output missing untrusted-source failure\n--- output ---\n%s", body)
+	}
+	for _, leaked := range []string{secretValue, "install should not run", "verify should not run"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("smoke output leaked or executed %q\n--- output ---\n%s", leaked, body)
+		}
+	}
+}
+
+func TestPublicInstallSmokeScriptRejectsUntrustedOverridesWithOmpCredentialStore(t *testing.T) {
+	home := t.TempDir()
+	installStub := filepath.Join(home, "install.sh")
+	verifyStub := filepath.Join(home, "verify.sh")
+	agentDir := filepath.Join(home, ".omp", "agent")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.db"), []byte("sqlite fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installStub, []byte("#!/usr/bin/env sh\nprintf 'install should not run\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify should not run\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
+	cmd.Env = []string{
+		"HOME=" + home,
+		"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+		"OLLAMA_CLOUD_API_KEY=",
+		"OLLAMA_API_KEY=",
+		"OMP_AUTH_BROKER_TOKEN=",
+		"GK_SMOKE_VERIFY_MODEL=0",
+		"GK_SMOKE_INSTALL_URL=file://" + installStub,
+		"GK_SMOKE_VERIFY_URL=file://" + verifyStub,
+		"GK_SMOKE_ALLOW_UNTRUSTED=",
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("smoke-public-install.sh unexpectedly allowed untrusted overrides with OMP credential store\n%s", out)
+	}
+	body := string(out)
+	if !strings.Contains(body, "secret-bearing public smoke only runs trusted Groundskeeper scripts") {
+		t.Fatalf("smoke output missing untrusted-source failure\n--- output ---\n%s", body)
+	}
+	for _, leaked := range []string{"install should not run", "verify should not run"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("smoke output executed %q\n--- output ---\n%s", leaked, body)
+		}
 	}
 }
 
@@ -1669,7 +1792,7 @@ func TestPublicInstallSmokeScriptRejectsOllamaCloudVerificationFromUntrustedOver
 		t.Fatalf("smoke-public-install.sh unexpectedly allowed ollama-cloud verification from local overrides\n%s", out)
 	}
 	body := string(out)
-	if !strings.Contains(body, "credential-backed public smoke only runs trusted Groundskeeper scripts") {
+	if !strings.Contains(body, "secret-bearing public smoke only runs trusted Groundskeeper scripts") {
 		t.Fatalf("smoke output missing untrusted-source failure\n--- output ---\n%s", body)
 	}
 	for _, leaked := range []string{"install should not run", "verify should not run"} {
@@ -1773,6 +1896,7 @@ printf 'install skipped marker\n'
 		"OLLAMA_CLOUD_API_KEY=",
 		"OLLAMA_API_KEY=",
 		"OMP_AUTH_BROKER_TOKEN=",
+		"GK_SMOKE_ALLOW_UNTRUSTED=1",
 		"GK_SMOKE_MODEL=test/provider",
 		"GK_SMOKE_INSTALL_DIR="+installDir,
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
@@ -1813,7 +1937,7 @@ printf '[OK] OMP model smoke test passed\n'
 	if err := os.WriteFile(installStub, []byte(installBody), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify after model\\n'\n"), 0o755); err != nil {
+	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify after model\\n'\nprintf '[OK] secret persistence scan passed across 3 dirs\\n'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1823,6 +1947,7 @@ printf '[OK] OMP model smoke test passed\n'
 		"OLLAMA_CLOUD_API_KEY=",
 		"OLLAMA_API_KEY=",
 		"OMP_AUTH_BROKER_TOKEN=",
+		"GK_SMOKE_ALLOW_UNTRUSTED=1",
 		"GK_SMOKE_MODEL=test/provider",
 		"GK_SMOKE_INSTALL_DIR="+installDir,
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
@@ -1872,7 +1997,7 @@ printf '[OK] OMP model smoke test passed\n'
 	if err := os.WriteFile(installStub, []byte(installBody), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify broker\\n'\n"), 0o755); err != nil {
+	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify broker\\n'\nprintf '[OK] secret persistence scan passed across 3 dirs\\n'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1929,7 +2054,7 @@ printf '[OK] OMP model smoke test passed\n'
 	if err := os.WriteFile(installStub, []byte(installBody), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify store\\n'\n"), 0o755); err != nil {
+	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify store\\n'\nprintf '[OK] secret persistence scan passed across 3 dirs\\n'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1996,6 +2121,7 @@ INSTALL
 #!/usr/bin/env sh
 command -v groundskeeper >/dev/null || exit 7
 printf 'verify via api\n'
+printf '[OK] secret persistence scan passed across 3 dirs\n'
 VERIFY
     ;;
   *)

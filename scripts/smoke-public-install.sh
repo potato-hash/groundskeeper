@@ -69,6 +69,33 @@ scan_output_for_secret_values() {
   [[ "$found" -eq 0 ]]
 }
 
+has_sensitive_env_values() {
+  local name value
+
+  while IFS='=' read -r name value; do
+    [[ -n "${name:-}" && ${#value} -ge 4 ]] || continue
+    is_sensitive_env_name "$name" || continue
+    return 0
+  done < <(env)
+
+  return 1
+}
+
+verifier_reports_secret_scan() {
+  local log_file="$1"
+  if has_sensitive_env_values; then
+    grep -Fq '[OK] secret persistence scan passed across ' "$log_file"
+  else
+    grep -Fq '[OK] secret persistence scan passed across ' "$log_file" ||
+      grep -Fq '[WARN] no sensitive env values available to scan' "$log_file"
+  fi
+}
+
+has_secret_material() {
+  has_sensitive_env_values && return 0
+  [[ -f "$HOME/.omp/agent/agent.db" ]]
+}
+
 fetch_script() {
   local url="$1"
   case "$url" in
@@ -95,19 +122,13 @@ is_trusted_smoke_source() {
      "$REF" == "$GITHUB_SHA" ]]
 }
 
-has_model_auth() {
-  [[ -n "${OLLAMA_CLOUD_API_KEY:-${OLLAMA_API_KEY:-}}" ||
-     -n "${OMP_AUTH_BROKER_TOKEN:-}" ||
-     -f "$HOME/.omp/agent/agent.db" ]]
-}
-
 source_needs_trust() {
-  has_model_auth && return 0
+  has_secret_material && return 0
   [[ "$VERIFY_MODEL" != "0" && "$MODEL" == ollama-cloud/* ]]
 }
 
 if source_needs_trust && [[ "${GK_SMOKE_ALLOW_UNTRUSTED:-0}" != "1" ]] && ! is_trusted_smoke_source; then
-  fail "credential-backed public smoke only runs trusted Groundskeeper scripts; set GK_SMOKE_VERIFY_MODEL=0 without credentials for local stubs or GK_SMOKE_ALLOW_UNTRUSTED=1 to override"
+  fail "secret-bearing public smoke only runs trusted Groundskeeper scripts; set GK_SMOKE_VERIFY_MODEL=0 without secrets for local stubs or GK_SMOKE_ALLOW_UNTRUSTED=1 to override"
 fi
 
 if [[ "$VERIFY_MODEL" != "0" ]]; then
@@ -168,5 +189,9 @@ cat "$verify_log_file"
 if [[ "$verify_status" -ne 0 ]]; then
   fail "install-state verifier failed with exit ${verify_status}"
 fi
+if ! verifier_reports_secret_scan "$verify_log_file"; then
+  fail "install-state verifier did not report secret persistence scan evidence"
+fi
 ok "verifier output did not contain sensitive environment values"
+ok "install-state verifier reported secret persistence scan evidence"
 ok "public install smoke completed"
