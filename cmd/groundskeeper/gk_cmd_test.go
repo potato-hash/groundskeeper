@@ -221,6 +221,7 @@ func TestSetupNonInteractiveExitsWhenRequiredPiecesMissing(t *testing.T) {
 		os.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 		os.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 		os.Setenv("PATH", filepath.Join(home, "empty-bin"))
+		os.Setenv("BUN_INSTALL", "")
 		handleSetup([]string{"--non-interactive", "--espalier-path", filepath.Join(home, "missing-espalier")})
 		return
 	}
@@ -230,7 +231,7 @@ func TestSetupNonInteractiveExitsWhenRequiredPiecesMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=TestSetupNonInteractiveExitsWhenRequiredPiecesMissing")
-	cmd.Env = append(os.Environ(), "GK_SETUP_MISSING_HELPER=1", "GK_TEST_HOME="+home)
+	cmd.Env = append(os.Environ(), "GK_SETUP_MISSING_HELPER=1", "GK_TEST_HOME="+home, "BUN_INSTALL=")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("setup unexpectedly succeeded\n%s", out)
@@ -356,6 +357,25 @@ func TestLookupBunFindsBunInstallBin(t *testing.T) {
 
 	if got := lookupBun(); got != bunPath {
 		t.Fatalf("lookupBun() = %q, want %q", got, bunPath)
+	}
+}
+
+func TestLookupOMPFindsBunInstallBin(t *testing.T) {
+	home := t.TempDir()
+	bunInstall := filepath.Join(home, "custom-bun")
+	t.Setenv("HOME", filepath.Join(home, "unused-home"))
+	t.Setenv("BUN_INSTALL", bunInstall)
+	t.Setenv("PATH", filepath.Join(home, "empty-bin"))
+	ompPath := filepath.Join(bunInstall, "bin", "omp")
+	if err := os.MkdirAll(filepath.Dir(ompPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ompPath, []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := lookupOMP(); got != ompPath {
+		t.Fatalf("lookupOMP() = %q, want %q", got, ompPath)
 	}
 }
 
@@ -1414,11 +1434,13 @@ func TestPublicInstallSmokeScriptRunsVerifierAfterCleanInstall(t *testing.T) {
 	installDir := filepath.Join(home, "bin")
 	argsPath := filepath.Join(home, "install-args.txt")
 	espalierPathLog := filepath.Join(home, "espalier-path.txt")
+	bunInstallLog := filepath.Join(home, "bun-install.txt")
 	installStub := filepath.Join(home, "install.sh")
 	verifyStub := filepath.Join(home, "verify.sh")
 	installBody := `#!/usr/bin/env sh
 printf '%s\n' "$@" > "$HOME/install-args.txt"
 printf '%s\n' "$GK_ESPALIER_PATH" > "$HOME/espalier-path.txt"
+printf '%s\n' "$BUN_INSTALL" > "$HOME/bun-install.txt"
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--dir" ]; then
     mkdir -p "$2"
@@ -1443,6 +1465,7 @@ printf 'install clean\n'
 		"HOME="+home,
 		"XDG_DATA_HOME=",
 		"GK_ESPALIER_PATH=",
+		"GK_SMOKE_BUN_INSTALL=",
 		"GK_SMOKE_VERIFY_MODEL=0",
 		"GK_SMOKE_INSTALL_DIR="+installDir,
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
@@ -1477,6 +1500,77 @@ printf 'install clean\n'
 	wantEspalierPath := filepath.Join(home, ".local", "share", "groundskeeper", "espalier")
 	if strings.TrimSpace(string(espalierPath)) != wantEspalierPath {
 		t.Fatalf("smoke did not default GK_ESPALIER_PATH to managed data dir: got %q want %q", strings.TrimSpace(string(espalierPath)), wantEspalierPath)
+	}
+	bunInstall, err := os.ReadFile(bunInstallLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(bunInstall)) != filepath.Join(home, ".bun") {
+		t.Fatalf("smoke did not default BUN_INSTALL under HOME: got %q", strings.TrimSpace(string(bunInstall)))
+	}
+}
+
+func TestInstallStateVerifierFindsOmpUnderBunInstall(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, "bin")
+	bunInstall := filepath.Join(home, "custom-bun")
+	data := filepath.Join(home, "data")
+	config := filepath.Join(home, "config")
+	cache := filepath.Join(home, "cache")
+	espalier := filepath.Join(data, "groundskeeper", "espalier")
+	for _, dir := range []string{
+		bin,
+		filepath.Join(bunInstall, "bin"),
+		filepath.Join(data, "groundskeeper"),
+		filepath.Join(config, "groundskeeper"),
+		filepath.Join(cache, "groundskeeper"),
+		filepath.Join(espalier, "node_modules"),
+		filepath.Join(espalier, "dist", "extensions"),
+		filepath.Join(home, ".omp"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(bin, "groundskeeper"), []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ompPath := filepath.Join(bunInstall, "bin", "omp")
+	if err := os.WriteFile(ompPath, []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, body := range map[string][]byte{
+		filepath.Join(data, "groundskeeper", "gk.db"):             []byte("db"),
+		filepath.Join(espalier, "package.json"):                   []byte(`{"name":"espalier"}` + "\n"),
+		filepath.Join(espalier, "dist", "extensions", "index.js"): []byte("export default {}\n"),
+	} {
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cmd := exec.Command("bash", "../../scripts/verify-install-state.sh")
+	cmd.Env = []string{
+		"HOME=" + home,
+		"PATH=" + bin + string(os.PathListSeparator) + "/usr/bin:/bin:/usr/sbin:/sbin",
+		"BUN_INSTALL=" + bunInstall,
+		"XDG_DATA_HOME=" + data,
+		"XDG_CONFIG_HOME=" + config,
+		"XDG_CACHE_HOME=" + cache,
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("verify-install-state.sh failed with omp under BUN_INSTALL: %v\n%s", err, out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"omp: " + ompPath,
+		filepath.Join(bunInstall, "bin"),
+		"Install-state verification passed.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("verify output missing %q\n--- output ---\n%s", want, body)
+		}
 	}
 }
 

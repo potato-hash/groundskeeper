@@ -1224,10 +1224,14 @@ func lookupOMP() string {
 		return p
 	}
 	home := os.Getenv("HOME")
-	for _, candidate := range []string{
+	candidates := []string{
 		filepath.Join(home, ".local", "bin", "omp"),
-		filepath.Join(home, ".bun", "bin", "omp"),
-	} {
+	}
+	if bunInstall := os.Getenv("BUN_INSTALL"); bunInstall != "" {
+		candidates = append(candidates, filepath.Join(bunInstall, "bin", "omp"))
+	}
+	candidates = append(candidates, filepath.Join(home, ".bun", "bin", "omp"))
+	for _, candidate := range candidates {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
 			return candidate
 		}

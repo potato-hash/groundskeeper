@@ -26,6 +26,8 @@ INSTALL_URL="${GK_SMOKE_INSTALL_URL:-$DEFAULT_INSTALL_URL}"
 VERIFY_URL="${GK_SMOKE_VERIFY_URL:-$DEFAULT_VERIFY_URL}"
 VERIFY_MODEL="${GK_SMOKE_VERIFY_MODEL:-1}"
 INSTALL_DIR="${GK_SMOKE_INSTALL_DIR:-}"
+# Keep clean-machine smokes from writing OMP/Bun globals outside the smoke HOME.
+export BUN_INSTALL="${GK_SMOKE_BUN_INSTALL:-$HOME/.bun}"
 # Keep smoke runs deterministic even from a dev checkout with ../espalier nearby.
 if [[ -z "${GK_ESPALIER_PATH:-}" ]]; then
   data_home="${XDG_DATA_HOME:-$HOME/.local/share}"

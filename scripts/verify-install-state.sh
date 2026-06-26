@@ -172,6 +172,11 @@ data_dir="$(xdg_dir XDG_DATA_HOME .local/share)"
 cache_dir="$(xdg_dir XDG_CACHE_HOME .cache)"
 gk_db="${GK_DB_PATH:-$data_dir/gk.db}"
 model="$(summary_model)"
+bun_install="${BUN_INSTALL:-$HOME/.bun}"
+if [[ -z "$bun_install" || "${bun_install:0:1}" != "/" ]]; then
+  bun_install="$HOME/.bun"
+fi
+bun_bin="$bun_install/bin"
 
 if gk_bin="$(find_executable "${GK_BIN:-groundskeeper}" "$HOME/.local/bin/groundskeeper" "/usr/local/bin/groundskeeper")"; then
   ok "groundskeeper binary: $gk_bin"
@@ -179,10 +184,10 @@ else
   fail "groundskeeper binary not found on PATH, ~/.local/bin, or /usr/local/bin"
 fi
 
-if omp_bin="$(find_executable "${OMP_BIN:-omp}" "$HOME/.local/bin/omp" "$HOME/.bun/bin/omp")"; then
+if omp_bin="$(find_executable "${OMP_BIN:-omp}" "$HOME/.local/bin/omp" "$bun_bin/omp" "$HOME/.bun/bin/omp")"; then
   ok "omp binary: $omp_bin"
 else
-  fail "omp binary not found on PATH, ~/.local/bin, or ~/.bun/bin"
+  fail "omp binary not found on PATH, ~/.local/bin, BUN_INSTALL/bin, or ~/.bun/bin"
 fi
 
 resolve_espalier
