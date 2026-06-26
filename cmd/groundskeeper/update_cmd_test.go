@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -28,7 +29,7 @@ func (f *fakeBrewRunner) Run(args ...string) ([]byte, error) {
 }
 
 // TestUpdate_DetectsNoVersionBump_FailsLoudly_RegressionFor954 reproduces #954
-// (reported by @alexandergharibian): `agent-deck update` printed
+// (reported by @alexandergharibian): `groundskeeper update` printed
 //
 //	Already up-to-date. Warning: 1.8.3 already installed
 //	✓ Updated to v1.9.4
@@ -40,14 +41,14 @@ func TestUpdate_DetectsNoVersionBump_FailsLoudly_RegressionFor954(t *testing.T) 
 		outputs: []string{
 			// `brew update` — metadata fetch succeeds.
 			"Already up-to-date.\n",
-			// `brew upgrade asheshgoplani/tap/agent-deck` — brew refuses
+			// `brew upgrade potato-hash/tap/groundskeeper` — brew refuses
 			// because the tap formula still pins the old version. Exit 0.
-			"Warning: agent-deck 1.8.3 already installed\n",
+			"Warning: groundskeeper 1.8.3 already installed\n",
 		},
 		errs: []error{nil, nil},
 	}
 
-	err := runHomebrewUpgradeWith(runner, "brew upgrade asheshgoplani/tap/agent-deck")
+	err := runHomebrewUpgradeWith(runner, "brew upgrade potato-hash/tap/groundskeeper")
 	if err == nil {
 		t.Fatalf("expected error when brew refuses upgrade (regression #954: CLI printed '✓ Updated' while brew said 'already installed')")
 	}
@@ -76,11 +77,43 @@ func TestUpdate_AcceptsRealUpgrade_NoFalseFailure(t *testing.T) {
 	runner := &fakeBrewRunner{
 		outputs: []string{
 			"Already up-to-date.\n",
-			"==> Upgrading asheshgoplani/tap/agent-deck\n==> Pouring agent-deck-1.9.4.bottle.tar.gz\n🍺  /opt/homebrew/Cellar/agent-deck/1.9.4: 5 files\n",
+			"==> Upgrading potato-hash/tap/groundskeeper\n==> Pouring groundskeeper-1.9.4.bottle.tar.gz\n🍺  /opt/homebrew/Cellar/groundskeeper/1.9.4: 5 files\n",
 		},
 		errs: []error{nil, nil},
 	}
-	if err := runHomebrewUpgradeWith(runner, "brew upgrade asheshgoplani/tap/agent-deck"); err != nil {
+	if err := runHomebrewUpgradeWith(runner, "brew upgrade potato-hash/tap/groundskeeper"); err != nil {
 		t.Fatalf("real-upgrade output should not be flagged as a refused upgrade; got: %v", err)
+	}
+}
+
+func TestUpdateCommandUsesGroundskeeperCopy(t *testing.T) {
+	body, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"run: groundskeeper update",
+		"Skipped. Run 'groundskeeper update' later.",
+		"Usage: groundskeeper update [options]",
+		"Run 'groundskeeper update' to install.",
+		"Restart groundskeeper to use the new version.",
+		"Restart groundskeeper to use this version.",
+		"brew did not upgrade groundskeeper",
+		"brew untap potato-hash/tap && brew tap potato-hash/tap",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("main.go missing Groundskeeper update copy %q", want)
+		}
+	}
+	for _, stale := range []string{
+		"agent-deck update",
+		"Restart agent-deck to use the new version.",
+		"Restart agent-deck to use this version.",
+		"brew did not upgrade agent-deck",
+		"brew untap asheshgoplani/tap",
+	} {
+		if strings.Contains(string(body), stale) {
+			t.Fatalf("main.go still contains stale update copy %q", stale)
+		}
 	}
 }

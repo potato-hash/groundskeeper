@@ -87,7 +87,7 @@ func printUpdateNotice() {
 	}
 
 	// Print update notice to stderr so it doesn't interfere with JSON output
-	fmt.Fprintf(os.Stderr, "\n💡 Update available: v%s → v%s (run: agent-deck update)\n",
+	fmt.Fprintf(os.Stderr, "\n💡 Update available: v%s → v%s (run: groundskeeper update)\n",
 		info.CurrentVersion, info.LatestVersion)
 }
 
@@ -105,7 +105,7 @@ func promptForUpdate() bool {
 
 	// If auto_update is disabled, just show notification (don't prompt)
 	if !settings.AutoUpdate {
-		fmt.Fprintf(os.Stderr, "\n💡 Update available: v%s → v%s (run: agent-deck update)\n",
+		fmt.Fprintf(os.Stderr, "\n💡 Update available: v%s → v%s (run: groundskeeper update)\n",
 			info.CurrentVersion, info.LatestVersion)
 		return false
 	}
@@ -120,7 +120,7 @@ func promptForUpdate() bool {
 
 	// Default to yes (empty or "y" or "yes")
 	if response != "" && response != "y" && response != "yes" {
-		fmt.Println("Skipped. Run 'agent-deck update' later.")
+		fmt.Println("Skipped. Run 'groundskeeper update' later.")
 		return false
 	}
 
@@ -135,7 +135,7 @@ func promptForUpdate() bool {
 		return false
 	}
 
-	fmt.Println("Restart agent-deck to use the new version.")
+	fmt.Println("Restart groundskeeper to use the new version.")
 	return true
 }
 
@@ -2764,7 +2764,7 @@ func handleUpdate(args []string) {
 	targetVersion := fs.String("version", "", "Install a specific released version (e.g. 1.7.3); may be a downgrade")
 
 	fs.Usage = func() {
-		fmt.Println("Usage: agent-deck update [options]")
+		fmt.Println("Usage: groundskeeper update [options]")
 		fmt.Println()
 		fmt.Println("Check for and install updates (always checks GitHub for latest).")
 		fmt.Println()
@@ -2772,9 +2772,9 @@ func handleUpdate(args []string) {
 		fs.PrintDefaults()
 		fmt.Println()
 		fmt.Println("Examples:")
-		fmt.Println("  agent-deck update              # Check and install latest if available")
-		fmt.Println("  agent-deck update --check      # Only check, don't install")
-		fmt.Println("  agent-deck update --version 1.7.3  # Install a specific version (may downgrade)")
+		fmt.Println("  groundskeeper update              # Check and install latest if available")
+		fmt.Println("  groundskeeper update --check      # Only check, don't install")
+		fmt.Println("  groundskeeper update --version 1.7.3  # Install a specific version (may downgrade)")
 	}
 
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
@@ -2823,7 +2823,7 @@ func handleUpdate(args []string) {
 			fmt.Printf("\nHomebrew-managed install detected at %s\n", installPath)
 			fmt.Printf("Run `%s` to install.\n", homebrewInstallCmd)
 		} else {
-			fmt.Println("\nRun 'agent-deck update' to install.")
+			fmt.Println("\nRun 'groundskeeper update' to install.")
 		}
 		return
 	}
@@ -2874,7 +2874,7 @@ func handleUpdate(args []string) {
 	}
 
 	fmt.Printf("\n✓ Updated to v%s\n", info.LatestVersion)
-	fmt.Println("  Restart agent-deck to use the new version.")
+	fmt.Println("  Restart groundskeeper to use the new version.")
 
 	// Offer to update remotes
 	updateRemotesAfterLocalUpdate(info.LatestVersion)
@@ -2962,7 +2962,7 @@ func handleUpdateToSpecificVersion(requested string, checkOnly bool) {
 	}
 
 	fmt.Printf("\n✓ Installed v%s\n", targetVersion)
-	fmt.Println("  Restart agent-deck to use this version.")
+	fmt.Println("  Restart groundskeeper to use this version.")
 }
 
 // brewRunner abstracts `brew <args...>` so tests can inject canned output
@@ -3002,7 +3002,7 @@ func runHomebrewUpgradeWithRefresh(homebrewUpgradeCmd string) error {
 
 // runHomebrewUpgradeWith executes `brew update` then `brew <upgrade args>` via
 // the supplied runner. It fails loudly when brew exits 0 but its output shows
-// the formula was refused (e.g. "Warning: agent-deck X.Y.Z already installed")
+// the formula was refused (e.g. "Warning: groundskeeper X.Y.Z already installed")
 // — see #954, reported by @alexandergharibian.
 func runHomebrewUpgradeWith(r brewRunner, homebrewUpgradeCmd string) error {
 	cmdParts := strings.Fields(homebrewUpgradeCmd)
@@ -3021,8 +3021,8 @@ func runHomebrewUpgradeWith(r brewRunner, homebrewUpgradeCmd string) error {
 
 	if brewRefusedUpgrade(string(out)) {
 		return fmt.Errorf(
-			"brew did not upgrade agent-deck; the tap formula may be stale (#954). "+
-				"Try `brew untap asheshgoplani/tap && brew tap asheshgoplani/tap && %s`, "+
+			"brew did not upgrade groundskeeper; the tap formula may be stale (#954). "+
+				"Try `brew untap potato-hash/tap && brew tap potato-hash/tap && %s`, "+
 				"or download the latest release directly from GitHub. brew output: %s",
 			homebrewUpgradeCmd,
 			strings.TrimSpace(string(out)),

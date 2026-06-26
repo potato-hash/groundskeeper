@@ -223,6 +223,27 @@ func TestGoTestWorkflowCoversInstallerFixtures(t *testing.T) {
 	}
 }
 
+func TestWorkflowReadmeUsesGroundskeeperReleaseCopy(t *testing.T) {
+	body := readRepoFile(t, ".github/workflows/README.md")
+
+	for _, want := range []string{
+		"automation for Groundskeeper",
+		"cmd/groundskeeper/main.go",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("workflow README missing Groundskeeper release copy %q", want)
+		}
+	}
+	for _, stale := range []string{
+		"automation for agent-deck",
+		"cmd/agent-deck/main.go",
+	} {
+		if strings.Contains(body, stale) {
+			t.Fatalf("workflow README still contains stale release copy %q", stale)
+		}
+	}
+}
+
 func readRepoFile(t *testing.T, rel string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(repoRoot(t), rel))
