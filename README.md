@@ -33,7 +33,7 @@ Phases 0–8 are implemented:
 - **Phase 7:** Channel gateway (`internal/channel`) — notification policy, HMAC-signed delivery, approval routing.
 - **Phase 8:** Sidecars (`internal/sidecar`) — email/calendar/contact handlers behind an HMAC-verified HTTP server; the daemon never holds platform credentials.
 
-This is an early public release. The bubbletea TUI shows Groundskeeper threads alongside Agent Deck sessions via the Home projection model (`internal/ui/gk_home.go`).
+This is an early public release. The bubbletea TUI shows Groundskeeper threads alongside local session state via the Home projection model (`internal/ui/gk_home.go`).
 
 ## Quick Start
 
@@ -131,8 +131,8 @@ go build ./cmd/groundskeeper
 # Check fleet status
 ./groundskeeper fleet
 
-# Start the TUI (Agent Deck sessions + Groundskeeper threads)
-# In the TUI, press tab to switch between Agent Deck and Groundskeeper sections.
+# Start the TUI (sessions + Groundskeeper threads)
+# In the TUI, press tab to switch between session and Groundskeeper sections.
 # p = prompt, f = fork, a = archive (when Groundskeeper section is focused)
 ./groundskeeper
 ```

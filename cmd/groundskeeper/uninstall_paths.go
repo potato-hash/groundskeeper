@@ -29,6 +29,43 @@ type uninstallDataCandidate struct {
 	path     string
 }
 
+func uninstallBinaryCandidates(homeDir string) []string {
+	var candidates []string
+	seen := make(map[string]struct{})
+	add := func(path string) {
+		if path == "" {
+			return
+		}
+		cleanPath := filepath.Clean(path)
+		if !filepath.IsAbs(cleanPath) {
+			return
+		}
+		if _, ok := seen[cleanPath]; ok {
+			return
+		}
+		seen[cleanPath] = struct{}{}
+		candidates = append(candidates, cleanPath)
+	}
+
+	if exe, err := os.Executable(); err == nil && filepath.Base(exe) == "groundskeeper" {
+		add(exe)
+	}
+	if path, err := exec.LookPath("groundskeeper"); err == nil {
+		if abs, absErr := filepath.Abs(path); absErr == nil {
+			path = abs
+		}
+		add(path)
+	}
+
+	add(filepath.Join(homeDir, ".local", "bin", "groundskeeper"))
+	add("/usr/local/bin/groundskeeper")
+	add("/opt/homebrew/bin/groundskeeper")
+	add("/home/linuxbrew/.linuxbrew/bin/groundskeeper")
+	add(filepath.Join(homeDir, "bin", "groundskeeper"))
+
+	return candidates
+}
+
 // uninstallDataCandidates resolves every data-location path an uninstall would
 // remove, independent of whether the path currently exists. The not-installed
 // dry-run preview uses this so it accurately lists XDG config/data/cache for

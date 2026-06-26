@@ -3335,12 +3335,7 @@ func handleUninstall(args []string) {
 		}
 	}
 
-	// Check common binary locations
-	binaryLocations := []string{
-		filepath.Join(homeDir, ".local", "bin", "groundskeeper"),
-		"/usr/local/bin/groundskeeper",
-		filepath.Join(homeDir, "bin", "groundskeeper"),
-	}
+	binaryLocations := uninstallBinaryCandidates(homeDir)
 
 	for _, loc := range binaryLocations {
 		info, err := os.Lstat(loc)

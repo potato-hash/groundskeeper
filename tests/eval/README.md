@@ -73,7 +73,7 @@ package feedback_test
 import (
     "testing"
     "time"
-    "github.com/asheshgoplani/agent-deck/tests/eval/harness"
+    "github.com/potato-hash/groundskeeper/tests/eval/harness"
 )
 
 func TestEval_MyNewCase(t *testing.T) {

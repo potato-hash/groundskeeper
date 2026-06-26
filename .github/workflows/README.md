@@ -22,7 +22,7 @@ file an issue and fix it, don't merge through it.
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `release.yml` | push tag `v*` | Validates the tag matches `cmd/groundskeeper/main.go`'s `Version`, runs `go test -race ./...`, runs `goreleaser --clean` to build Darwin/Linux x amd64/arm64 tarballs, publishes the GitHub Release, and asserts the expected five assets + `checksums.txt` landed. Replaces the pre-#332 manual `make release-local` step. |
+| `release.yml` | push tag `v*` | Validates the tag matches `cmd/groundskeeper/main.go`'s `Version`, runs `go test -race ./...`, runs `goreleaser --clean` to build Darwin/Linux x amd64/arm64 tarballs, publishes the GitHub Release, and asserts the expected four platform tarballs plus `checksums.txt` landed. Replaces the pre-#332 manual `make release-local` step. |
 | `pages.yml` | push to `main` touching `site/**`, or `workflow_dispatch` | Deploys the static landing site under `site/` to GitHub Pages. |
 
 ## Notification-only (no gate, no build)

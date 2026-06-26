@@ -160,9 +160,10 @@ print_remediation() {
   local model="$1"
   printf '\nRemediation:\n' >&2
   printf '  Re-run setup:\n' >&2
-  printf '    groundskeeper setup --install-missing --model %s\n' "$model" >&2
+  printf '    groundskeeper setup --install-missing --model %s --verify-model\n' "$model" >&2
+  printf '    # Requires an OMP login, OMP_AUTH_BROKER_TOKEN, or a provider env key for the selected model.\n' >&2
   printf '  Or re-run the public installer:\n' >&2
-  printf '    curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh | bash -s -- --non-interactive --run-setup --model %s\n' "$model" >&2
+  printf '    curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh | bash -s -- --non-interactive --run-setup --model %s --verify-model\n' "$model" >&2
   printf '  Then verify again:\n' >&2
   printf '    curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/scripts/verify-install-state.sh | bash\n' >&2
 }

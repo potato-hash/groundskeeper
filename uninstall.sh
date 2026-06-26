@@ -112,12 +112,26 @@ if command -v brew &> /dev/null && brew list groundskeeper &> /dev/null 2>&1; th
     echo -e "Found: ${GREEN}Homebrew installation${NC}"
 fi
 
-# Check common binary locations
-BINARY_LOCATIONS=(
-    "$HOME/.local/bin/groundskeeper"
-    "/usr/local/bin/groundskeeper"
-    "$HOME/bin/groundskeeper"
-)
+# Check the PATH-resolved binary first so custom --dir installs are visible
+# when their install directory is on PATH, then add common install locations.
+BINARY_LOCATIONS=()
+add_binary_location() {
+    local loc="$1"
+    local existing
+    [[ -z "$loc" || "${loc:0:1}" != "/" ]] && return
+    for existing in "${BINARY_LOCATIONS[@]}"; do
+        [[ "$existing" == "$loc" ]] && return
+    done
+    BINARY_LOCATIONS+=("$loc")
+}
+
+RESOLVED_GROUNDSKEEPER="$(command -v groundskeeper 2>/dev/null || true)"
+add_binary_location "$RESOLVED_GROUNDSKEEPER"
+add_binary_location "$HOME/.local/bin/groundskeeper"
+add_binary_location "/usr/local/bin/groundskeeper"
+add_binary_location "/opt/homebrew/bin/groundskeeper"
+add_binary_location "/home/linuxbrew/.linuxbrew/bin/groundskeeper"
+add_binary_location "$HOME/bin/groundskeeper"
 
 for loc in "${BINARY_LOCATIONS[@]}"; do
     if [[ -f "$loc" ]] || [[ -L "$loc" ]]; then

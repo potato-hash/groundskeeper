@@ -4,7 +4,11 @@
 # https://github.com/potato-hash/groundskeeper
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh |
+#     bash -s -- --non-interactive --skip-setup
+#   export OLLAMA_CLOUD_API_KEY='<key>'
+#   curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh |
+#     bash -s -- --non-interactive --run-setup --model ollama-cloud/glm-5.2 --verify-model
 #
 # Options:
 #   --name <name>       Custom binary name (default: groundskeeper)
