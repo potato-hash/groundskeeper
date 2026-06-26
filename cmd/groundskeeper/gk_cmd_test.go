@@ -373,6 +373,41 @@ func TestSetupFailsWhenRequiredDependenciesMissing(t *testing.T) {
 	}
 }
 
+func TestSetupReportsAuthBrokerWithoutPrintingValue(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	value := "auth-broker-fixture-value"
+	t.Setenv("OMP_AUTH_BROKER_TOKEN", value)
+	prependStubOMP(t)
+	prependStubTool(t, "tmux", "#!/bin/sh\nexit 0\n")
+	prependStubTool(t, "git", "#!/bin/sh\nexit 0\n")
+
+	espalierDir := filepath.Join(home, "espalier")
+	entrypoint := filepath.Join(espalierDir, "dist", "extensions", "index.js")
+	if err := os.MkdirAll(filepath.Dir(entrypoint), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(entrypoint, []byte("export default function() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() {
+		handleSetup([]string{"--non-interactive", "--model", "openai/gpt-5.2", "--espalier-path", espalierDir})
+	})
+	if !strings.Contains(out, "OMP auth-broker env configured") {
+		t.Fatalf("setup output missing auth-broker status\n--- output ---\n%s", out)
+	}
+	if strings.Contains(out, "[NOT FOUND] No OMP credential store") {
+		t.Fatalf("setup reported missing credentials despite auth broker\n--- output ---\n%s", out)
+	}
+	if strings.Contains(out, value) {
+		t.Fatalf("setup printed auth broker value\n--- output ---\n%s", out)
+	}
+}
+
 func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 	cmd := exec.Command("bash", "-n", "../../install.sh")
 	if out, err := cmd.CombinedOutput(); err != nil {

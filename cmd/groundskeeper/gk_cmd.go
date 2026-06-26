@@ -1042,6 +1042,8 @@ func handleSetup(args []string) {
 		credPath := filepath.Join(os.Getenv("HOME"), ".omp", "agent", "agent.db")
 		if _, err := os.Stat(credPath); err == nil {
 			fmt.Println("  [OK] OMP credential store found")
+		} else if os.Getenv("OMP_AUTH_BROKER_TOKEN") != "" {
+			fmt.Println("  [OK] OMP auth-broker env configured")
 		} else if hasModelEnvCredential(model) {
 			fmt.Println("  [OK] provider API key found in environment")
 		} else {
