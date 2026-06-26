@@ -1295,7 +1295,7 @@ type redactingWriter struct {
 }
 
 func newSetupRedactingWriter(dst io.Writer) io.Writer {
-	return redactingWriter{dst: dst, values: sensitiveEnvValues(os.Environ())}
+	return redactingWriter{dst: dst, values: sensitiveEnvValues(childenv.ForLaunch(""))}
 }
 
 func (w redactingWriter) Write(p []byte) (int, error) {
