@@ -5,8 +5,8 @@
 #   export OLLAMA_CLOUD_API_KEY='<your ollama cloud key>'
 #   curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/scripts/smoke-public-install.sh | bash
 #
-# The script captures installer output, checks it for sensitive environment
-# values before printing it, then runs the checked-in post-install state scan.
+# The script captures installer and verifier output, checks each for sensitive
+# environment values before printing it, then reports the checked state scan.
 
 set -euo pipefail
 
@@ -51,6 +51,7 @@ is_sensitive_env_name() {
 
 scan_output_for_secret_values() {
   local log_file="$1"
+  local output_label="${2:-install output}"
   local found=0
   local name value
 
@@ -58,7 +59,7 @@ scan_output_for_secret_values() {
     [[ -n "${name:-}" && ${#value} -ge 4 ]] || continue
     is_sensitive_env_name "$name" || continue
     if grep -Fq -- "$value" "$log_file"; then
-      printf '[FAIL] sensitive value from %s appeared in install output\n' "$name" >&2
+      printf '[FAIL] sensitive value from %s appeared in %s\n' "$name" "$output_label" >&2
       found=1
     fi
   done < <(env)
@@ -81,15 +82,16 @@ fetch_script() {
 if [[ "$VERIFY_MODEL" != "0" ]]; then
   case "$MODEL" in
     ollama-cloud/*)
-      if [[ -z "${OLLAMA_CLOUD_API_KEY:-${OLLAMA_API_KEY:-}}" ]]; then
-        fail "set OLLAMA_CLOUD_API_KEY in the environment, or set GK_SMOKE_VERIFY_MODEL=0 to skip model verification"
+      if [[ -z "${OLLAMA_CLOUD_API_KEY:-${OLLAMA_API_KEY:-}}" && -z "${OMP_AUTH_BROKER_TOKEN:-}" ]]; then
+        fail "set OLLAMA_CLOUD_API_KEY or OMP_AUTH_BROKER_TOKEN in the environment, or set GK_SMOKE_VERIFY_MODEL=0 to skip model verification"
       fi
       ;;
   esac
 fi
 
 log_file="$(mktemp "${TMPDIR:-/tmp}/groundskeeper-install-smoke.XXXXXX.log")"
-trap 'rm -f "$log_file"' EXIT
+verify_log_file="$(mktemp "${TMPDIR:-/tmp}/groundskeeper-verify-smoke.XXXXXX.log")"
+trap 'rm -f "$log_file" "$verify_log_file"' EXIT
 
 install_args=(--non-interactive --run-setup --model "$MODEL")
 if [[ -n "$INSTALL_DIR" ]]; then
@@ -107,7 +109,7 @@ install_status=$?
 set -e
 
 if ! scan_output_for_secret_values "$log_file"; then
-  rm -f "$log_file"
+  rm -f "$log_file" "$verify_log_file"
   exit 1
 fi
 
@@ -121,5 +123,19 @@ fi
 ok "installer output did not contain sensitive environment values"
 
 printf '[INFO] Verifying install state from %s\n' "$VERIFY_URL"
-fetch_script "$VERIFY_URL" | bash
+set +e
+{ fetch_script "$VERIFY_URL" | bash; } >"$verify_log_file" 2>&1
+verify_status=$?
+set -e
+
+if ! scan_output_for_secret_values "$verify_log_file" "verifier output"; then
+  rm -f "$log_file" "$verify_log_file"
+  exit 1
+fi
+
+cat "$verify_log_file"
+if [[ "$verify_status" -ne 0 ]]; then
+  fail "install-state verifier failed with exit ${verify_status}"
+fi
+ok "verifier output did not contain sensitive environment values"
 ok "public install smoke completed"

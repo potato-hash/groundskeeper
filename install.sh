@@ -211,10 +211,6 @@ if [[ "$RUN_SETUP_REQUESTED" == "true" ]]; then
 elif [[ "$SKIP_SETUP_REQUESTED" == "true" || "$SKIP_OPTIONAL_DEPS" == "true" ]]; then
     SETUP_MODE="skip"
 fi
-if [[ -z "${OLLAMA_CLOUD_API_KEY:-}" && -n "${OLLAMA_API_KEY:-}" ]]; then
-    export OLLAMA_CLOUD_API_KEY="$OLLAMA_API_KEY"
-fi
-
 echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║     Groundskeeper Stack Installer      ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"

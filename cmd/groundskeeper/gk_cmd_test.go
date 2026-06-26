@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -472,6 +473,9 @@ func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Fatalf("install.sh missing %q", want)
 		}
+	}
+	if strings.Contains(script, `export OLLAMA_CLOUD_API_KEY="$OLLAMA_API_KEY"`) {
+		t.Fatal("install.sh should not globally alias OLLAMA_API_KEY into OLLAMA_CLOUD_API_KEY")
 	}
 }
 
@@ -991,6 +995,41 @@ func TestPublicInstallSmokeScriptRejectsLeakedSecretOutput(t *testing.T) {
 	}
 }
 
+func TestPublicInstallSmokeScriptRejectsLeakedVerifierOutput(t *testing.T) {
+	home := t.TempDir()
+	installStub := filepath.Join(home, "install.sh")
+	verifyStub := filepath.Join(home, "verify.sh")
+	sensitiveName := "SMOKE_" + "API" + "_KEY"
+	sensitiveValue := "smoke-fixture-value"
+	if err := os.WriteFile(installStub, []byte("#!/usr/bin/env sh\nprintf 'install clean\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	verifyBody := fmt.Sprintf("#!/usr/bin/env sh\nprintenv %s\n", sensitiveName)
+	if err := os.WriteFile(verifyStub, []byte(verifyBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		sensitiveName+"="+sensitiveValue,
+		"GK_SMOKE_VERIFY_MODEL=0",
+		"GK_SMOKE_INSTALL_URL=file://"+installStub,
+		"GK_SMOKE_VERIFY_URL=file://"+verifyStub,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("smoke-public-install.sh unexpectedly succeeded when verifier output leaked a secret\n%s", out)
+	}
+	body := string(out)
+	if strings.Contains(body, sensitiveValue) {
+		t.Fatalf("smoke-public-install.sh printed leaked verifier secret\n--- output ---\n%s", body)
+	}
+	if !strings.Contains(body, "sensitive value from "+sensitiveName+" appeared in verifier output") {
+		t.Fatalf("smoke-public-install.sh missing verifier leak failure detail\n--- output ---\n%s", body)
+	}
+}
+
 func TestPublicInstallSmokeScriptRunsVerifierAfterCleanInstall(t *testing.T) {
 	home := t.TempDir()
 	installDir := filepath.Join(home, "bin")
@@ -1161,6 +1200,57 @@ printf '[OK] OMP model smoke test passed\n'
 	}
 	if !strings.Contains(string(args), "--verify-model\n") {
 		t.Fatalf("smoke installer args missing --verify-model\n--- args ---\n%s", args)
+	}
+}
+
+func TestPublicInstallSmokeScriptAllowsAuthBrokerForOllamaCloudSmoke(t *testing.T) {
+	home := t.TempDir()
+	installDir := filepath.Join(home, "bin")
+	authBrokerName := "OMP_AUTH_BROKER_" + "TO" + "KEN"
+	installStub := filepath.Join(home, "install.sh")
+	verifyStub := filepath.Join(home, "verify.sh")
+	installBody := `#!/usr/bin/env sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--dir" ]; then
+    mkdir -p "$2"
+    printf '#!/usr/bin/env sh\nprintf groundskeeper\n' > "$2/groundskeeper"
+    chmod +x "$2/groundskeeper"
+    break
+  fi
+  shift
+done
+printf '[OK] OMP model smoke test passed\n'
+`
+	if err := os.WriteFile(installStub, []byte(installBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify broker\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"OLLAMA_CLOUD_API_KEY=",
+		"OLLAMA_API_KEY=",
+		authBrokerName+"=broker-fixture-value",
+		"GK_SMOKE_INSTALL_DIR="+installDir,
+		"GK_SMOKE_INSTALL_URL=file://"+installStub,
+		"GK_SMOKE_VERIFY_URL=file://"+verifyStub,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("smoke-public-install.sh rejected broker auth for ollama-cloud smoke: %v\n%s", err, out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"[OK] OMP model smoke test passed",
+		"verify broker",
+		"public install smoke completed",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("smoke output missing %q\n--- output ---\n%s", want, body)
+		}
 	}
 }
 

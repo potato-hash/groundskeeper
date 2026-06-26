@@ -1207,6 +1207,9 @@ func hasModelEnvCredential(model string) bool {
 
 func setupCommandEnv(model string) []string {
 	env := setupBaseEnv()
+	if token := os.Getenv("OMP_AUTH_BROKER_TOKEN"); token != "" {
+		env = append(env, "OMP_AUTH_BROKER_TOKEN="+token)
+	}
 	if strings.HasPrefix(model, "ollama-cloud/") {
 		if key := os.Getenv("OLLAMA_CLOUD_API_KEY"); key != "" {
 			return append(env, "OLLAMA_CLOUD_API_KEY="+key)
