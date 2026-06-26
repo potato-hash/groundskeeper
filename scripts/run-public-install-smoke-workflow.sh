@@ -7,6 +7,7 @@ REPO="${GK_SMOKE_REPO:-potato-hash/groundskeeper}"
 REF="${GK_SMOKE_REF:-main}"
 WORKFLOW="${GK_SMOKE_WORKFLOW:-public-install-smoke.yml}"
 dispatch_id="gk-smoke-$(date +%s)-$$"
+expected_title="public-install-smoke $REF $dispatch_id"
 
 fail() {
   printf '[FAIL] %s\n' "$*" >&2
@@ -15,6 +16,7 @@ fail() {
 
 command -v gh >/dev/null 2>&1 || fail "GitHub CLI not found; install gh and authenticate first"
 gh auth status --hostname github.com >/dev/null 2>&1 || fail "gh is not authenticated for github.com"
+[[ "$REF" == "main" ]] || fail "secret-backed public smoke only runs from main; got ref $REF"
 
 secret_names="$(gh secret list --repo "$REPO" | awk '{print $1}')" || fail "could not list repo secrets for $REPO"
 if ! grep -Fxq OLLAMA_CLOUD_API_KEY <<< "$secret_names"; then
@@ -22,11 +24,11 @@ if ! grep -Fxq OLLAMA_CLOUD_API_KEY <<< "$secret_names"; then
 fi
 
 printf '[INFO] Dispatching %s for %s at %s\n' "$WORKFLOW" "$REPO" "$REF"
-gh workflow run "$WORKFLOW" --repo "$REPO" --ref "$REF" -f "ref=$REF" -f "dispatch_id=$dispatch_id"
+gh workflow run "$WORKFLOW" --repo "$REPO" --ref "$REF" -f "dispatch_id=$dispatch_id"
 
 run_id=""
 for _ in {1..20}; do
-  run_id="$(gh run list --repo "$REPO" --workflow "$WORKFLOW" --limit 20 --json databaseId,displayTitle --jq ".[] | select(.displayTitle | contains(\"$dispatch_id\")) | .databaseId" | head -n 1)"
+  run_id="$(gh run list --repo "$REPO" --workflow "$WORKFLOW" --limit 20 --json databaseId,displayTitle,event,headBranch --jq ".[] | select(.displayTitle == \"$expected_title\" and .event == \"workflow_dispatch\" and .headBranch == \"$REF\") | .databaseId" | head -n 1)"
   if [[ -n "$run_id" ]]; then
     break
   fi

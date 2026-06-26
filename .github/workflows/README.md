@@ -45,7 +45,7 @@ anything — they can fail silently without affecting merges.
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `public-install-smoke.yml` | `workflow_dispatch` | Runs the public `scripts/smoke-public-install.sh` path on `macos-latest` with temporary XDG/install dirs and `secrets.OLLAMA_CLOUD_API_KEY`. It fetches scripts through the GitHub Contents API raw endpoint for fresh-ref testing, and defaults the smoke script ref to the workflow ref. `scripts/run-public-install-smoke-workflow.sh` dispatches and watches it after confirming the secret name exists. This is the clean macOS full-stack install smoke; it is manual so the repo can stay green until the smoke secret is configured. |
+| `public-install-smoke.yml` | `workflow_dispatch` from `main` | Runs the public `scripts/smoke-public-install.sh` path on `macos-latest` with temporary XDG/install dirs and `secrets.OLLAMA_CLOUD_API_KEY`. It fetches the smoke script from `github.sha` on `main` through the GitHub Contents API raw endpoint so secret-backed runs cannot execute dispatcher-selected refs. `scripts/run-public-install-smoke-workflow.sh` dispatches and watches it after confirming the secret name exists. This is the clean macOS full-stack install smoke; it is manual so the repo can stay green until the smoke secret is configured. |
 
 > **Note on the v1.7.70 fix:** the bubbletea cancel-reader failure that broke
 > `agent-deck web` on headless CI (`error creating cancelreader: bubbletea:

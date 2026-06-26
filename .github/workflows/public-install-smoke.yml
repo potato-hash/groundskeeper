@@ -1,13 +1,9 @@
 name: public-install-smoke
-run-name: public-install-smoke ${{ inputs.ref || github.ref_name }} ${{ inputs.dispatch_id }}
+run-name: public-install-smoke ${{ github.ref_name }} ${{ inputs.dispatch_id }}
 
 on:
   workflow_dispatch:
     inputs:
-      ref:
-        description: 'Git ref for public scripts to fetch (defaults to the workflow ref)'
-        required: false
-        type: string
       dispatch_id:
         description: 'Optional correlation id for dispatch helpers'
         required: false
@@ -27,9 +23,18 @@ jobs:
     timeout-minutes: 30
     env:
       OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
-      GK_SMOKE_REF: ${{ inputs.ref || github.ref_name }}
+      GK_SMOKE_REF: ${{ github.sha }}
       GK_SMOKE_USE_API_RAW: '1'
     steps:
+      - name: Require trusted workflow ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME}" != "main" ]]; then
+            echo "::error title=Unsupported ref::Secret-backed public smoke only runs from main."
+            exit 1
+          fi
+
       - name: Require Ollama Cloud smoke secret
         shell: bash
         run: |

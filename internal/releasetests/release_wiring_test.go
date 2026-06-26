@@ -123,11 +123,13 @@ func TestPublicInstallSmokeWorkflowRunsMacOSSecretBackedSmoke(t *testing.T) {
 
 	for _, want := range []string{
 		"workflow_dispatch:",
-		"run-name: public-install-smoke ${{ inputs.ref || github.ref_name }} ${{ inputs.dispatch_id }}",
+		"run-name: public-install-smoke ${{ github.ref_name }} ${{ inputs.dispatch_id }}",
 		"dispatch_id:",
 		"runs-on: macos-latest",
+		"Require trusted workflow ref",
+		`if [[ "${GITHUB_REF_NAME}" != "main" ]]; then`,
 		"OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}",
-		"GK_SMOKE_REF: ${{ inputs.ref || github.ref_name }}",
+		"GK_SMOKE_REF: ${{ github.sha }}",
 		"GK_SMOKE_USE_API_RAW: '1'",
 		"GK_SMOKE_INSTALL_DIR",
 		"XDG_DATA_HOME",
@@ -143,17 +145,22 @@ func TestPublicInstallSmokeWorkflowRunsMacOSSecretBackedSmoke(t *testing.T) {
 		}
 	}
 	if !strings.Contains(workflow, "api.github.com/repos/${GITHUB_REPOSITORY}/contents/scripts/smoke-public-install.sh?ref=${GK_SMOKE_REF}") {
-		t.Fatal("public install smoke workflow must fetch the smoke wrapper from the selected API raw ref")
+		t.Fatal("public install smoke workflow must fetch the smoke wrapper from the pinned API raw ref")
+	}
+	for _, forbidden := range []string{"inputs.ref", "-f ref=", "GK_SMOKE_REF: ${{ inputs."} {
+		if strings.Contains(workflow, forbidden) {
+			t.Fatalf("public install smoke workflow must not run secret-backed scripts from arbitrary refs; found %q", forbidden)
+		}
 	}
 	if strings.Contains(workflow, "raw.githubusercontent.com") {
 		t.Fatal("public install smoke workflow should use the API raw endpoint for fresh-ref testing")
 	}
 	for _, want := range []string{
 		"gh secret set OLLAMA_CLOUD_API_KEY --repo potato-hash/groundskeeper",
-		"gh workflow run public-install-smoke.yml --repo potato-hash/groundskeeper --ref main -f ref=main",
+		"gh workflow run public-install-smoke.yml --repo potato-hash/groundskeeper --ref main",
 		"scripts/run-public-install-smoke-workflow.sh",
 		"GitHub Contents API raw endpoint",
-		"when `ref` is omitted, it fetches scripts\nfrom the workflow ref",
+		"same trusted\nmain commit that ran the workflow",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Fatalf("README missing public smoke workflow command %q", want)
@@ -163,15 +170,18 @@ func TestPublicInstallSmokeWorkflowRunsMacOSSecretBackedSmoke(t *testing.T) {
 		!strings.Contains(workflowReadme, "secrets.OLLAMA_CLOUD_API_KEY") ||
 		!strings.Contains(workflowReadme, "GitHub Contents API raw endpoint") ||
 		!strings.Contains(workflowReadme, "scripts/run-public-install-smoke-workflow.sh") ||
-		!strings.Contains(workflowReadme, "defaults the smoke script ref to the workflow ref") {
+		!strings.Contains(workflowReadme, "`github.sha` on `main`") ||
+		!strings.Contains(workflowReadme, "cannot execute dispatcher-selected refs") {
 		t.Fatal("workflow README must document the manual public install smoke")
 	}
 	for _, want := range []string{
 		`gh secret list --repo "$REPO"`,
 		`grep -Fxq OLLAMA_CLOUD_API_KEY`,
+		`[[ "$REF" == "main" ]]`,
 		`dispatch_id="gk-smoke-$(date +%s)-$$"`,
-		`gh workflow run "$WORKFLOW" --repo "$REPO" --ref "$REF" -f "ref=$REF" -f "dispatch_id=$dispatch_id"`,
-		`select(.displayTitle | contains(\"$dispatch_id\"))`,
+		`expected_title="public-install-smoke $REF $dispatch_id"`,
+		`gh workflow run "$WORKFLOW" --repo "$REPO" --ref "$REF" -f "dispatch_id=$dispatch_id"`,
+		`select(.displayTitle == \"$expected_title\" and .event == \"workflow_dispatch\" and .headBranch == \"$REF\")`,
 		`gh run watch "$run_id" --repo "$REPO" --exit-status`,
 	} {
 		if !strings.Contains(helper, want) {
@@ -182,6 +192,9 @@ func TestPublicInstallSmokeWorkflowRunsMacOSSecretBackedSmoke(t *testing.T) {
 		if strings.Contains(helper, forbidden) {
 			t.Fatalf("public smoke workflow helper must not accept or print secret values; found %q", forbidden)
 		}
+	}
+	if strings.Contains(helper, `-f "ref=$REF"`) || strings.Contains(helper, "contains(\\\"$dispatch_id\\\")") {
+		t.Fatal("public smoke workflow helper must not dispatch arbitrary script refs or use loose run matching")
 	}
 }
 
