@@ -81,6 +81,35 @@ fetch_script() {
   esac
 }
 
+is_trusted_smoke_source() {
+  [[ "$REPO" == "potato-hash/groundskeeper" ]] || return 1
+  [[ "$INSTALL_URL" == "$DEFAULT_INSTALL_URL" ]] || return 1
+  [[ "$VERIFY_URL" == "$DEFAULT_VERIFY_URL" ]] || return 1
+  if [[ "$REF" == "main" ]]; then
+    return 0
+  fi
+  [[ "${GITHUB_ACTIONS:-}" == "true" &&
+     "${GITHUB_REF_NAME:-}" == "main" &&
+     "${GITHUB_REPOSITORY:-}" == "$REPO" &&
+     -n "${GITHUB_SHA:-}" &&
+     "$REF" == "$GITHUB_SHA" ]]
+}
+
+has_model_auth() {
+  [[ -n "${OLLAMA_CLOUD_API_KEY:-${OLLAMA_API_KEY:-}}" ||
+     -n "${OMP_AUTH_BROKER_TOKEN:-}" ||
+     -f "$HOME/.omp/agent/agent.db" ]]
+}
+
+source_needs_trust() {
+  has_model_auth && return 0
+  [[ "$VERIFY_MODEL" != "0" && "$MODEL" == ollama-cloud/* ]]
+}
+
+if source_needs_trust && [[ "${GK_SMOKE_ALLOW_UNTRUSTED:-0}" != "1" ]] && ! is_trusted_smoke_source; then
+  fail "credential-backed public smoke only runs trusted Groundskeeper scripts; set GK_SMOKE_VERIFY_MODEL=0 without credentials for local stubs or GK_SMOKE_ALLOW_UNTRUSTED=1 to override"
+fi
+
 if [[ "$VERIFY_MODEL" != "0" ]]; then
   case "$MODEL" in
     ollama-cloud/*)
@@ -91,8 +120,8 @@ if [[ "$VERIFY_MODEL" != "0" ]]; then
   esac
 fi
 
-log_file="$(mktemp "${TMPDIR:-/tmp}/groundskeeper-install-smoke.XXXXXX.log")"
-verify_log_file="$(mktemp "${TMPDIR:-/tmp}/groundskeeper-verify-smoke.XXXXXX.log")"
+log_file="$(mktemp "${TMPDIR:-/tmp}/groundskeeper-install-smoke.XXXXXX")"
+verify_log_file="$(mktemp "${TMPDIR:-/tmp}/groundskeeper-verify-smoke.XXXXXX")"
 trap 'rm -f "$log_file" "$verify_log_file"' EXIT
 
 install_args=(--non-interactive --run-setup --model "$MODEL")

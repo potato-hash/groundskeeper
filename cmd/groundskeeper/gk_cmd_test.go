@@ -1378,6 +1378,7 @@ func TestPublicInstallSmokeScriptRejectsLeakedSecretOutput(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
 		"OLLAMA_CLOUD_API_KEY=smoke-fixture-value",
+		"GK_SMOKE_ALLOW_UNTRUSTED=1",
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
 		"GK_SMOKE_VERIFY_URL=file://"+filepath.Join(home, "verify-unused.sh"),
 	)
@@ -1411,6 +1412,9 @@ func TestPublicInstallSmokeScriptRejectsLeakedVerifierOutput(t *testing.T) {
 	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
+		"OLLAMA_CLOUD_API_KEY=",
+		"OLLAMA_API_KEY=",
+		"OMP_AUTH_BROKER_TOKEN=",
 		sensitiveName+"="+sensitiveValue,
 		"GK_SMOKE_VERIFY_MODEL=0",
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
@@ -1463,6 +1467,9 @@ printf 'install clean\n'
 	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
+		"OLLAMA_CLOUD_API_KEY=",
+		"OLLAMA_API_KEY=",
+		"OMP_AUTH_BROKER_TOKEN=",
 		"XDG_DATA_HOME=",
 		"GK_ESPALIER_PATH=",
 		"GK_SMOKE_BUN_INSTALL=",
@@ -1507,6 +1514,101 @@ printf 'install clean\n'
 	}
 	if strings.TrimSpace(string(bunInstall)) != filepath.Join(home, ".bun") {
 		t.Fatalf("smoke did not default BUN_INSTALL under HOME: got %q", strings.TrimSpace(string(bunInstall)))
+	}
+}
+
+func TestPublicInstallSmokeScriptRejectsCredentialBackedUntrustedOverrides(t *testing.T) {
+	home := t.TempDir()
+	curlDir := filepath.Join(home, "curl-bin")
+	installStub := filepath.Join(home, "install.sh")
+	verifyStub := filepath.Join(home, "verify.sh")
+	if err := os.MkdirAll(curlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(curlDir, "curl"), []byte("#!/usr/bin/env sh\nprintf 'curl should not run\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installStub, []byte("#!/usr/bin/env sh\nprintf 'install should not run\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify should not run\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		env  []string
+	}{
+		{name: "repo override", env: []string{"GK_SMOKE_REPO=attacker/groundskeeper"}},
+		{name: "ref override", env: []string{"GK_SMOKE_REF=feature"}},
+		{name: "install URL override", env: []string{"GK_SMOKE_INSTALL_URL=file://" + installStub}},
+		{name: "verify URL override", env: []string{"GK_SMOKE_VERIFY_URL=file://" + verifyStub}},
+		{name: "verification disabled but credentials present", env: []string{
+			"GK_SMOKE_VERIFY_MODEL=0",
+			"GK_SMOKE_INSTALL_URL=file://" + installStub,
+			"GK_SMOKE_VERIFY_URL=file://" + verifyStub,
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
+			cmd.Env = append(os.Environ(),
+				"HOME="+home,
+				"PATH="+curlDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"OLLAMA_CLOUD_API_KEY=smoke-fixture-value",
+				"GK_SMOKE_ALLOW_UNTRUSTED=",
+			)
+			cmd.Env = append(cmd.Env, tc.env...)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("smoke-public-install.sh unexpectedly allowed untrusted credential-backed source\n%s", out)
+			}
+			body := string(out)
+			if !strings.Contains(body, "credential-backed public smoke only runs trusted Groundskeeper scripts") {
+				t.Fatalf("smoke output missing untrusted-source failure\n--- output ---\n%s", body)
+			}
+			for _, leaked := range []string{"smoke-fixture-value", "install should not run", "verify should not run", "curl should not run"} {
+				if strings.Contains(body, leaked) {
+					t.Fatalf("smoke output leaked or executed %q\n--- output ---\n%s", leaked, body)
+				}
+			}
+		})
+	}
+}
+
+func TestPublicInstallSmokeScriptRejectsOllamaCloudVerificationFromUntrustedOverridesWithoutCredentials(t *testing.T) {
+	home := t.TempDir()
+	installStub := filepath.Join(home, "install.sh")
+	verifyStub := filepath.Join(home, "verify.sh")
+	if err := os.WriteFile(installStub, []byte("#!/usr/bin/env sh\nprintf 'install should not run\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify should not run\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"OLLAMA_CLOUD_API_KEY=",
+		"OLLAMA_API_KEY=",
+		"OMP_AUTH_BROKER_TOKEN=",
+		"GK_SMOKE_ALLOW_UNTRUSTED=",
+		"GK_SMOKE_INSTALL_URL=file://"+installStub,
+		"GK_SMOKE_VERIFY_URL=file://"+verifyStub,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("smoke-public-install.sh unexpectedly allowed ollama-cloud verification from local overrides\n%s", out)
+	}
+	body := string(out)
+	if !strings.Contains(body, "credential-backed public smoke only runs trusted Groundskeeper scripts") {
+		t.Fatalf("smoke output missing untrusted-source failure\n--- output ---\n%s", body)
+	}
+	for _, leaked := range []string{"install should not run", "verify should not run"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("smoke output executed %q\n--- output ---\n%s", leaked, body)
+		}
 	}
 }
 
@@ -1601,6 +1703,9 @@ printf 'install skipped marker\n'
 	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
+		"OLLAMA_CLOUD_API_KEY=",
+		"OLLAMA_API_KEY=",
+		"OMP_AUTH_BROKER_TOKEN=",
 		"GK_SMOKE_MODEL=test/provider",
 		"GK_SMOKE_INSTALL_DIR="+installDir,
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
@@ -1648,6 +1753,9 @@ printf '[OK] OMP model smoke test passed\n'
 	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
+		"OLLAMA_CLOUD_API_KEY=",
+		"OLLAMA_API_KEY=",
+		"OMP_AUTH_BROKER_TOKEN=",
 		"GK_SMOKE_MODEL=test/provider",
 		"GK_SMOKE_INSTALL_DIR="+installDir,
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
@@ -1707,6 +1815,7 @@ printf '[OK] OMP model smoke test passed\n'
 		"OLLAMA_CLOUD_API_KEY=",
 		"OLLAMA_API_KEY=",
 		authBrokerName+"=broker-fixture-value",
+		"GK_SMOKE_ALLOW_UNTRUSTED=1",
 		"GK_SMOKE_INSTALL_DIR="+installDir,
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
 		"GK_SMOKE_VERIFY_URL=file://"+verifyStub,
@@ -1763,6 +1872,7 @@ printf '[OK] OMP model smoke test passed\n'
 		"OLLAMA_CLOUD_API_KEY=",
 		"OLLAMA_API_KEY=",
 		"OMP_AUTH_BROKER_TOKEN=",
+		"GK_SMOKE_ALLOW_UNTRUSTED=1",
 		"GK_SMOKE_INSTALL_DIR="+installDir,
 		"GK_SMOKE_INSTALL_URL=file://"+installStub,
 		"GK_SMOKE_VERIFY_URL=file://"+verifyStub,
@@ -1786,6 +1896,7 @@ printf '[OK] OMP model smoke test passed\n'
 func TestPublicInstallSmokeScriptCanFetchThroughGitHubContentsAPI(t *testing.T) {
 	home := t.TempDir()
 	installDir := filepath.Join(home, "bin")
+	ref := "trusted-sha-fixture"
 	curlLog := filepath.Join(home, "curl-args.txt")
 	curlDir := filepath.Join(home, "curl-bin")
 	if err := os.MkdirAll(curlDir, 0o755); err != nil {
@@ -1810,6 +1921,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 printf 'install via api\n'
+printf '[OK] OMP model smoke test passed\n'
 INSTALL
     ;;
   *verify-install-state.sh*)
@@ -1832,8 +1944,20 @@ esac
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
 		"PATH="+curlDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GITHUB_ACTIONS=true",
+		"GITHUB_REF_NAME=main",
+		"GITHUB_REPOSITORY=potato-hash/groundskeeper",
+		"GITHUB_SHA="+ref,
+		"GK_SMOKE_REPO=potato-hash/groundskeeper",
+		"GK_SMOKE_REF="+ref,
+		"GK_SMOKE_INSTALL_URL=",
+		"GK_SMOKE_VERIFY_URL=",
 		"GK_SMOKE_USE_API_RAW=1",
-		"GK_SMOKE_VERIFY_MODEL=0",
+		"OLLAMA_CLOUD_API_KEY=smoke-fixture-value",
+		"OLLAMA_API_KEY=",
+		"OMP_AUTH_BROKER_TOKEN=",
+		"GK_SMOKE_ALLOW_UNTRUSTED=",
+		"GK_SMOKE_MODEL=test/provider",
 		"GK_SMOKE_INSTALL_DIR="+installDir,
 	)
 	out, err := cmd.CombinedOutput()
@@ -1842,14 +1966,18 @@ esac
 	}
 	body := string(out)
 	for _, want := range []string{
-		"https://api.github.com/repos/potato-hash/groundskeeper/contents/install.sh?ref=main",
-		"https://api.github.com/repos/potato-hash/groundskeeper/contents/scripts/verify-install-state.sh?ref=main",
+		"https://api.github.com/repos/potato-hash/groundskeeper/contents/install.sh?ref=" + ref,
+		"https://api.github.com/repos/potato-hash/groundskeeper/contents/scripts/verify-install-state.sh?ref=" + ref,
 		"install via api",
+		"[OK] OMP model smoke test passed",
 		"verify via api",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("smoke output missing %q\n--- output ---\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, "smoke-fixture-value") {
+		t.Fatalf("smoke output printed credential value\n--- output ---\n%s", body)
 	}
 	args, err := os.ReadFile(curlLog)
 	if err != nil {
@@ -1860,8 +1988,8 @@ esac
 		t.Fatalf("curl args should include GitHub raw Accept header twice, got %d\n--- args ---\n%s", got, argLog)
 	}
 	for _, want := range []string{
-		"https://api.github.com/repos/potato-hash/groundskeeper/contents/install.sh?ref=main",
-		"https://api.github.com/repos/potato-hash/groundskeeper/contents/scripts/verify-install-state.sh?ref=main",
+		"https://api.github.com/repos/potato-hash/groundskeeper/contents/install.sh?ref=" + ref,
+		"https://api.github.com/repos/potato-hash/groundskeeper/contents/scripts/verify-install-state.sh?ref=" + ref,
 	} {
 		if !strings.Contains(argLog, want) {
 			t.Fatalf("curl args missing %q\n--- args ---\n%s", want, argLog)
