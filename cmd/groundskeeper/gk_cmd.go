@@ -9,6 +9,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"net/smtp"
 	"os"
 	"os/exec"
@@ -1173,8 +1174,8 @@ func installOMP() error {
 	cmd := exec.Command("bash", "-c",
 		"curl -fsSL https://omp.sh/install | sh")
 	cmd.Env = setupBaseEnv()
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = newSetupRedactingWriter(os.Stdout)
+	cmd.Stderr = newSetupRedactingWriter(os.Stderr)
 	cmd.Stdin = os.Stdin
 	return cmd.Run()
 }
@@ -1236,6 +1237,18 @@ func setupBaseEnv() []string {
 	return out
 }
 
+func sensitiveEnvValues(env []string) []string {
+	values := []string{}
+	for _, kv := range env {
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok || !isSensitiveEnvName(name) || len(value) < 4 {
+			continue
+		}
+		values = append(values, value)
+	}
+	return values
+}
+
 func providerCredentialEnvNames(model string) []string {
 	provider := model
 	if before, _, ok := strings.Cut(model, "/"); ok {
@@ -1266,11 +1279,7 @@ func isSensitiveEnvName(name string) bool {
 
 func redactedCommandOutput(out []byte, env []string) string {
 	s := string(out)
-	for _, kv := range env {
-		name, value, ok := strings.Cut(kv, "=")
-		if !ok || !isSensitiveEnvName(name) || len(value) < 4 {
-			continue
-		}
+	for _, value := range sensitiveEnvValues(env) {
 		s = strings.ReplaceAll(s, value, "[REDACTED]")
 	}
 	s = strings.TrimSpace(s)
@@ -1278,6 +1287,26 @@ func redactedCommandOutput(out []byte, env []string) string {
 		s = s[len(s)-2000:]
 	}
 	return s
+}
+
+type redactingWriter struct {
+	dst    io.Writer
+	values []string
+}
+
+func newSetupRedactingWriter(dst io.Writer) io.Writer {
+	return redactingWriter{dst: dst, values: sensitiveEnvValues(os.Environ())}
+}
+
+func (w redactingWriter) Write(p []byte) (int, error) {
+	s := string(p)
+	for _, value := range w.values {
+		s = strings.ReplaceAll(s, value, "[REDACTED]")
+	}
+	if _, err := io.WriteString(w.dst, s); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 func verifyOmpModel(ompPath, model string) error {
@@ -1326,8 +1355,8 @@ func installEspalier(path string) error {
 	}
 	cmd := exec.Command("git", "clone", "https://github.com/potato-hash/espalier.git", path)
 	cmd.Env = setupBaseEnv()
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = newSetupRedactingWriter(os.Stdout)
+	cmd.Stderr = newSetupRedactingWriter(os.Stderr)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("clone espalier: %w", err)
 	}
@@ -1346,8 +1375,8 @@ func buildEspalier(path string) error {
 	cmd := exec.Command("bun", "install")
 	cmd.Dir = path
 	cmd.Env = setupBaseEnv()
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = newSetupRedactingWriter(os.Stdout)
+	cmd.Stderr = newSetupRedactingWriter(os.Stderr)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("bun install: %w", err)
 	}
@@ -1355,8 +1384,8 @@ func buildEspalier(path string) error {
 	cmd = exec.Command("bun", "run", "build")
 	cmd.Dir = path
 	cmd.Env = setupBaseEnv()
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = newSetupRedactingWriter(os.Stdout)
+	cmd.Stderr = newSetupRedactingWriter(os.Stderr)
 	return cmd.Run()
 }
 

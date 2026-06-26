@@ -1039,6 +1039,56 @@ func TestRedactedCommandOutputHidesProviderKeys(t *testing.T) {
 	}
 }
 
+func TestBuildEspalierRedactsStreamingSubprocessOutput(t *testing.T) {
+	espalier := t.TempDir()
+	if err := os.WriteFile(filepath.Join(espalier, "package.json"), []byte(`{"name":"espalier"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	leaked := "stream-redaction-fixture-value"
+	t.Setenv("OPENAI_API_KEY", leaked)
+	prependStubTool(t, "bun", "#!/usr/bin/env sh\nif [ \"$1\" = \"install\" ]; then printf 'install saw "+leaked+"\\n'; exit 0; fi\nif [ \"$1\" = \"run\" ] && [ \"$2\" = \"build\" ]; then mkdir -p dist/extensions; printf 'export default {}\\n' > dist/extensions/index.js; printf 'build saw "+leaked+"\\n'; exit 0; fi\nexit 1\n")
+
+	out, err := captureStdoutStderr(t, func() error {
+		return buildEspalier(espalier)
+	})
+	if err != nil {
+		t.Fatalf("buildEspalier failed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, leaked) {
+		t.Fatalf("buildEspalier streamed a sensitive env value\n--- output ---\n%s", out)
+	}
+	if strings.Count(out, "[REDACTED]") < 2 {
+		t.Fatalf("buildEspalier output missing redaction markers\n--- output ---\n%s", out)
+	}
+}
+
+func captureStdoutStderr(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+
+	oldOut := os.Stdout
+	oldErr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan string, 1)
+	go func() {
+		var b strings.Builder
+		_, _ = io.Copy(&b, r)
+		done <- b.String()
+	}()
+
+	os.Stdout = w
+	os.Stderr = w
+	runErr := fn()
+	_ = w.Close()
+	os.Stdout = oldOut
+	os.Stderr = oldErr
+	out := <-done
+	_ = r.Close()
+	return out, runErr
+}
+
 func containsEnv(env []string, want string) bool {
 	for _, kv := range env {
 		if kv == want {
