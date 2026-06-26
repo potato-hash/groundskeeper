@@ -752,6 +752,108 @@ printf 'install clean\n'
 	}
 }
 
+func TestPublicInstallSmokeScriptRequiresModelVerificationMarker(t *testing.T) {
+	home := t.TempDir()
+	installDir := filepath.Join(home, "bin")
+	installStub := filepath.Join(home, "install.sh")
+	verifyStub := filepath.Join(home, "verify.sh")
+	installBody := `#!/usr/bin/env sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--dir" ]; then
+    mkdir -p "$2"
+    printf '#!/usr/bin/env sh\nprintf groundskeeper\n' > "$2/groundskeeper"
+    chmod +x "$2/groundskeeper"
+    break
+  fi
+  shift
+done
+printf 'install skipped marker\n'
+`
+	if err := os.WriteFile(installStub, []byte(installBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify should not run\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"GK_SMOKE_MODEL=test/provider",
+		"GK_SMOKE_INSTALL_DIR="+installDir,
+		"GK_SMOKE_INSTALL_URL=file://"+installStub,
+		"GK_SMOKE_VERIFY_URL=file://"+verifyStub,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("smoke-public-install.sh unexpectedly succeeded without model verification marker\n%s", out)
+	}
+	body := string(out)
+	if !strings.Contains(body, "model verification was requested") {
+		t.Fatalf("smoke output missing model verification failure\n--- output ---\n%s", body)
+	}
+	if strings.Contains(body, "verify should not run") {
+		t.Fatalf("smoke ran verifier after missing model verification marker\n--- output ---\n%s", body)
+	}
+}
+
+func TestPublicInstallSmokeScriptAcceptsModelVerificationMarker(t *testing.T) {
+	home := t.TempDir()
+	installDir := filepath.Join(home, "bin")
+	argsPath := filepath.Join(home, "install-args.txt")
+	installStub := filepath.Join(home, "install.sh")
+	verifyStub := filepath.Join(home, "verify.sh")
+	installBody := `#!/usr/bin/env sh
+printf '%s\n' "$@" > "$HOME/install-args.txt"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--dir" ]; then
+    mkdir -p "$2"
+    printf '#!/usr/bin/env sh\nprintf groundskeeper\n' > "$2/groundskeeper"
+    chmod +x "$2/groundskeeper"
+    break
+  fi
+  shift
+done
+printf '[OK] OMP model smoke test passed\n'
+`
+	if err := os.WriteFile(installStub, []byte(installBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verifyStub, []byte("#!/usr/bin/env sh\nprintf 'verify after model\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "../../scripts/smoke-public-install.sh")
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"GK_SMOKE_MODEL=test/provider",
+		"GK_SMOKE_INSTALL_DIR="+installDir,
+		"GK_SMOKE_INSTALL_URL=file://"+installStub,
+		"GK_SMOKE_VERIFY_URL=file://"+verifyStub,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("smoke-public-install.sh failed despite model verification marker: %v\n%s", err, out)
+	}
+	body := string(out)
+	for _, want := range []string{
+		"[OK] OMP model smoke test passed",
+		"verify after model",
+		"public install smoke completed",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("smoke output missing %q\n--- output ---\n%s", want, body)
+		}
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "--verify-model\n") {
+		t.Fatalf("smoke installer args missing --verify-model\n--- args ---\n%s", args)
+	}
+}
+
 func TestPublicInstallSmokeScriptCanFetchThroughGitHubContentsAPI(t *testing.T) {
 	home := t.TempDir()
 	installDir := filepath.Join(home, "bin")

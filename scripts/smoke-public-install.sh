@@ -115,6 +115,9 @@ cat "$log_file"
 if [[ "$install_status" -ne 0 ]]; then
   fail "public install command failed with exit ${install_status}"
 fi
+if [[ "$VERIFY_MODEL" != "0" ]] && ! grep -Fq '[OK] OMP model smoke test passed' "$log_file"; then
+  fail "model verification was requested, but setup did not report a passed OMP smoke test"
+fi
 ok "installer output did not contain sensitive environment values"
 
 printf '[INFO] Verifying install state from %s\n' "$VERIFY_URL"
