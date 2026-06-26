@@ -1076,6 +1076,10 @@ func TestInstallStateVerifierScansWithoutPrintingSecretValues(t *testing.T) {
 		"dist/extensions/index.js",
 		"$data_dir/gk.db",
 		"$HOME/.omp",
+		`[[ -z "$base" || "${base:0:1}" != "/" ]]`,
+		"add_scan_dir",
+		`add_scan_dir "$(dirname "$gk_bin")"`,
+		`add_scan_dir "$(dirname "$omp_bin")"`,
 		"grep -lF -- \"$value\"",
 		"sensitive value from $name persisted in $hit",
 		"Summary:",
@@ -1150,6 +1154,7 @@ func TestInstallStateVerifierPrintsSummaryWithoutSecretValues(t *testing.T) {
 		"Espalier package manifest: " + filepath.Join(espalier, "package.json"),
 		"Groundskeeper DB: " + filepath.Join(data, "groundskeeper", "gk.db"),
 		"Secret scan roots:",
+		bin,
 		"Next commands:",
 		"groundskeeper gk-daemon --model test/model --slots 2 --espalier-path",
 		"Install-state verification passed.",
@@ -1219,6 +1224,66 @@ func TestInstallStateVerifierScansBinaryStateFiles(t *testing.T) {
 		t.Fatalf("verify output missing binary persistence failure\n--- output ---\n%s", body)
 	}
 	if strings.Contains(body, "binary-state-sentinel-value") {
+		t.Fatalf("verify output printed a secret value\n--- output ---\n%s", body)
+	}
+}
+
+func TestInstallStateVerifierScansInstallDirs(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, "bin")
+	data := filepath.Join(home, "data")
+	config := filepath.Join(home, "config")
+	cache := filepath.Join(home, "cache")
+	espalier := filepath.Join(data, "groundskeeper", "espalier")
+	secretName := "INSTALL_SCAN_" + "API" + "_KEY"
+	secretValue := "install-dir-secret-value"
+	for _, dir := range []string{
+		bin,
+		filepath.Join(data, "groundskeeper"),
+		filepath.Join(config, "groundskeeper"),
+		filepath.Join(cache, "groundskeeper"),
+		filepath.Join(espalier, "node_modules"),
+		filepath.Join(espalier, "dist", "extensions"),
+		filepath.Join(home, ".omp"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(bin, "groundskeeper"), []byte("#!/usr/bin/env sh\n# "+secretValue+"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "omp"), []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, body := range map[string][]byte{
+		filepath.Join(data, "groundskeeper", "gk.db"):             []byte("db"),
+		filepath.Join(espalier, "package.json"):                   []byte(`{"name":"espalier"}` + "\n"),
+		filepath.Join(espalier, "dist", "extensions", "index.js"): []byte("export default {}\n"),
+	} {
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cmd := exec.Command("bash", "../../scripts/verify-install-state.sh")
+	cmd.Env = []string{
+		"HOME=" + home,
+		"PATH=" + bin + string(os.PathListSeparator) + "/usr/bin:/bin:/usr/sbin:/sbin",
+		"XDG_DATA_HOME=" + data,
+		"XDG_CONFIG_HOME=" + config,
+		"XDG_CACHE_HOME=" + cache,
+		secretName + "=" + secretValue,
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("verify-install-state.sh unexpectedly passed with secret persisted in install dir\n%s", out)
+	}
+	body := string(out)
+	if !strings.Contains(body, "sensitive value from "+secretName+" persisted in "+filepath.Join(bin, "groundskeeper")) {
+		t.Fatalf("verify output missing install-dir persistence failure\n--- output ---\n%s", body)
+	}
+	if strings.Contains(body, secretValue) {
 		t.Fatalf("verify output printed a secret value\n--- output ---\n%s", body)
 	}
 }

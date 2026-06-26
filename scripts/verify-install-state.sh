@@ -25,7 +25,7 @@ xdg_dir() {
   local env_name="$1"
   local fallback="$2"
   local base="${!env_name:-}"
-  if [[ -z "$base" ]]; then
+  if [[ -z "$base" || "${base:0:1}" != "/" ]]; then
     base="$HOME/$fallback"
   fi
   printf '%s/groundskeeper\n' "$base"
@@ -107,6 +107,19 @@ scan_secret_values() {
       ok "secret persistence scan passed across ${#dirs[@]} dirs"
     fi
   fi
+}
+
+add_scan_dir() {
+  local dir="$1"
+  [[ -n "$dir" && -e "$dir" ]] || return 0
+  case "$dir" in
+    /bin|/sbin|/usr/bin|/usr/sbin) return 0 ;;
+  esac
+  local existing
+  for existing in "${scan_dirs[@]}"; do
+    [[ "$existing" == "$dir" ]] && return 0
+  done
+  scan_dirs+=("$dir")
 }
 
 summary_model() {
@@ -207,6 +220,12 @@ scan_dirs=(
   "$ESPALIER_ROOT"
   "$HOME/.omp"
 )
+if [[ -n "$gk_bin" ]]; then
+  add_scan_dir "$(dirname "$gk_bin")"
+fi
+if [[ -n "$omp_bin" ]]; then
+  add_scan_dir "$(dirname "$omp_bin")"
+fi
 scan_secret_values \
   "${scan_dirs[@]}"
 
