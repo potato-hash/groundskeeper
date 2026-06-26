@@ -1290,6 +1290,95 @@ func TestRedactedCommandOutputHidesProviderKeys(t *testing.T) {
 	}
 }
 
+func TestVerifyOmpModelRefreshesAndPrompts(t *testing.T) {
+	ompPath, callLog := writeOmpModelStub(t, `#!/usr/bin/env sh
+printf '%s\n' "$*" >> "$GK_OMP_CALL_LOG"
+if [ "$1" = "models" ] && [ "$2" = "refresh" ]; then
+  [ "$(printenv "$GK_EXPECTED_CRED_ENV")" = "$GK_EXPECTED_CRED_VALUE" ] || exit 41
+  exit 0
+fi
+if [ "$1" = "--model" ] && [ "$2" = "test-provider/model" ] && [ "$3" = "--no-session" ] && [ "$4" = "--max-time=60" ] && [ "$5" = "-p" ]; then
+  printf 'GK_OK\n'
+  exit 0
+fi
+exit 42
+`)
+	configureVerifyOmpModelEnv(t, callLog, "test-provider/model", "verify-model-sentinel")
+
+	if err := verifyOmpModel(ompPath, "test-provider/model"); err != nil {
+		t.Fatalf("verifyOmpModel failed: %v", err)
+	}
+	calls, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(calls)
+	for _, want := range []string{
+		"models refresh\n",
+		"--model test-provider/model --no-session --max-time=60 -p Reply exactly: GK_OK\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("verifyOmpModel call log missing %q\n--- calls ---\n%s", want, body)
+		}
+	}
+}
+
+func TestVerifyOmpModelRedactsRefreshFailure(t *testing.T) {
+	ompPath, callLog := writeOmpModelStub(t, `#!/usr/bin/env sh
+printf '%s\n' "$*" >> "$GK_OMP_CALL_LOG"
+if [ "$1" = "models" ] && [ "$2" = "refresh" ]; then
+  printf 'refresh failed with %s\n' "$(printenv "$GK_EXPECTED_CRED_ENV")"
+  exit 17
+fi
+exit 42
+`)
+	value := "refresh-failure-sentinel"
+	configureVerifyOmpModelEnv(t, callLog, "test-provider/model", value)
+
+	err := verifyOmpModel(ompPath, "test-provider/model")
+	if err == nil {
+		t.Fatal("verifyOmpModel unexpectedly passed")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "refresh OMP model catalog") {
+		t.Fatalf("verifyOmpModel error missing refresh context: %q", msg)
+	}
+	if strings.Contains(msg, value) {
+		t.Fatalf("verifyOmpModel leaked credential value: %q", msg)
+	}
+	if !strings.Contains(msg, "[REDACTED]") {
+		t.Fatalf("verifyOmpModel error missing redaction marker: %q", msg)
+	}
+}
+
+func TestVerifyOmpModelRedactsUnexpectedResponse(t *testing.T) {
+	ompPath, callLog := writeOmpModelStub(t, `#!/usr/bin/env sh
+printf '%s\n' "$*" >> "$GK_OMP_CALL_LOG"
+if [ "$1" = "models" ] && [ "$2" = "refresh" ]; then
+  exit 0
+fi
+printf 'unexpected response with %s\n' "$(printenv "$GK_EXPECTED_CRED_ENV")"
+exit 0
+`)
+	value := "unexpected-response-sentinel"
+	configureVerifyOmpModelEnv(t, callLog, "test-provider/model", value)
+
+	err := verifyOmpModel(ompPath, "test-provider/model")
+	if err == nil {
+		t.Fatal("verifyOmpModel unexpectedly passed")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "unexpected OMP smoke response") {
+		t.Fatalf("verifyOmpModel error missing unexpected-response context: %q", msg)
+	}
+	if strings.Contains(msg, value) {
+		t.Fatalf("verifyOmpModel leaked credential value: %q", msg)
+	}
+	if !strings.Contains(msg, "[REDACTED]") {
+		t.Fatalf("verifyOmpModel error missing redaction marker: %q", msg)
+	}
+}
+
 func TestBuildEspalierRedactsStreamingSubprocessOutput(t *testing.T) {
 	espalier := t.TempDir()
 	if err := os.WriteFile(filepath.Join(espalier, "package.json"), []byte(`{"name":"espalier"}`+"\n"), 0o644); err != nil {
@@ -1364,6 +1453,29 @@ func containsEnv(env []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func writeOmpModelStub(t *testing.T, body string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "omp")
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path, filepath.Join(dir, "calls.log")
+}
+
+func configureVerifyOmpModelEnv(t *testing.T, callLog, model, value string) {
+	t.Helper()
+	names := providerCredentialEnvNames(model)
+	if len(names) == 0 {
+		t.Fatalf("model %q produced no credential env names", model)
+	}
+	name := names[0]
+	t.Setenv(name, value)
+	t.Setenv("GK_OMP_CALL_LOG", callLog)
+	t.Setenv("GK_EXPECTED_CRED_ENV", name)
+	t.Setenv("GK_EXPECTED_CRED_VALUE", value)
 }
 
 func prependStubOMP(t *testing.T) {
