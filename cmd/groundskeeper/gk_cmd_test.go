@@ -635,6 +635,8 @@ func TestSetupHelpMatchesHermesPolishSurface(t *testing.T) {
 		`Options:`,
 		`Examples:`,
 		`groundskeeper setup --non-interactive --install-missing --model ollama-cloud/glm-5.2 --verify-model`,
+		`--memory-backend string`,
+		`--hindsight-url string`,
 	} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("setup help missing Hermes-polish copy %q", want)
@@ -657,10 +659,14 @@ func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 		"--run-setup",
 		"--skip-setup",
 		"--model <model>",
+		"--memory-backend <name>",
+		"--hindsight-url <url>",
 		"--verify-model",
 		"maybe_run_first_run_setup",
 		"Run first-run setup now? [Y/n]",
 		"setup_args+=(--non-interactive --install-missing)",
+		`setup_args+=(--memory-backend "$SETUP_MEMORY_BACKEND")`,
+		`setup_args+=(--hindsight-url "$SETUP_HINDSIGHT_URL")`,
 		"</dev/tty",
 		"--non-interactive --install-missing",
 		`if [[ "$SETUP_MODE" == "run" ]]; then`,
@@ -946,6 +952,26 @@ case "$1" in
   version) printf 'groundskeeper test\n'; exit 0 ;;
   setup)
     command -v bun >/dev/null || { printf 'bun missing from setup PATH\n'; exit 43; }
+    saw_memory=false
+    saw_url=false
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --memory-backend)
+          [ "$2" = "hindsight" ] || { printf 'bad memory backend\n'; exit 44; }
+          saw_memory=true
+          shift 2
+          ;;
+        --hindsight-url)
+          [ "$2" = "http://hindsight.test:8888" ] || { printf 'bad hindsight URL\n'; exit 45; }
+          saw_url=true
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    [ "$saw_memory" = true ] && [ "$saw_url" = true ] || { printf 'memory flags missing\n'; exit 46; }
     bun --version
     printf 'setup saw bun\n'
     touch %q
@@ -967,7 +993,7 @@ exit 1
 		}
 	}
 
-	cmd := exec.Command(bashPath, "../../install.sh", "--non-interactive", "--run-setup", "--model", "test/provider")
+	cmd := exec.Command(bashPath, "../../install.sh", "--non-interactive", "--run-setup", "--model", "test/provider", "--memory-backend", "hindsight", "--hindsight-url", "http://hindsight.test:8888")
 	cmd.Env = []string{
 		"HOME=" + home,
 		"PATH=" + bin + string(os.PathListSeparator) + "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -2494,7 +2520,7 @@ func TestWriteRecommendedOmpConfigCreatesGlobalConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	path, backup, changed, err := writeRecommendedOmpConfig("test/provider")
+	path, backup, changed, err := writeRecommendedOmpConfig("test/provider", "mnemopi", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2523,6 +2549,39 @@ func TestWriteRecommendedOmpConfigCreatesGlobalConfig(t *testing.T) {
 	}
 }
 
+func TestWriteRecommendedOmpConfigWritesHindsight(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	path, backup, changed, err := writeRecommendedOmpConfig("test/provider", "hindsight", "http://hindsight.test:8888")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("writeRecommendedOmpConfig reported unchanged on fresh config")
+	}
+	if backup != "" {
+		t.Fatalf("fresh config backup = %q, want empty", backup)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["memory"].(map[string]any)["backend"] != "hindsight" {
+		t.Fatalf("memory.backend = %#v", cfg["memory"])
+	}
+	if cfg["hindsight"].(map[string]any)["baseURL"] != "http://hindsight.test:8888" {
+		t.Fatalf("hindsight defaults missing: %#v", cfg["hindsight"])
+	}
+	if _, ok := cfg["mnemopi"]; ok {
+		t.Fatalf("hindsight config should not add mnemopi defaults: %#v", cfg["mnemopi"])
+	}
+}
+
 func TestWriteRecommendedOmpConfigMergesWithoutOverwriting(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -2535,7 +2594,7 @@ func TestWriteRecommendedOmpConfigMergesWithoutOverwriting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, backup, changed, err := writeRecommendedOmpConfig("test/provider")
+	_, backup, changed, err := writeRecommendedOmpConfig("test/provider", "mnemopi", "")
 	if err != nil {
 		t.Fatal(err)
 	}

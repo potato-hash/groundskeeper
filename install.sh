@@ -18,6 +18,8 @@
 #   --run-setup         Run `groundskeeper setup` after installing (no prompt)
 #   --skip-setup        Do not offer the first-run setup wizard
 #   --model <model>     Model to pass to first-run setup
+#   --memory-backend <name> Memory backend for setup: mnemopi or hindsight
+#   --hindsight-url <url> Hindsight base URL for setup
 #   --verify-model      Verify model access during first-run setup
 #   --install-cua-driver Install Cua Driver for computer-use support
 #   --non-interactive   Skip all prompts (for CI/automated installs)
@@ -133,6 +135,8 @@ SETUP_MODE="prompt"  # prompt, run, or skip
 RUN_SETUP_REQUESTED=false
 SKIP_SETUP_REQUESTED=false
 SETUP_MODEL=""
+SETUP_MEMORY_BACKEND=""
+SETUP_HINDSIGHT_URL=""
 VERIFY_MODEL=false
 LATEST_RELEASE_CHECKED=false
 LATEST_RELEASE_TAG=""
@@ -175,6 +179,22 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             SETUP_MODEL="$2"
+            shift 2
+            ;;
+        --memory-backend)
+            if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then
+                echo -e "${RED}Error: --memory-backend requires a value (mnemopi or hindsight)${NC}"
+                exit 1
+            fi
+            SETUP_MEMORY_BACKEND="$2"
+            shift 2
+            ;;
+        --hindsight-url)
+            if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then
+                echo -e "${RED}Error: --hindsight-url requires a value${NC}"
+                exit 1
+            fi
+            SETUP_HINDSIGHT_URL="$2"
             shift 2
             ;;
         --verify-model)
@@ -223,6 +243,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --run-setup         Run 'groundskeeper setup' after installing (no prompt)"
             echo "  --skip-setup        Do not offer the first-run setup wizard"
             echo "  --model <model>     Model to pass to first-run setup"
+            echo "  --memory-backend <name> Memory backend for setup: mnemopi or hindsight"
+            echo "  --hindsight-url <url> Hindsight base URL for setup"
             echo "  --verify-model      Verify model access during first-run setup"
             echo "  --install-cua-driver Install Cua Driver for computer-use support"
             echo "  --non-interactive   Skip all prompts (for CI/automated installs)"
@@ -1164,6 +1186,12 @@ run_first_run_setup() {
     local setup_args=()
     if [[ -n "$SETUP_MODEL" ]]; then
         setup_args+=(--model "$SETUP_MODEL")
+    fi
+    if [[ -n "$SETUP_MEMORY_BACKEND" ]]; then
+        setup_args+=(--memory-backend "$SETUP_MEMORY_BACKEND")
+    fi
+    if [[ -n "$SETUP_HINDSIGHT_URL" ]]; then
+        setup_args+=(--hindsight-url "$SETUP_HINDSIGHT_URL")
     fi
     if [[ "$VERIFY_MODEL" == "true" ]]; then
         setup_args+=(--verify-model)

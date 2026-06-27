@@ -827,6 +827,8 @@ func handleSetup(args []string) {
 	nonInteractive := fs.Bool("non-interactive", false, "skip all prompts (for CI)")
 	installMissing := fs.Bool("install-missing", false, "install missing OMP and Espalier dependencies without prompting")
 	modelFlag := fs.String("model", "", "default OMP model for workers")
+	memoryBackendFlag := fs.String("memory-backend", "mnemopi", "memory backend for OMP recall: mnemopi or hindsight")
+	hindsightURLFlag := fs.String("hindsight-url", "http://tower:8888", "Hindsight base URL when --memory-backend hindsight")
 	espalierPathFlag := fs.String("espalier-path", "", "Espalier package directory or extension entrypoint")
 	verifyModelFlag := fs.Bool("verify-model", false, "run a small OMP model smoke test using configured credentials")
 	writeOmpConfigFlag := fs.Bool("write-omp-config", false, "write recommended global OMP config without prompting")
@@ -847,6 +849,10 @@ func handleSetup(args []string) {
 		fmt.Println("        Install missing OMP and Espalier dependencies without prompting.")
 		fmt.Println("  --model string")
 		fmt.Println("        Default OMP model for workers, e.g. ollama-cloud/glm-5.2.")
+		fmt.Println("  --memory-backend string")
+		fmt.Println("        Memory backend for OMP recall: mnemopi or hindsight. Default: mnemopi.")
+		fmt.Println("  --hindsight-url string")
+		fmt.Println("        Hindsight base URL when --memory-backend hindsight. Default: http://tower:8888.")
 		fmt.Println("  --espalier-path string")
 		fmt.Println("        Espalier package directory or extension entrypoint.")
 		fmt.Println("  --verify-model")
@@ -901,6 +907,7 @@ func handleSetup(args []string) {
 		fmt.Println("    groundskeeper setup --install-missing --model provider/model --espalier-path /path/to/espalier")
 		fmt.Println("    GK_ESPALIER_PATH=/path/to/espalier")
 		fmt.Println("    GK_OMP_MODEL=provider/model")
+		fmt.Println("    groundskeeper setup --memory-backend hindsight --hindsight-url http://tower:8888 --write-omp-config")
 		fmt.Println("    OLLAMA_CLOUD_API_KEY=<key> groundskeeper setup --verify-model")
 		fmt.Println("    groundskeeper setup --write-omp-config")
 		fmt.Println("    groundskeeper gk-daemon --model provider/model --espalier-path /path/to/espalier")
@@ -1074,8 +1081,8 @@ func handleSetup(args []string) {
 	fmt.Println("  Tables: agent_threads, jobs, approvals, audit_events, loop_specs, loop_runs, dead_letters")
 	fmt.Println()
 
-	// ── Step 4: Model configuration ──
-	fmt.Println("── 4/5 · Model configuration ─────────────")
+	// ── Step 4: Model and memory configuration ──
+	fmt.Println("── 4/5 · Model and memory configuration ──")
 	fmt.Println()
 	model := *modelFlag
 	if model == "" {
@@ -1103,6 +1110,34 @@ func handleSetup(args []string) {
 	}
 	fmt.Printf("  [SET] model = %s\n", model)
 	fmt.Println("  Override per-run: gk-daemon --model <model>")
+	memoryBackend := strings.ToLower(strings.TrimSpace(*memoryBackendFlag))
+	if memoryBackend == "" {
+		memoryBackend = "mnemopi"
+	}
+	if inputMemoryBackend := prompt(fmt.Sprintf("  Memory backend (mnemopi/hindsight) [%s]:", memoryBackend)); inputMemoryBackend != "" {
+		memoryBackend = strings.ToLower(strings.TrimSpace(inputMemoryBackend))
+	}
+	if memoryBackend != "mnemopi" && memoryBackend != "hindsight" {
+		fmt.Fprintf(os.Stderr, "  [ERROR] memory backend must be mnemopi or hindsight, got %q\n", memoryBackend)
+		os.Exit(1)
+	}
+	hindsightURL := strings.TrimSpace(*hindsightURLFlag)
+	if hindsightURL == "" {
+		hindsightURL = "http://tower:8888"
+	}
+	if memoryBackend == "hindsight" {
+		if inputHindsightURL := prompt(fmt.Sprintf("  Hindsight base URL (press Enter for %s):", hindsightURL)); inputHindsightURL != "" {
+			hindsightURL = strings.TrimSpace(inputHindsightURL)
+		}
+		if hindsightURL == "" {
+			fmt.Fprintln(os.Stderr, "  [ERROR] hindsight URL cannot be empty")
+			os.Exit(1)
+		}
+	}
+	fmt.Printf("  [SET] memory backend = %s\n", memoryBackend)
+	if memoryBackend == "hindsight" {
+		fmt.Printf("  [SET] hindsight base URL = %s\n", hindsightURL)
+	}
 	if *verifyModelFlag {
 		if ompPath == "" {
 			fmt.Fprintln(os.Stderr, "  [ERROR] cannot verify model: omp is not installed")
@@ -1127,7 +1162,7 @@ func handleSetup(args []string) {
 		fmt.Println("  [SKIP] Global OMP config unchanged")
 	}
 	if writeOmpConfig {
-		path, backup, changed, err := writeRecommendedOmpConfig(model)
+		path, backup, changed, err := writeRecommendedOmpConfig(model, memoryBackend, hindsightURL)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  [ERROR] write OMP config: %v\n", err)
 			os.Exit(1)
@@ -1509,12 +1544,12 @@ func buildEspalier(path string) error {
 	return nil
 }
 
-func writeRecommendedOmpConfig(model string) (string, string, bool, error) {
+func writeRecommendedOmpConfig(model, memoryBackend, hindsightURL string) (string, string, bool, error) {
 	path := ompConfigPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return path, "", false, err
 	}
-	recommended := recommendedOmpConfig(model)
+	recommended := recommendedOmpConfig(model, memoryBackend, hindsightURL)
 	current := map[string]any{}
 	original, err := os.ReadFile(path)
 	var backup string
@@ -1553,19 +1588,27 @@ func ompConfigPath() string {
 	return filepath.Join(os.Getenv("HOME"), ".omp", "agent", "config.yml")
 }
 
-func recommendedOmpConfig(model string) map[string]any {
+func recommendedOmpConfig(model, memoryBackend, hindsightURL string) map[string]any {
 	cfg := map[string]any{
-		"memory": map[string]any{"backend": "mnemopi"},
-		"mnemopi": map[string]any{
+		"tools":      map[string]any{"approvalMode": "write"},
+		"advisor":    map[string]any{"enabled": true},
+		"compaction": map[string]any{"enabled": true, "reserveTokens": 8000},
+	}
+	if memoryBackend == "hindsight" {
+		if strings.TrimSpace(hindsightURL) == "" {
+			hindsightURL = "http://tower:8888"
+		}
+		cfg["memory"] = map[string]any{"backend": "hindsight"}
+		cfg["hindsight"] = map[string]any{"baseURL": hindsightURL}
+	} else {
+		cfg["memory"] = map[string]any{"backend": "mnemopi"}
+		cfg["mnemopi"] = map[string]any{
 			"scoping":           "per-project",
 			"noEmbeddings":      true,
 			"autoRecall":        true,
 			"autoRetain":        true,
 			"retainEveryNTurns": 4,
-		},
-		"tools":      map[string]any{"approvalMode": "write"},
-		"advisor":    map[string]any{"enabled": true},
-		"compaction": map[string]any{"enabled": true, "reserveTokens": 8000},
+		}
 	}
 	if model != "" {
 		cfg["modelRoles"] = map[string]any{"default": model}
