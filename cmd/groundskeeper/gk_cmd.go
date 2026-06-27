@@ -848,7 +848,7 @@ func handleSetup(args []string) {
 		fmt.Println("  --install-missing")
 		fmt.Println("        Install missing OMP and Espalier dependencies without prompting.")
 		fmt.Println("  --model string")
-		fmt.Println("        Default OMP model for workers, e.g. ollama-cloud/glm-5.2.")
+		fmt.Println("        Default OMP model for workers, e.g. openai-codex/gpt-5.5:xhigh.")
 		fmt.Println("  --memory-backend string")
 		fmt.Println("        Memory backend for OMP recall: mnemopi or hindsight. Default: mnemopi.")
 		fmt.Println("  --hindsight-url string")
@@ -1089,7 +1089,7 @@ func handleSetup(args []string) {
 		model = os.Getenv("GK_OMP_MODEL")
 	}
 	if model == "" {
-		model = "ollama-cloud/glm-5.2"
+		model = "openai-codex/gpt-5.5:xhigh"
 	}
 	if ompPath != "" {
 		credPath := filepath.Join(os.Getenv("HOME"), ".omp", "agent", "agent.db")
@@ -1590,9 +1590,22 @@ func ompConfigPath() string {
 
 func recommendedOmpConfig(model, memoryBackend, hindsightURL string) map[string]any {
 	cfg := map[string]any{
-		"tools":      map[string]any{"approvalMode": "write"},
-		"advisor":    map[string]any{"enabled": true},
-		"compaction": map[string]any{"enabled": true, "reserveTokens": 8000},
+		"providers":       map[string]any{"webSearch": "codex"},
+		"setupVersion":    1,
+		"tui":             map[string]any{"textSizing": true},
+		"loop":            map[string]any{"mode": "prompt"},
+		"autoResume":      true,
+		"lsp":             map[string]any{"formatOnWrite": true, "diagnosticsOnEdit": true},
+		"bash":            map[string]any{"autoBackground": map[string]any{"enabled": true}},
+		"bashInterceptor": map[string]any{"enabled": true},
+		"checkpoint":      map[string]any{"enabled": true},
+		"vault":           map[string]any{"enabled": true},
+		"github":          map[string]any{"enabled": true},
+		"plan":            map[string]any{"defaultOnStartup": true},
+		"task":            map[string]any{"eager": "always", "enableLsp": true, "maxRecursionDepth": 3, "isolation": map[string]any{"mode": "auto", "merge": "patch"}},
+		"tools":           map[string]any{"approvalMode": "write"},
+		"advisor":         map[string]any{"enabled": true},
+		"compaction":      map[string]any{"enabled": true, "reserveTokens": 8000},
 	}
 	if memoryBackend == "hindsight" {
 		if strings.TrimSpace(hindsightURL) == "" {

@@ -637,6 +637,7 @@ func TestSetupHelpMatchesHermesPolishSurface(t *testing.T) {
 		`groundskeeper setup --non-interactive --install-missing --model ollama-cloud/glm-5.2 --verify-model`,
 		`--memory-backend string`,
 		`--hindsight-url string`,
+		`openai-codex/gpt-5.5:xhigh`,
 	} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("setup help missing Hermes-polish copy %q", want)
@@ -2546,6 +2547,41 @@ func TestWriteRecommendedOmpConfigCreatesGlobalConfig(t *testing.T) {
 	}
 	if cfg["modelRoles"].(map[string]any)["default"] != "test/provider" {
 		t.Fatalf("modelRoles.default = %#v", cfg["modelRoles"])
+	}
+	for _, tt := range []struct {
+		path []string
+		want any
+	}{
+		{[]string{"providers", "webSearch"}, "codex"},
+		{[]string{"setupVersion"}, 1},
+		{[]string{"tui", "textSizing"}, true},
+		{[]string{"loop", "mode"}, "prompt"},
+		{[]string{"autoResume"}, true},
+		{[]string{"lsp", "formatOnWrite"}, true},
+		{[]string{"lsp", "diagnosticsOnEdit"}, true},
+		{[]string{"bash", "autoBackground", "enabled"}, true},
+		{[]string{"bashInterceptor", "enabled"}, true},
+		{[]string{"checkpoint", "enabled"}, true},
+		{[]string{"vault", "enabled"}, true},
+		{[]string{"github", "enabled"}, true},
+		{[]string{"plan", "defaultOnStartup"}, true},
+		{[]string{"task", "eager"}, "always"},
+		{[]string{"task", "enableLsp"}, true},
+		{[]string{"task", "maxRecursionDepth"}, 3},
+		{[]string{"task", "isolation", "mode"}, "auto"},
+		{[]string{"task", "isolation", "merge"}, "patch"},
+	} {
+		got := any(cfg)
+		for _, key := range tt.path {
+			next, ok := got.(map[string]any)
+			if !ok {
+				t.Fatalf("%s parent = %#v, want map", strings.Join(tt.path, "."), got)
+			}
+			got = next[key]
+		}
+		if got != tt.want {
+			t.Fatalf("%s = %#v, want %#v", strings.Join(tt.path, "."), got, tt.want)
+		}
 	}
 }
 
