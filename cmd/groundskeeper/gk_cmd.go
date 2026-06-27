@@ -1605,7 +1605,6 @@ func recommendedOmpConfig(model, memoryBackend, hindsightURL string) map[string]
 		"task":            map[string]any{"eager": "always", "enableLsp": true, "maxRecursionDepth": 3, "isolation": map[string]any{"mode": "auto", "merge": "patch"}},
 		"tools":           map[string]any{"approvalMode": "write"},
 		"advisor":         map[string]any{"enabled": true},
-		"compaction":      map[string]any{"enabled": true, "reserveTokens": 8000},
 	}
 	if memoryBackend == "hindsight" {
 		if strings.TrimSpace(hindsightURL) == "" {
