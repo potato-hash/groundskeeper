@@ -29,8 +29,28 @@ import (
 	"github.com/potato-hash/groundskeeper/internal/runtime"
 	"github.com/potato-hash/groundskeeper/internal/sidecar"
 	"github.com/potato-hash/groundskeeper/internal/worker"
+	bundledskills "github.com/potato-hash/groundskeeper/skills"
 	"gopkg.in/yaml.v3"
 )
+
+type setupSkill struct {
+	name    string
+	summary string
+}
+
+var recommendedSetupSkills = []setupSkill{
+	{"ponytail", "forces the simplest solution that actually works"},
+	{"skill-authoring", "creates concise SKILL.md files"},
+	{"skill-write-gate", "gates skill changes before activation"},
+	{"subagent-delegation", "coordinates delegated agent work"},
+	{"kanban-board", "tracks work visually with a Kanban board"},
+	{"lsp-diagnostics", "checks language-server diagnostics first"},
+	{"mcp-integration", "handles MCP and broker trust boundaries"},
+	{"programmatic-tool-calling", "uses tools from code when manual calls are too slow"},
+	{"context-references", "uses context references instead of guessing"},
+	{"cron-scheduled-runs", "handles scheduled agent runs"},
+	{"dangerous-command-approval", "requires human approval for destructive commands"},
+}
 
 // gkDBPath resolves the Groundskeeper durable DB location:
 // $XDG_DATA_HOME/groundskeeper/gk.db (fallback ~/.local/share/groundskeeper/gk.db).
@@ -832,6 +852,7 @@ func handleSetup(args []string) {
 	espalierPathFlag := fs.String("espalier-path", "", "Espalier package directory or extension entrypoint")
 	verifyModelFlag := fs.Bool("verify-model", false, "run a small OMP model smoke test using configured credentials")
 	writeOmpConfigFlag := fs.Bool("write-omp-config", false, "write recommended global OMP config without prompting")
+	recommendedSkillsFlag := fs.Bool("recommended-skills", false, "install recommended OMP skills during setup")
 	fs.Usage = func() {
 		fmt.Println("Usage: groundskeeper setup [options]")
 		fmt.Println()
@@ -859,6 +880,8 @@ func handleSetup(args []string) {
 		fmt.Println("        Run a small OMP model smoke test using configured credentials.")
 		fmt.Println("  --write-omp-config")
 		fmt.Println("        Write recommended global OMP config without prompting.")
+		fmt.Println("  --recommended-skills")
+		fmt.Println("        Install recommended OMP skills (ponytail, skill-authoring, etc.).")
 		fmt.Println()
 		fmt.Println("Examples:")
 		fmt.Println("  groundskeeper setup")
@@ -883,6 +906,13 @@ func handleSetup(args []string) {
 		}
 		answer := strings.ToLower(prompt(question + " [y/N]"))
 		return answer == "y" || answer == "yes"
+	}
+	confirmYes := func(question string) bool {
+		if *nonInteractive {
+			return false
+		}
+		answer := strings.ToLower(prompt(question + " [Y/n]"))
+		return answer == "" || answer == "y" || answer == "yes"
 	}
 	var setupProblems []string
 	addSetupProblem := func(problem, next string) {
@@ -1174,6 +1204,30 @@ func handleSetup(args []string) {
 			}
 		} else {
 			fmt.Printf("  [OK] OMP config already has recommended defaults: %s\n", path)
+		}
+	}
+	installSkills := *recommendedSkillsFlag
+	if !*nonInteractive {
+		fmt.Println()
+		fmt.Println("── Recommended OMP skills ────────────────")
+		fmt.Println()
+		fmt.Println("  Groundskeeper bundles these optional skills:")
+		for _, skill := range recommendedSetupSkills {
+			fmt.Printf("    %s — %s\n", skill.name, skill.summary)
+		}
+		fmt.Println()
+		if confirmYes("  Install recommended OMP skills?") {
+			installSkills = true
+		} else {
+			fmt.Println("  [SKIP] Recommended OMP skills unchanged")
+		}
+	} else if !installSkills {
+		fmt.Println("  [SKIP] Recommended OMP skills skipped in non-interactive mode")
+	}
+	if installSkills {
+		if err := installRecommendedOmpSkills(); err != nil {
+			fmt.Fprintf(os.Stderr, "  [ERROR] install recommended OMP skills: %v\n", err)
+			os.Exit(1)
 		}
 	}
 	fmt.Println()
@@ -1541,6 +1595,40 @@ func buildEspalier(path string) error {
 	if info, err := os.Stat(entrypoint); err != nil || info.IsDir() {
 		return fmt.Errorf("Espalier build did not create extension entrypoint: %s", entrypoint)
 	}
+	return nil
+}
+
+func installRecommendedOmpSkills() error {
+	dstRoot := filepath.Join(os.Getenv("HOME"), ".omp", "agent", "managed-skills")
+	if err := os.MkdirAll(dstRoot, 0o700); err != nil {
+		return err
+	}
+	installed := 0
+	skipped := 0
+	for _, skill := range recommendedSetupSkills {
+		dstDir := filepath.Join(dstRoot, skill.name)
+		dstFile := filepath.Join(dstDir, "SKILL.md")
+		if _, err := os.Stat(dstFile); err == nil {
+			fmt.Printf("  [SKIP] %s already installed\n", skill.name)
+			skipped++
+			continue
+		} else if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("check %s: %w", skill.name, err)
+		}
+		body, err := bundledskills.FS.ReadFile(filepath.Join(skill.name, "SKILL.md"))
+		if err != nil {
+			return fmt.Errorf("read bundled %s: %w", skill.name, err)
+		}
+		if err := os.MkdirAll(dstDir, 0o700); err != nil {
+			return fmt.Errorf("create %s: %w", skill.name, err)
+		}
+		if err := atomicWriteFile(dstFile, body, 0o600); err != nil {
+			return fmt.Errorf("write %s: %w", skill.name, err)
+		}
+		fmt.Printf("  [OK] %s installed\n", skill.name)
+		installed++
+	}
+	fmt.Printf("  Skills: %d installed, %d already present\n", installed, skipped)
 	return nil
 }
 

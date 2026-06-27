@@ -637,6 +637,7 @@ func TestSetupHelpMatchesHermesPolishSurface(t *testing.T) {
 		`groundskeeper setup --non-interactive --install-missing --model ollama-cloud/glm-5.2 --verify-model`,
 		`--memory-backend string`,
 		`--hindsight-url string`,
+		`--recommended-skills`,
 		`openai-codex/gpt-5.5:xhigh`,
 	} {
 		if !strings.Contains(src, want) {
@@ -662,12 +663,14 @@ func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 		"--model <model>",
 		"--memory-backend <name>",
 		"--hindsight-url <url>",
+		"--recommended-skills",
 		"--verify-model",
 		"maybe_run_first_run_setup",
 		"Run first-run setup now? [Y/n]",
 		"setup_args+=(--non-interactive --install-missing)",
 		`setup_args+=(--memory-backend "$SETUP_MEMORY_BACKEND")`,
 		`setup_args+=(--hindsight-url "$SETUP_HINDSIGHT_URL")`,
+		`setup_args+=(--recommended-skills)`,
 		"</dev/tty",
 		"--non-interactive --install-missing",
 		`if [[ "$SETUP_MODE" == "run" ]]; then`,

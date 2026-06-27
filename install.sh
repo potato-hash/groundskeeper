@@ -20,6 +20,7 @@
 #   --model <model>     Model to pass to first-run setup
 #   --memory-backend <name> Memory backend for setup: mnemopi or hindsight
 #   --hindsight-url <url> Hindsight base URL for setup
+#   --recommended-skills Install recommended OMP skills during first-run setup
 #   --verify-model      Verify model access during first-run setup
 #   --install-cua-driver Install Cua Driver for computer-use support
 #   --non-interactive   Skip all prompts (for CI/automated installs)
@@ -137,6 +138,7 @@ SKIP_SETUP_REQUESTED=false
 SETUP_MODEL=""
 SETUP_MEMORY_BACKEND=""
 SETUP_HINDSIGHT_URL=""
+SETUP_RECOMMENDED_SKILLS=false
 VERIFY_MODEL=false
 LATEST_RELEASE_CHECKED=false
 LATEST_RELEASE_TAG=""
@@ -197,6 +199,10 @@ while [[ $# -gt 0 ]]; do
             SETUP_HINDSIGHT_URL="$2"
             shift 2
             ;;
+        --recommended-skills)
+            SETUP_RECOMMENDED_SKILLS=true
+            shift
+            ;;
         --verify-model)
             VERIFY_MODEL=true
             shift
@@ -245,6 +251,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --model <model>     Model to pass to first-run setup"
             echo "  --memory-backend <name> Memory backend for setup: mnemopi or hindsight"
             echo "  --hindsight-url <url> Hindsight base URL for setup"
+            echo "  --recommended-skills Install recommended OMP skills during first-run setup"
             echo "  --verify-model      Verify model access during first-run setup"
             echo "  --install-cua-driver Install Cua Driver for computer-use support"
             echo "  --non-interactive   Skip all prompts (for CI/automated installs)"
@@ -1192,6 +1199,9 @@ run_first_run_setup() {
     fi
     if [[ -n "$SETUP_HINDSIGHT_URL" ]]; then
         setup_args+=(--hindsight-url "$SETUP_HINDSIGHT_URL")
+    fi
+    if [[ "$SETUP_RECOMMENDED_SKILLS" == "true" ]]; then
+        setup_args+=(--recommended-skills)
     fi
     if [[ "$VERIFY_MODEL" == "true" ]]; then
         setup_args+=(--verify-model)

@@ -16,7 +16,18 @@
       "strict": false,
       "skills": [
         "./skills/agent-deck",
-        "./skills/session-share"
+        "./skills/session-share",
+        "./skills/ponytail",
+        "./skills/skill-authoring",
+        "./skills/skill-write-gate",
+        "./skills/subagent-delegation",
+        "./skills/kanban-board",
+        "./skills/lsp-diagnostics",
+        "./skills/mcp-integration",
+        "./skills/programmatic-tool-calling",
+        "./skills/context-references",
+        "./skills/cron-scheduled-runs",
+        "./skills/dangerous-command-approval"
       ]
     }
   ]
