@@ -683,6 +683,33 @@ func TestInstallScriptOffersFirstRunSetup(t *testing.T) {
 	}
 }
 
+func TestInstallScriptSupportsOptInCuaDriverInstall(t *testing.T) {
+	cmd := exec.Command("bash", "-n", "../../install.sh")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install.sh has invalid syntax: %v\n%s", err, out)
+	}
+
+	body, err := os.ReadFile("../../install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+	for _, want := range []string{
+		"--install-cua-driver",
+		"INSTALL_CUA_DRIVER=false",
+		"INSTALL_CUA_DRIVER=true",
+		"find_cua_driver()",
+		"install_cua_driver()",
+		"run_without_sensitive_env bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh | bash -s -- --bin-dir \"$1\"'",
+		"irm https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.ps1 | iex",
+		"○ cua-driver (optional computer-use driver; install with --install-cua-driver)",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("install.sh missing Cua Driver install support %q", want)
+		}
+	}
+}
+
 func TestInstallScriptDoesNotRunOmpVersionInDependencySummary(t *testing.T) {
 	body, err := os.ReadFile("../../install.sh")
 	if err != nil {

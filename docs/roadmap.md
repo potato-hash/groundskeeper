@@ -80,4 +80,5 @@ pending — they are not in this slice.
 
 - **OMP live smoke** — Phase 4 ✓. Real omp worker completes a turn end-to-end (build tag `omp_live`).
 - **Agent Deck TUI integration** — Phase 6 ✓. Fleet view renders in the `gk-fleet-tui` bubbletea program + `fleet` CLI. NOT yet wired into Agent Deck's existing Home tab bar (a larger refactor, deferred).
+- **Native Windows installer + Cua Driver path** — current installer is bash for macOS/Linux/WSL. Add a PowerShell installer and Windows-side Cua Driver install flow when Groundskeeper supports native Windows installs.
 - **Full 1664-file test suite** — CI gate, not the slice. Slice runs the gkdb/runtime/statedb subset.

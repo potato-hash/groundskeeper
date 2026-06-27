@@ -52,6 +52,13 @@ curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/inst
   bash -s -- --non-interactive --run-setup --model ollama-cloud/glm-5.2 --verify-model
 ```
 
+Add Cua Driver for computer-use support:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/potato-hash/groundskeeper/main/install.sh |
+  bash -s -- --non-interactive --skip-setup --install-cua-driver
+```
+
 If `raw.githubusercontent.com` is behind `main` during install testing, use the
 GitHub Contents API raw endpoint:
 

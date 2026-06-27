@@ -19,6 +19,7 @@
 #   --skip-setup        Do not offer the first-run setup wizard
 #   --model <model>     Model to pass to first-run setup
 #   --verify-model      Verify model access during first-run setup
+#   --install-cua-driver Install Cua Driver for computer-use support
 #   --non-interactive   Skip all prompts (for CI/automated installs)
 #   --pkg-manager <mgr> macOS package manager: 'brew' or 'port' (default: auto-detect)
 #
@@ -29,6 +30,7 @@
 #   4. Configure ~/.tmux.conf for mouse scrolling & clipboard - Optional
 #   5. Report stack prerequisites (git, bun, jj, omp)
 #   6. Offer the first-run stack setup wizard (OMP + Espalier + model)
+#   7. Install Cua Driver when explicitly requested
 # Supported platforms:
 #   - macOS (darwin) - arm64 (Apple Silicon), amd64 (Intel)
 #   - Linux - arm64, amd64
@@ -125,6 +127,7 @@ VERSION="latest"
 REPO="potato-hash/groundskeeper"
 SKIP_TMUX_CONFIG=false
 SKIP_OPTIONAL_DEPS=false
+INSTALL_CUA_DRIVER=false
 
 SETUP_MODE="prompt"  # prompt, run, or skip
 RUN_SETUP_REQUESTED=false
@@ -178,6 +181,10 @@ while [[ $# -gt 0 ]]; do
             VERIFY_MODEL=true
             shift
             ;;
+        --install-cua-driver)
+            INSTALL_CUA_DRIVER=true
+            shift
+            ;;
         --non-interactive)
             SKIP_TMUX_CONFIG=true
             SKIP_OPTIONAL_DEPS=true
@@ -217,6 +224,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip-setup        Do not offer the first-run setup wizard"
             echo "  --model <model>     Model to pass to first-run setup"
             echo "  --verify-model      Verify model access during first-run setup"
+            echo "  --install-cua-driver Install Cua Driver for computer-use support"
             echo "  --non-interactive   Skip all prompts (for CI/automated installs)"
             echo "  --pkg-manager <mgr> macOS package manager: ${MACOS_SUPPORTED_PKG_MGRS[*]} (default: auto-detect)"
             echo "  -h, --help          Show this help message"
@@ -1064,6 +1072,67 @@ run_without_sensitive_env() {
     env "${env_args[@]}" "$@"
 }
 
+find_cua_driver() {
+    if command -v cua-driver >/dev/null 2>&1; then
+        command -v cua-driver
+        return 0
+    fi
+    if [[ -x "$INSTALL_DIR/cua-driver" ]]; then
+        echo "$INSTALL_DIR/cua-driver"
+        return 0
+    fi
+    if [[ -x "$HOME/.local/bin/cua-driver" ]]; then
+        echo "$HOME/.local/bin/cua-driver"
+        return 0
+    fi
+    return 1
+}
+
+install_cua_driver() {
+    local cua_path
+    if cua_path="$(find_cua_driver)"; then
+        echo -e "${GREEN}Cua Driver already available at $cua_path${NC}"
+        return 0
+    fi
+
+    if [[ "$IS_WSL" == "true" ]]; then
+        echo -e "${YELLOW}Cua Driver on Windows/WSL is on the Groundskeeper roadmap.${NC}"
+        echo "For now, install the Windows driver from PowerShell:"
+        echo "  irm https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.ps1 | iex"
+        return 1
+    fi
+
+    case "$OS" in
+        darwin|linux) ;;
+        *)
+            echo -e "${YELLOW}Cua Driver install is supported here only on macOS/Linux.${NC}"
+            return 1
+            ;;
+    esac
+
+    echo "Installing Cua Driver for computer-use support..."
+    if ! run_without_sensitive_env bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh | bash -s -- --bin-dir "$1"' _ "$INSTALL_DIR"; then
+        echo -e "${RED}Error: Cua Driver install failed.${NC}"
+        echo "Install manually: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh)\""
+        return 1
+    fi
+
+    if cua_path="$(find_cua_driver)"; then
+        echo -e "${GREEN}Cua Driver available at $cua_path${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}Error: Cua Driver installer completed but cua-driver is not discoverable.${NC}"
+    echo "Add $INSTALL_DIR to PATH or rerun with --dir ~/.local/bin."
+    return 1
+}
+
+if [[ "$INSTALL_CUA_DRIVER" == "true" ]]; then
+    if ! install_cua_driver; then
+        exit 1
+    fi
+fi
+
 ensure_bun_for_first_run_setup() {
     local bun_path
     if bun_path="$(find_bun)"; then
@@ -1197,6 +1266,11 @@ if env GROUNDSKEEPER_SUPPRESS_TMUX_WARNING=1 AGENTDECK_SUPPRESS_TMUX_WARNING=1 "
         echo -e "  ✓ omp found"
     else
         echo -e "  ${YELLOW}○ omp (installed by first-run setup if requested)${NC}"
+    fi
+    if CUA_PATH="$(find_cua_driver)"; then
+        echo -e "  ✓ cua-driver $CUA_PATH"
+    else
+        echo -e "  ${YELLOW}○ cua-driver (optional computer-use driver; install with --install-cua-driver)${NC}"
     fi
     echo ""
 
